@@ -1,0 +1,36 @@
+{
+  "name": "8k",
+  "version": "1.0.0",
+  "description": "30-Day 25% Trading Challenge Bot for Telegram",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "trading",
+    "meme-tokens",
+    "cryptocurrency",
+    "pumpfun",
+    "solana"
+  ],
+  "author": "Emmanuel Chibuike",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/spl-token": "^0.3.9",
+    "@solana/web3.js": "^1.87.6",
+    "axios": "^1.6.0",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.5.0",
+    "node-telegram-bot-api": "^0.61.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
