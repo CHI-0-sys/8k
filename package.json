@@ -4,7 +4,7 @@
   "description": "30-Day 25% Trading Challenge Bot for Telegram",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
+    "start": "node bot.js || echo 'Bot crashed!'",
     "dev": "nodemon bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
