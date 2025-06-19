@@ -20,17 +20,26 @@
   "author": "Emmanuel Chibuike",
   "license": "MIT",
   "dependencies": {
-    "@solana/spl-token": "^0.3.9",
-    "@solana/web3.js": "^1.87.6",
-    "axios": "^1.6.0",
+    "@solana/spl-token": "^0.3.11",
+    "@solana/web3.js": "^1.98.2",
+    "axios": "^1.10.0",
     "bs58": "^5.0.0",
     "dotenv": "^16.5.0",
     "node-telegram-bot-api": "^0.61.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.1.10"
   },
   "engines": {
     "node": ">=16.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CHI-0-sys/8k.git"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/CHI-0-sys/8k/issues"
+  },
+  "homepage": "https://github.com/CHI-0-sys/8k#readme"
 }
