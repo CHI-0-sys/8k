@@ -384,6 +384,7 @@ Trading meme tokens involves substantial risk of loss.
 
         this.bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
     }
+    
 
     startPriceMonitoring() {
         // Placeholder for price monitoring
