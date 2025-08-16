@@ -30,8 +30,8 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const USE_WEBHOOK = process.env.USE_WEBHOOK === 'true';
 
 // Trading Configuration
-const MAX_SLIPPAGE = 0.05; // 5% maximum slippage
-const DEFAULT_STOP_LOSS = 0.15; // 15% stop loss
+const MAX_SLIPPAGE = 0.01; // 1% maximum slippage
+const DEFAULT_STOP_LOSS = 0.05; // 5% stop loss
 const JUPITER_API_URL = 'https://quote-api.jup.ag/v6';
 const RAYDIUM_API_URL = 'https://api.raydium.io/v2';
 const COINGECKO_API_URL = 'https://api.coingecko.com/api/v3';
@@ -122,6 +122,7 @@ class TradingBot {
         this.startPriceMonitoring();
         this.startStopLossMonitoring();
         this.setupExpressRoutes();
+        this.startAutoTrading();
     } 
   
 
@@ -278,42 +279,52 @@ class TradingBot {
 }
 
 
-    async autoSell(userId, pos, exitPrice, reason) {
+async autoSell(userId, pos, exitPrice, reason) {
+    try {
         const user = this.getUserState(userId);
-        let earned = (exitPrice / pos.entryPrice) * pos.amountUSD;
+        let earned = 0;
     
         // 🔄 Live Sell Block
         if (LIVE_TRADING) {
-            try {
-                const sellQuote = await this.getJupiterQuote(
-                    pos.tokenAddress,
-                    'EPjFWdd5AufqSSqeM2qN1xzybapC8nN1sKyf7gqS1czn', // USDC mint
-                    Math.floor(pos.amountUSD * 1_000_000)
-                );
-    
-                if (sellQuote?.routes?.[0]) {
-                    const route = sellQuote.routes[0];
-                    earned = route.outAmount / 1_000_000;
-    
-                    const tx = await this.executeSwap(route, route.inAmount);
-                    console.log(`✅ Sold ${pos.symbol} | TX: ${tx}`);
-                } else {
-                    console.log(`❌ No Jupiter sell route for ${pos.symbol}`);
+            // FIXED: Use actual token amount, not USD amount
+            const sellQuote = await this.getJupiterQuote(
+                pos.tokenAddress,    // Input: Token
+                COMMON_TOKENS.USDC,  // Output: USDC
+                Math.floor(pos.tokensOwned) // Actual token amount
+            );
+
+            if (sellQuote?.routes?.[0]) {
+                const route = sellQuote.routes[0];
+                
+                // Verify price hasn't moved too much (1% slippage check)
+                const expectedUSDC = pos.tokensOwned * exitPrice;
+                const actualUSDC = route.outAmount / 1_000_000;
+                const slippage = Math.abs(actualUSDC - expectedUSDC) / expectedUSDC;
+                
+                if (slippage > 0.01) { // 1% slippage limit
+                    console.log(`❌ Slippage too high (${(slippage*100).toFixed(1)}%) for ${pos.symbol}`);
+                    return;
                 }
-            } catch (err) {
-                console.error(`❌ Sell failed for ${pos.symbol}:`, err.message);
+                
+                const tx = await this.executeSwapSafely(route);
+                if (tx.success) {
+                    earned = actualUSDC;
+                    console.log(`✅ Sold ${pos.symbol} | TX: ${tx.signature}`);
+                } else {
+                    console.log(`❌ Sell failed for ${pos.symbol}: ${tx.error}`);
+                    return;
+                }
+            } else {
+                console.log(`❌ No Jupiter sell route for ${pos.symbol}`);
+                return;
             }
-        } 
-           //avoid parallel overlapping of users 
-            const expected = TRADING_PLAN[user.currentDay - 1].expected;
-              const delta = Math.abs(user.currentBalance - expected);
-
-              if (delta > expected * 0.15) {
-             await this.bot.sendMessage(userId, `⚠️ Your balance is off-track by >15%. Consider restarting or pausing.`);
-               }
-
+        } else {
+            // Simulation mode
+            earned = pos.tokensOwned * exitPrice;
+        }
     
-        // 💰 Update user state
+        // Update user state
+        const profit = earned - pos.amountUSD;
         user.currentBalance += earned;
         user.totalTrades += 1;
         if (reason === 'profit') user.successfulTrades += 1;
@@ -321,94 +332,177 @@ class TradingBot {
         pos.status = 'closed';
         pos.exitPrice = exitPrice;
         pos.soldAt = Date.now();
+        pos.profit = profit;
         user.tradeHistory.push(pos);
     
         user.positions = user.positions.filter(p => p.status === 'open');
-        user.currentDay += 1;
+        
+        // Only advance day if profitable
+        if (reason === 'profit') {
+            user.currentDay += 1;
+        }
+        
         user.isActive = false;
         user.lastTradeAt = Date.now();
     
         await this.saveUserStates();
     
-        // 📝 Save to live_trades.json
-        try {
-            const tradesFile = 'live_trades.json';
-            let current = [];
+        // Save to trade log
+        await this.saveTradeLog({
+            userId,
+            symbol: pos.symbol,
+            type: reason === 'profit' ? 'SELL_PROFIT' : 'SELL_STOPLOSS',
+            earned: earned.toFixed(4),
+            profit: profit.toFixed(4),
+            entryPrice: pos.entryPrice,
+            exitPrice,
+            tradeTime: new Date().toISOString()
+        });
     
-            try {
-                const existing = await fs.readFile(tradesFile, 'utf-8');
-                current = JSON.parse(existing || '[]');
-            } catch (e) {
-                console.warn('📁 Creating new trade log file...');
-            }
-    
-            current.push({
-                userId,
-                symbol: pos.symbol,
-                type: reason === 'profit' ? 'SELL_PROFIT' : 'SELL_STOPLOSS',
-                earned: earned.toFixed(4),
-                entryPrice: pos.entryPrice,
-                exitPrice,
-                tradeTime: new Date().toISOString()
-            });
-    
-            await fs.writeFile(tradesFile, JSON.stringify(current, null, 2));
-            console.log('✅ Trade logged to live_trades.json');
-        } catch (err) {
-            console.error('❌ Failed to write live_trades.json:', err.message);
-        }
-    
-        // ✅ Notify user
+        // Notify user
         await this.bot.sendMessage(userId, `
-    💸 Auto-Sell Triggered (${reason.toUpperCase()})
-    
-    🪙 Token: ${pos.symbol}
-    📈 Entry: $${pos.entryPrice}
-    📉 Exit: $${exitPrice}
-    💰 Earned: $${earned.toFixed(2)} (${reason === 'profit' ? '✅ Profit' : '🛑 Stop-loss'})
-    💼 New Balance: $${user.currentBalance.toFixed(2)}
-    ⏱ Cooldown: 24h until next auto-buy
+💸 Auto-Sell Triggered (${reason.toUpperCase()})
+
+🪙 Token: ${pos.symbol}
+📈 Entry: $${pos.entryPrice.toFixed(8)}
+📉 Exit: $${exitPrice.toFixed(8)}
+💰 Earned: $${earned.toFixed(2)}
+📊 Profit: ${profit >= 0 ? '✅' : '❌'} $${profit.toFixed(2)}
+💼 New Balance: $${user.currentBalance.toFixed(2)}
+⏱ Cooldown: 24h until next trade
         `);
+
+    } catch (error) {
+        console.error(`❌ Auto-sell failed for ${pos.symbol}:`, error.message);
+        await this.bot.sendMessage(userId, `❌ Auto-sell failed for ${pos.symbol}: ${error.message}`);
+    }
+}
+    
+    
+async executeSwapSafely(route) {
+    try {
+        // Simulate first
+        const simulationResult = await this.simulateSwap(route);
+        if (!simulationResult.success) {
+            return { success: false, error: `Simulation failed: ${simulationResult.error}` };
+        }
+
+        // Execute the actual swap
+        const response = await axios.post(`${JUPITER_API_URL}/swap`, {
+            quoteResponse: route,
+            userPublicKey: this.wallet.publicKey.toString(),
+            wrapUnwrapSOL: true,
+            dynamicComputeUnitLimit: true,
+            prioritizationFeeLamports: 1000 // Small priority fee
+        });
+        
+        const { swapTransaction } = response.data;
+        
+        // Deserialize and sign transaction
+        const transactionBuf = Buffer.from(swapTransaction, 'base64');
+        const transaction = Transaction.from(transactionBuf);
+        transaction.sign(this.wallet);
+        
+        // Send transaction with retry
+        let signature;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                signature = await this.connection.sendRawTransaction(
+                    transaction.serialize(),
+                    { 
+                        skipPreflight: false, 
+                        preflightCommitment: 'confirmed',
+                        maxRetries: 3
+                    }
+                );
+                break;
+            } catch (error) {
+                if (attempt === 2) throw error;
+                console.log(`Retry ${attempt + 1}/3 for transaction`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        
+        // Wait for confirmation
+        const confirmation = await this.connection.confirmTransaction(signature, 'confirmed');
+        
+        if (confirmation.value.err) {
+            return { success: false, error: `Transaction failed: ${confirmation.value.err}` };
+        }
+        
+        return { success: true, signature };
+        
+    } catch (error) {
+        console.error('❌ Swap execution error:', error);
+        return { success: false, error: error.message };
+    }
+} 
+
+
+async selectBestTokenFromCandidates(tokens) {
+    // Sort by transaction count and volume
+    const filtered = tokens
+        .filter(t => t.count >= 20 && t.count <= 200) // Sweet spot
+        .sort((a, b) => b.count - a.count);
+    
+    // For now, return the most active token
+    // You can enhance this with more sophisticated scoring
+    return filtered[0] || null;
+} 
+
+async checkDailyLimits(userId) {
+    const user = this.getUserState(userId);
+    
+    // Check for consecutive losses
+    const recentTrades = user.tradeHistory.slice(-3);
+    if (recentTrades.length === 3 && recentTrades.every(t => t.profit < 0)) {
+        user.isActive = false;
+        await this.bot.sendMessage(userId, '🛑 Circuit breaker: 3 consecutive losses. Trading paused.');
+        return false;
     }
     
-    
+    return true;
+} 
 
     async autoBuyTokenIfEligible(userId) {
-        const user = this.getUserState(userId);
-        const dayIndex = user.currentDay - 1;
-        const tradeAmount = TRADING_PLAN[dayIndex]?.profit;
-    
-        // Ensure wallet, plan, and cooldown are valid
-        if (!this.wallet || !tradeAmount || !this.cooldownPassed(user)) return;
-    
-        const tokens = await this.getBitqueryTokenCandidates();
-        if (!tokens.length) return;
-    
-        const selected = tokens[0]; // You can sort by tx count or any metric 
-
-         const safe = await this.isNotHoneypot(selected.address);
-         if(!safe)
-             {
-                console.log(`🚫 Skipped ${selected.symbol} -honeypot suspected.`);
+        try {
+            const user = this.getUserState(userId);
+            const dayIndex = user.currentDay - 1;
+            const tradeAmount = TRADING_PLAN[dayIndex]?.profit;
+        
+            // Ensure wallet, plan, and cooldown are valid
+            if (!this.wallet || !tradeAmount || !this.cooldownPassed(user)) return;
+            
+            // Check circuit breakers
+            if (!await this.checkDailyLimits(userId)) return;
+        
+            const tokens = await this.getBitqueryTokenCandidates();
+            if (!tokens.length) return;
+        
+            const selected = await this.selectBestTokenFromCandidates(tokens);
+            if (!selected) {
+                console.log('❌ No tokens passed selection criteria');
                 return;
-             }
-
-             const isHoneypot = await this.isHoneypotToken(selected.address);
-             if (isHoneypot) {
-                 console.log(`⚠️ Skipping ${selected.symbol} — Honeypot detected`);
-                 return;
-             }
-             
-             const trending = await this.isTrendingToken(selected.address);
-             if (!trending) {
-                 console.log(`📉 Skipping ${selected.symbol} — Not trending`);
-                 return;
-             }
-             
-             const quote = await this.getJupiterQuote(
-                'EPjFWdd5AufqSSqeM2qN1xzybapC8nN1sKyf7gqS1czn', // USDC
-                selected.address,
-                Math.floor(amountUSD * 1_000_000) // USDC = 6 decimals
+            }
+    
+            // Safety checks
+            const safe = await this.isNotHoneypot(selected.address);
+            if (!safe) {
+                console.log(`🚫 Skipped ${selected.symbol} - honeypot suspected.`);
+                return;
+            }
+    
+            const trending = await this.isTrendingToken(selected.address);
+            if (!trending) {
+                console.log(`📉 Skipping ${selected.symbol} — Not trending`);
+                return;
+            }
+                 
+            // Get quote - FIXED: Use correct parameters and variable name
+            const quote = await this.getJupiterQuote(
+                COMMON_TOKENS.USDC, // Input: USDC
+                selected.address,    // Output: Token
+                Math.floor(tradeAmount * 1_000_000) // USDC amount (6 decimals)
             );
             
             if (!quote || !quote.routes?.[0]) {
@@ -417,47 +511,96 @@ class TradingBot {
             }
             
             const route = quote.routes[0];
-            const entryPrice = route.outAmount / route.inAmount; 
-
+            
+            // FIXED: Correct price calculation
+            const tokensReceived = route.outAmount;
+            const usdcSpent = route.inAmount / 1_000_000;
+            const entryPrice = usdcSpent / tokensReceived; // Price per token in USDC
+            
             if (LIVE_TRADING) {
-                const tx = await this.executeSwap(route, route.inAmount);
-                console.log(`✅ Bought ${selected.symbol} | TX: ${tx}`);
+                const tx = await this.executeSwapSafely(route);
+                if (!tx.success) {
+                    console.log(`❌ Transaction failed for ${selected.symbol}: ${tx.error}`);
+                    return;
+                }
+                console.log(`✅ Bought ${selected.symbol} | TX: ${tx.signature}`);
             }
-            
-            
-            
-
-        const position = {
-            symbol: selected.symbol,
-            tokenAddress: selected.address,
-            entryPrice,
-            targetPrice: entryPrice * 1.25,
-            stopLossPrice: entryPrice * 0.95,
-            amountUSD: tradeAmount,
-            boughtAt: Date.now(),
-            status: 'open'
-        };
     
-        user.positions.push(position);
-        user.lastTradeAt = Date.now();
-        user.isActive = true;
-    
-        await this.saveUserStates();
-    
-        await this.bot.sendMessage(userId, `
-    🧠 Auto-Buy Triggered!
+            const position = {
+                symbol: selected.symbol,
+                tokenAddress: selected.address,
+                entryPrice,
+                targetPrice: entryPrice * 1.25, // 25% profit target
+                stopLossPrice: entryPrice * 0.95, // 5% stop loss
+                amountUSD: tradeAmount,
+                tokensOwned: tokensReceived,
+                boughtAt: Date.now(),
+                status: 'open'
+            };
+        
+            user.positions.push(position);
+            user.lastTradeAt = Date.now();
+            user.isActive = true;
+        
+            await this.saveUserStates();
+        
+            await this.bot.sendMessage(userId, `
+    🧠 Auto-Buy Executed!
     
     🪙 Token: ${position.symbol}
-    🎯 Entry: $${position.entryPrice}
-    📈 Target (25%): $${position.targetPrice}
-    🛑 Stop-loss (5%): $${position.stopLossPrice}
     💰 Amount: $${position.amountUSD}
+    📊 Tokens: ${tokensReceived.toLocaleString()}
+    🎯 Entry: $${position.entryPrice.toFixed(8)}
+    📈 Target: $${position.targetPrice.toFixed(8)} (+25%)
+    🛑 Stop-loss: $${position.stopLossPrice.toFixed(8)} (-5%)
     
-    Now watching for exit... 
-        `); 
+    Now monitoring for exit...
+            `);
+    
+        } catch (error) {
+            console.error(`❌ Auto-buy failed for user ${userId}:`, error.message);
+            await this.bot.sendMessage(userId, `❌ Auto-buy failed: ${error.message}`);
+        }
+    }  
 
-
+    async getLiveJupiterPrice(tokenAddress) {
+        try {
+            const quote = await this.getJupiterQuote(
+                tokenAddress,
+                COMMON_TOKENS.USDC,
+                1000000 // 1 token worth (assuming 6 decimals)
+            );
+            
+            if (quote?.routes?.[0]) {
+                const route = quote.routes[0];
+                return route.outAmount / 1_000_000; // Convert to USDC price
+            }
+            return null;
+        } catch (error) {
+            console.error(`❌ Price fetch failed for ${tokenAddress}`);
+            return null;
+        }
     } 
+
+    async saveTradeLog(tradeData){
+        try{
+            const tradesFile = "live_trades.json";
+            let current = [] 
+
+            try{
+                const existing = await fs.readFile(tradesFile, 'utf-8');
+                current = JSON.parse(existing || '[]');
+            } catch(e){
+                console.warn('📁 Creating new trade log file...')
+            }
+
+            current.push(tradeData);
+            await fs.writeFile(tradesFile,JSON.stringify(current,null,2));
+            console.log('Trade logged successfully');
+        }catch(err){
+            console.error('failed to write trade log:', err.message)
+        }
+    }
 
     async monitorAndSell() {
         for (const [userId, user] of this.userStates.entries()) {
@@ -1091,6 +1234,28 @@ Use /trade ${tokenData.symbol} [amount] to trade this token.
             };
         }
     }
+    
+
+    // 7. Add startAutoTrading method
+async startAutoTrading() {
+    console.log('🤖 Starting auto-trading monitoring...');
+    
+    setInterval(async () => {
+        try {
+            // Monitor existing positions for sell opportunities
+            await this.monitorAndSell();
+            
+            // Check for new buy opportunities
+            for (const [userId, user] of this.userStates.entries()) {
+                if (user.isActive && this.cooldownPassed(user) && user.positions.length === 0) {
+                    await this.autoBuyTokenIfEligible(userId);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Auto-trading monitoring error:', error);
+        }
+    }, 30000); // Every 30 seconds
+}
 
     async validateTrade(userState, tokenData, amount, side) {
         // Check if user has sufficient balance

@@ -1,17 +1,1 @@
-{
-  "7066525524": {
-    "currentDay": 1,
-    "currentBalance": 10,
-    "isActive": true,
-    "startDate": "2025-06-20",
-    "totalTrades": 0,
-    "successfulTrades": 0,
-    "watchlist": [],
-    "positions": [],
-    "tradeHistory": [],
-    "walletAddress": null,
-    "autoTrade": false,
-    "stopLossEnabled": true,
-    "maxPositionSize": 0.1
-  }
-}
+{}
