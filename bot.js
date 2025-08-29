@@ -16,13 +16,18 @@ const { Token, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solan
 const bs58 = require('bs58');
 const crypto = require('crypto');
 
+
 // Configuration
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BITQUERY_API_KEY = process.env.BITQUERY_API_KEY;
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? process.env.AUTHORIZED_USERS.split(',') : [];
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const PRIVATE_KEY = process.env.PRIVATE_KEY; // Base58 encoded private key
-const LIVE_TRADING = process.env.LIVE_TRADING === 'true';
+const LIVE_TRADING = process.env.LIVE_TRADING === 'true'; 
+const {createUmi} = require('@metaplex-foundation/umi-bundle-defaults');
+const {mplTokenMetadata,fetchDigitalAsset} = require('@metaplex-foundation/mpl-token-metadata');
+const {publicKey} = require('@metaplex-foundation/umi');
+
 
 // Hosting Configuration
 const PORT = process.env.PORT || 3000;
@@ -109,7 +114,10 @@ class TradingBot {
         
         // Initialize Solana connection
         this.connection = new Connection(SOLANA_RPC_URL, 'confirmed');
-        this.wallet = PRIVATE_KEY ? Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY)) : null;
+        this.wallet = PRIVATE_KEY ? Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY)) : null;  
+
+        //initialise umi 
+        this.umi = createUmi(SOLANA_RPC_URL).use(mplTokenMetadata());
         
         if (this.wallet) {
             console.log('✅ Wallet initialized:', this.wallet.publicKey.toString());
@@ -438,17 +446,585 @@ async executeSwapSafely(route) {
     }
 } 
 
+async comprehensiveTokenAnalysis(tokenAddress, symbol) {
+    try {
+        console.log(`Running comprehensive analysis for ${symbol}...`);
+        
+        const [security, liquidity, whale, sentiment, volatility] = await Promise.all([
+            this.analyzeTokenSecurity(tokenAddress),
+            this.analyzeLiquidity(tokenAddress),
+            this.analyzeWhaleActivity(tokenAddress),
+            this.analyzeSentiment(tokenAddress, symbol),
+            this.analyzeVolatility(tokenAddress)
+        ]);
+        
+        // Calculate overall score (weighted)
+        const overallScore = Math.round(
+            security.score * 0.25 +      // 25% weight
+            liquidity.score * 0.20 +     // 20% weight
+            whale.score * 0.15 +         // 15% weight
+            sentiment.score * 0.20 +     // 20% weight
+            volatility.score * 0.20      // 20% weight
+        );
+        
+        // Determine recommendation
+        let recommendation = 'AVOID';
+        if (overallScore >= 70) recommendation = 'BUY';
+        else if (overallScore >= 50) recommendation = 'MODERATE';
+        
+        return {
+            overallScore,
+            recommendation,
+            analysis: {
+                security,
+                liquidity,
+                whale,
+                sentiment,
+                volatility
+            }
+        };
+        
+    } catch (error) {
+        console.error(`Comprehensive analysis failed for ${symbol}:`, error.message);
+        return {
+            overallScore: 0,
+            recommendation: 'AVOID',
+            analysis: {
+                security: { score: 0, reason: 'Analysis failed' },
+                liquidity: { score: 0, reason: 'Analysis failed' },
+                whale: { score: 0, reason: 'Analysis failed' },
+                sentiment: { score: 0, reason: 'Analysis failed' },
+                volatility: { score: 0, riskLevel: 'EXTREME' }
+            }
+        };
+    }
+}
+ 
+async checkTokenVerification(tokenAddress) {
+    try {
+        // Check against Jupiter verified token list
+        const response = await axios.get('https://token.jup.ag/strict');
+        const verifiedTokens = response.data;
+        
+        return verifiedTokens.some(token => token.address === tokenAddress);
+        
+    } catch (error) {
+        return false;
+    }
+} 
+
+async getTokenMetadata(tokenAddress) {
+    try {
+        const mint = publicKey(tokenAddress);
+        
+        // Fetch the digital asset (includes metadata)
+        const digitalAsset = await fetchDigitalAsset(this.umi, mint);
+        
+        if (digitalAsset && digitalAsset.metadata) {
+            return {
+                name: digitalAsset.metadata.name,
+                symbol: digitalAsset.metadata.symbol,
+                description: digitalAsset.metadata.description,
+                image: digitalAsset.metadata.image,
+                attributes: digitalAsset.metadata.attributes,
+                creators: digitalAsset.metadata.creators,
+                sellerFeeBasisPoints: digitalAsset.metadata.sellerFeeBasisPoints,
+                updateAuthority: digitalAsset.metadata.updateAuthority,
+                isMutable: digitalAsset.metadata.isMutable,
+                primarySaleHappened: digitalAsset.metadata.primarySaleHappened,
+                collection: digitalAsset.metadata.collection,
+                uses: digitalAsset.metadata.uses
+            };
+        }
+        
+        return null;
+    } catch (error) {
+        console.error(`Metadata fetch failed for ${tokenAddress}:`, error.message);
+        return null;
+    }
+}
+
+
+async analyzeTokenSecurity(tokenAddress) {
+    try {
+        const accountInfo = await this.connection.getParsedAccountInfo(new PublicKey(tokenAddress));
+        let score = 60; // Base score
+        const positiveFactors = [];
+        const negativeFactors = [];
+        
+        if (!accountInfo.value) {
+            return { 
+                score: 0, 
+                reason: 'Token account not found', 
+                positiveFactors: [], 
+                negativeFactors: ['Invalid token'] 
+            };
+        }
+        
+        // Get Metaplex metadata
+        const metadata = await this.getTokenMetadata(tokenAddress);
+        
+        if (metadata) {
+            score += 15;
+            positiveFactors.push('Has valid metadata');
+            
+            // Check for complete metadata
+            if (metadata.name && metadata.symbol && metadata.description) {
+                score += 10;
+                positiveFactors.push('Complete token information');
+            }
+            
+            // Check for image/logo
+            if (metadata.image) {
+                score += 5;
+                positiveFactors.push('Has token logo');
+            }
+            
+            // Check if metadata is mutable (less secure if mutable)
+            if (!metadata.isMutable) {
+                score += 10;
+                positiveFactors.push('Immutable metadata');
+            } else {
+                negativeFactors.push('Mutable metadata');
+            }
+            
+            // Check for verified collection
+            if (metadata.collection && metadata.collection.verified) {
+                score += 15;
+                positiveFactors.push('Verified collection member');
+            }
+            
+            // Check creators and royalties
+            if (metadata.creators && metadata.creators.length > 0) {
+                score += 5;
+                positiveFactors.push('Has creator information');
+                
+                // Check if all creators are verified
+                const allVerified = metadata.creators.every(creator => creator.verified);
+                if (allVerified) {
+                    score += 10;
+                    positiveFactors.push('All creators verified');
+                }
+            }
+            
+        } else {
+            score -= 10;
+            negativeFactors.push('No metadata found');
+        }
+        
+        // Check mint authority
+        const mintInfo = accountInfo.value.data?.parsed?.info;
+        if (mintInfo) {
+            if (mintInfo.mintAuthority === null) {
+                score += 15;
+                positiveFactors.push('Mint authority renounced');
+            } else {
+                score -= 5;
+                negativeFactors.push('Mint authority active');
+            }
+            
+            if (mintInfo.freezeAuthority === null) {
+                score += 10;
+                positiveFactors.push('No freeze authority');
+            } else {
+                score -= 5;
+                negativeFactors.push('Has freeze authority');
+            }
+            
+            // Check token supply
+            if (mintInfo.supply) {
+                const supply = parseInt(mintInfo.supply);
+                if (supply > 0 && supply < 1e15) { // Reasonable supply range
+                    score += 5;
+                    positiveFactors.push('Reasonable token supply');
+                } else if (supply >= 1e15) {
+                    score -= 10;
+                    negativeFactors.push('Extremely high token supply');
+                }
+            }
+        }
+        
+        return {
+            score: Math.max(0, Math.min(100, score)),
+            reason: `Security analysis complete (${positiveFactors.length} positive, ${negativeFactors.length} negative factors)`,
+            positiveFactors,
+            negativeFactors,
+            metadata
+        };
+        
+    } catch (error) {
+        return { 
+            score: 0, 
+            reason: `Security check failed: ${error.message}`, 
+            positiveFactors: [], 
+            negativeFactors: ['Analysis failed'] 
+        };
+    }
+}
+
+
+async analyzeTokenSecurity(tokenAddress) {
+    try {
+        const accountInfo = await this.connection.getParsedAccountInfo(new PublicKey(tokenAddress));
+        let score = 60; // Base score
+        const positiveFactors = [];
+        const negativeFactors = [];
+        
+        if (!accountInfo.value) {
+            return { score: 0, reason: 'Token account not found', positiveFactors: [], negativeFactors: ['Invalid token'] };
+        }
+        
+        // Check if token has metadata
+        try {
+            const metadataPDA = await this.getTokenMetadata(tokenAddress);
+            if (metadataPDA) {
+                score += 15;
+                positiveFactors.push('Has metadata');
+            }
+        } catch (e) {
+            score -= 10;
+            negativeFactors.push('No metadata');
+        }
+        
+        // Check for verified status (simplified check)
+        const isVerified = await this.checkTokenVerification(tokenAddress);
+        if (isVerified) {
+            score += 20;
+            positiveFactors.push('Verified token');
+        }
+        
+        // Check freeze authority (tokens without freeze authority are safer)
+        if (accountInfo.value.data?.parsed?.info?.freezeAuthority === null) {
+            score += 10;
+            positiveFactors.push('No freeze authority');
+        } else {
+            negativeFactors.push('Has freeze authority');
+        }
+        
+        // Check mint authority
+        if (accountInfo.value.data?.parsed?.info?.mintAuthority === null) {
+            score += 10;
+            positiveFactors.push('Mint authority renounced');
+        } else {
+            negativeFactors.push('Mint authority active');
+        }
+        
+        return {
+            score: Math.max(0, Math.min(100, score)),
+            reason: `Security analysis complete`,
+            positiveFactors,
+            negativeFactors
+        };
+        
+    } catch (error) {
+        return { score: 0, reason: `Security check failed: ${error.message}`, positiveFactors: [], negativeFactors: [] };
+    }
+} 
+
+async analyzeWhaleActivity(tokenAddress) {
+    try {
+        const query = `
+        {
+          solana {
+            transfers(
+              options: {desc: "amount", limit: 20}
+              date: {after: "now - 4h"}
+              currency: {is: "${tokenAddress}"}
+            ) {
+              amount
+              sender { address }
+              receiver { address }
+            }
+          }
+        }`;
+        
+        const response = await axios.post(
+            'https://graphql.bitquery.io/',
+            { query },
+            {
+                headers: {
+                    'X-API-KEY': BITQUERY_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const transfers = response.data.data.solana.transfers;
+        
+        if (!transfers.length) {
+            return { score: 30, reason: 'No recent activity' };
+        }
+        
+        // Calculate whale activity score
+        const amounts = transfers.map(t => parseFloat(t.amount)).filter(a => a > 0);
+        const totalVolume = amounts.reduce((sum, amt) => sum + amt, 0);
+        const avgAmount = totalVolume / amounts.length;
+        const maxAmount = Math.max(...amounts);
+        
+        let score = 70; // Base score
+        
+        // Large single transactions are concerning
+        if (maxAmount > avgAmount * 10) {
+            score -= 20;
+        }
+        
+        // Too many large transactions
+        const largeTransfers = amounts.filter(amt => amt > avgAmount * 3).length;
+        if (largeTransfers > 5) {
+            score -= 15;
+        }
+        
+        return {
+            score: Math.max(0, Math.min(100, score)),
+            reason: `${transfers.length} transfers, max: ${this.formatNumber(maxAmount)}`
+        };
+        
+    } catch (error) {
+        return { score: 50, reason: `Whale analysis failed: ${error.message}` };
+    }
+}
+ 
+async analyzeSentiment(tokenAddress, symbol) {
+    try {
+        // Get recent transaction count as proxy for interest
+        const query = `
+        {
+          current: solana {
+            transfers(
+              date: { after: "now - 1h" }
+              currency: { is: "${tokenAddress}" }
+            ) {
+              count
+            }
+          }
+          previous: solana {
+            transfers(
+              date: { after: "now - 2h", till: "now - 1h" }
+              currency: { is: "${tokenAddress}" }
+            ) {
+              count
+            }
+          }
+        }`;
+        
+        const response = await axios.post(
+            'https://graphql.bitquery.io/',
+            { query },
+            {
+                headers: {
+                    'X-API-KEY': BITQUERY_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const currentCount = response.data.data.current.transfers[0]?.count || 0;
+        const previousCount = response.data.data.previous.transfers[0]?.count || 0;
+        
+        let score = 50; // Neutral base
+        
+        if (currentCount > previousCount * 1.5) {
+            score += 30; // Growing interest
+        } else if (currentCount < previousCount * 0.5) {
+            score -= 20; // Declining interest
+        }
+        
+        // Activity level scoring
+        if (currentCount > 100) score += 20;
+        else if (currentCount > 50) score += 10;
+        else if (currentCount < 10) score -= 15;
+        
+        return {
+            score: Math.max(0, Math.min(100, score)),
+            reason: `${currentCount} txs/hour (vs ${previousCount} previous)`
+        };
+        
+    } catch (error) {
+        return { score: 50, reason: `Sentiment analysis failed: ${error.message}` };
+    }
+}
+ 
+
+async analyzeVolatility(tokenAddress) {
+    try {
+        // Get price data from DexScreener
+        const response = await axios.get(`${DEXSCREENER_API_URL}/tokens/${tokenAddress}`);
+        
+        if (!response.data.pairs || response.data.pairs.length === 0) {
+            return { score: 0, volatility: 999, riskLevel: 'EXTREME' };
+        }
+        
+        const pair = response.data.pairs[0];
+        const priceChanges = {
+            h1: parseFloat(pair.priceChange?.h1 || 0),
+            h6: parseFloat(pair.priceChange?.h6 || 0),
+            h24: parseFloat(pair.priceChange?.h24 || 0)
+        };
+        
+        // Calculate volatility score (lower volatility = higher score)
+        const avgAbsChange = (Math.abs(priceChanges.h1) + Math.abs(priceChanges.h6) + Math.abs(priceChanges.h24)) / 3;
+        
+        let score = 100;
+        let riskLevel = 'LOW';
+        let volatility = avgAbsChange;
+        
+        if (avgAbsChange > 50) {
+            score = 10;
+            riskLevel = 'EXTREME';
+        } else if (avgAbsChange > 25) {
+            score = 30;
+            riskLevel = 'HIGH';
+        } else if (avgAbsChange > 10) {
+            score = 60;
+            riskLevel = 'MEDIUM';
+        } else {
+            score = 90;
+            riskLevel = 'LOW';
+        }
+        
+        return {
+            score,
+            volatility: avgAbsChange,
+            riskLevel,
+            priceChanges
+        };
+        
+    } catch (error) {
+        return { score: 0, volatility: 999, riskLevel: 'EXTREME' };
+    }
+} 
+
+async simulateSwap(route) {
+    try {
+        // Get simulation transaction
+        const response = await axios.post(`${JUPITER_API_URL}/swap`, {
+            quoteResponse: route,
+            userPublicKey: this.wallet.publicKey.toString(),
+            wrapUnwrapSOL: true,
+            dynamicComputeUnitLimit: true,
+            onlyDirectRoutes: false,
+            simulate: true // This tells Jupiter to simulate only
+        });
+        
+        // Check if simulation was successful
+        if (response.data.error) {
+            return { success: false, error: response.data.error };
+        }
+        
+        return { success: true, data: response.data };
+        
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+} 
+
+
+isKnownExchangeAddress(address) {
+    // Known Solana exchange and market maker addresses
+    const knownExchanges = [
+        // Raydium
+        '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1',
+        '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+        
+        // Serum/OpenBook
+        '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
+        '14ivtgssEBoBjuZJtSAPKYgpUK7DmnSwuPMqJoVTSgKJ',
+        
+        // Orca
+        '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP',
+        
+        // Solana Labs addresses
+        '11111111111111111111111111111112',
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+        
+        // Common program addresses
+        'JUP2jxvXaqu7NQY1GmNF4m1vodw12LVXYxbFL2uJvfo',
+        'JUP3c2Uh3WA4Ng34tw6kPd2G4C5BB21Xo36Je1s32Ph',
+        
+        // Market makers and large holders
+        'GThUX1Atko4tqhN2NaiTazWSeFWMuiUirestXkAtVyiS',
+        '8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC'
+    ];
+    
+    return knownExchanges.includes(address);
+} 
+
+
+
+
+
 
 async selectBestTokenFromCandidates(tokens) {
-    // Sort by transaction count and volume
-    const filtered = tokens
-        .filter(t => t.count >= 20 && t.count <= 200) // Sweet spot
-        .sort((a, b) => b.count - a.count);
+    console.log(`Analyzing ${tokens.length} token candidates with enhanced criteria...`); 
+
     
-    // For now, return the most active token
-    // You can enhance this with more sophisticated scoring
-    return filtered[0] || null;
-} 
+    
+    const analyzedTokens = [];
+    
+    // Limit concurrent analysis to avoid API rate limits
+    const batchSize = 3;
+    for (let i = 0; i < tokens.length; i += batchSize) {
+        const batch = tokens.slice(i, i + batchSize);
+        
+        const batchPromises = batch.map(async (token) => {
+            try {
+                const analysis = await this.comprehensiveTokenAnalysis(
+                    token.address, 
+                    token.symbol
+                );
+                
+                return {
+                    ...token,
+                    analysis,
+                    finalScore: analysis.overallScore
+                };
+            } catch (error) {
+                console.error(`Analysis failed for ${token.symbol}:`, error.message);
+                return {
+                    ...token,
+                    analysis: { overallScore: 0, recommendation: 'AVOID' },
+                    finalScore: 0
+                };
+            }
+        });
+        
+        const batchResults = await Promise.all(batchPromises);
+        analyzedTokens.push(...batchResults);
+        
+        // Small delay between batches to be nice to APIs
+        if (i + batchSize < tokens.length) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+    
+    // Filter and sort by comprehensive score
+    const viableTokens = analyzedTokens
+        .filter(token => {
+            const analysis = token.analysis;
+            
+            // Minimum requirements
+            if (analysis.overallScore < 40) return false;
+            if (analysis.recommendation === 'AVOID') return false;
+            
+            // Additional safety checks
+            if (analysis.analysis?.security?.score < 50) return false;
+            if (analysis.analysis?.liquidity?.score < 30) return false;
+            
+            return true;
+        })
+        .sort((a, b) => b.finalScore - a.finalScore);
+    
+    if (viableTokens.length === 0) {
+        console.log('No tokens passed enhanced analysis criteria');
+        return null;
+    }
+    
+    const selected = viableTokens[0];
+    console.log(`Selected ${selected.symbol} with score ${selected.finalScore}/100 (${selected.analysis.recommendation})`);
+    
+    return selected; 
+
+}
 
 async checkDailyLimits(userId) {
     const user = this.getUserState(userId);
@@ -463,105 +1039,371 @@ async checkDailyLimits(userId) {
     
     return true;
 } 
-
-    async autoBuyTokenIfEligible(userId) {
-        try {
-            const user = this.getUserState(userId);
-            const dayIndex = user.currentDay - 1;
-            const tradeAmount = TRADING_PLAN[dayIndex]?.profit;
-        
-            // Ensure wallet, plan, and cooldown are valid
-            if (!this.wallet || !tradeAmount || !this.cooldownPassed(user)) return;
-            
-            // Check circuit breakers
-            if (!await this.checkDailyLimits(userId)) return;
-        
-            const tokens = await this.getBitqueryTokenCandidates();
-            if (!tokens.length) return;
-        
-            const selected = await this.selectBestTokenFromCandidates(tokens);
-            if (!selected) {
-                console.log('❌ No tokens passed selection criteria');
-                return;
-            }
+async autoBuyTokenIfEligible(userId) {
+    try {
+        const user = this.getUserState(userId);
+        const dayIndex = user.currentDay - 1;
+        const tradeAmount = TRADING_PLAN[dayIndex]?.profit;
     
-            // Safety checks
-            const safe = await this.isNotHoneypot(selected.address);
-            if (!safe) {
-                console.log(`🚫 Skipped ${selected.symbol} - honeypot suspected.`);
-                return;
-            }
-    
-            const trending = await this.isTrendingToken(selected.address);
-            if (!trending) {
-                console.log(`📉 Skipping ${selected.symbol} — Not trending`);
-                return;
-            }
-                 
-            // Get quote - FIXED: Use correct parameters and variable name
-            const quote = await this.getJupiterQuote(
-                COMMON_TOKENS.USDC, // Input: USDC
-                selected.address,    // Output: Token
-                Math.floor(tradeAmount * 1_000_000) // USDC amount (6 decimals)
-            );
-            
-            if (!quote || !quote.routes?.[0]) {
-                console.log(`❌ No Jupiter route for ${selected.symbol}`);
-                return;
-            }
-            
-            const route = quote.routes[0];
-            
-            // FIXED: Correct price calculation
-            const tokensReceived = route.outAmount;
-            const usdcSpent = route.inAmount / 1_000_000;
-            const entryPrice = usdcSpent / tokensReceived; // Price per token in USDC
-            
-            if (LIVE_TRADING) {
-                const tx = await this.executeSwapSafely(route);
-                if (!tx.success) {
-                    console.log(`❌ Transaction failed for ${selected.symbol}: ${tx.error}`);
-                    return;
-                }
-                console.log(`✅ Bought ${selected.symbol} | TX: ${tx.signature}`);
-            }
-    
-            const position = {
-                symbol: selected.symbol,
-                tokenAddress: selected.address,
-                entryPrice,
-                targetPrice: entryPrice * 1.25, // 25% profit target
-                stopLossPrice: entryPrice * 0.95, // 5% stop loss
-                amountUSD: tradeAmount,
-                tokensOwned: tokensReceived,
-                boughtAt: Date.now(),
-                status: 'open'
-            };
+        if (!this.wallet || !tradeAmount || !this.cooldownPassed(user)) return;
         
-            user.positions.push(position);
-            user.lastTradeAt = Date.now();
-            user.isActive = true;
+        // Enhanced pre-flight checks
+        if (!await this.checkDailyLimits(userId)) return;
+        if (!await this.checkMarketConditions()) return;
         
-            await this.saveUserStates();
+        console.log(`Starting enhanced token discovery for user ${userId}...`);
         
-            await this.bot.sendMessage(userId, `
-    🧠 Auto-Buy Executed!
-    
-    🪙 Token: ${position.symbol}
-    💰 Amount: $${position.amountUSD}
-    📊 Tokens: ${tokensReceived.toLocaleString()}
-    🎯 Entry: $${position.entryPrice.toFixed(8)}
-    📈 Target: $${position.targetPrice.toFixed(8)} (+25%)
-    🛑 Stop-loss: $${position.stopLossPrice.toFixed(8)} (-5%)
-    
-    Now monitoring for exit...
-            `);
-    
-        } catch (error) {
-            console.error(`❌ Auto-buy failed for user ${userId}:`, error.message);
-            await this.bot.sendMessage(userId, `❌ Auto-buy failed: ${error.message}`);
+        // Get initial candidates
+        const candidates = await this.getBitqueryTokenCandidates();
+        if (!candidates.length) {
+            console.log('No initial candidates found');
+            return;
         }
-    }  
+        
+        // Run comprehensive analysis
+        const selected = await this.selectBestTokenFromCandidates(candidates);
+        if (!selected) {
+            console.log('No tokens passed comprehensive analysis');
+            await this.bot.sendMessage(userId, '🔍 Market scan complete - no suitable tokens found. Will try again later.');
+            return;
+        }
+        
+        // Enhanced safety validation
+        const finalSafetyCheck = await this.performFinalSafetyChecks(selected);
+        if (!finalSafetyCheck.passed) {
+            console.log(`Final safety check failed for ${selected.symbol}: ${finalSafetyCheck.reason}`);
+            return;
+        }
+        
+        // Calculate dynamic position size based on risk assessment
+        const adjustedAmount = this.calculateDynamicPositionSize(
+            tradeAmount, 
+            selected.analysis.analysis.volatility,
+            selected.analysis.overallScore
+        );
+        
+        // Get Jupiter quote with enhanced parameters
+        const quote = await this.getEnhancedJupiterQuote(
+            COMMON_TOKENS.USDC,
+            selected.address,
+            Math.floor(adjustedAmount * 1_000_000),
+            selected.analysis.analysis.volatility.volatility
+        );
+        
+        if (!quote || !quote.routes?.[0]) {
+            console.log(`No enhanced Jupiter route for ${selected.symbol}`);
+            return;
+        }
+        
+        const route = quote.routes[0];
+        const tokensReceived = route.outAmount;
+        const usdcSpent = route.inAmount / 1_000_000;
+        const entryPrice = usdcSpent / tokensReceived;
+        
+        // Execute trade with enhanced monitoring
+        if (LIVE_TRADING) {
+            const tx = await this.executeSwapSafely(route);
+            if (!tx.success) {
+                console.log(`Transaction failed for ${selected.symbol}: ${tx.error}`);
+                await this.bot.sendMessage(userId, `❌ Trade execution failed for ${selected.symbol}: ${tx.error}`);
+                return;
+            }
+            console.log(`✅ Enhanced buy executed for ${selected.symbol} | TX: ${tx.signature}`);
+        }
+        
+        // Create position with enhanced parameters
+        const position = {
+            symbol: selected.symbol,
+            tokenAddress: selected.address,
+            entryPrice,
+            targetPrice: this.calculateDynamicTarget(entryPrice, selected.analysis),
+            stopLossPrice: this.calculateDynamicStopLoss(entryPrice, selected.analysis),
+            amountUSD: adjustedAmount,
+            tokensOwned: tokensReceived,
+            boughtAt: Date.now(),
+            status: 'open',
+            analysis: selected.analysis, // Store analysis for later reference
+            riskLevel: selected.analysis.analysis.volatility.riskLevel,
+            confidence: selected.analysis.overallScore
+        };
+        
+        user.positions.push(position);
+        user.lastTradeAt = Date.now();
+        user.isActive = true;
+        
+        await this.saveUserStates();
+        
+        // Enhanced notification with analysis summary
+        await this.sendEnhancedBuyNotification(userId, position, selected.analysis);
+        
+    } catch (error) {
+        console.error(`Enhanced auto-buy failed for user ${userId}:`, error.message);
+        await this.bot.sendMessage(userId, `❌ Enhanced auto-buy failed: ${error.message}`);
+    }
+}
+
+async checkMarketConditions() {
+    try {
+        // Check overall market sentiment before trading
+        if (!this.marketSentiment) return true; // If no data, proceed
+        
+        const sentiment = this.marketSentiment.sentiment;
+        const volume = this.marketSentiment.volume;
+        
+        // Don't trade in extremely bearish conditions
+        if (sentiment === 'bearish' && this.marketSentiment.losers > this.marketSentiment.gainers * 2) {
+            console.log('Market conditions too bearish for trading');
+            return false;
+        }
+        
+        // Don't trade in extremely low volume conditions
+        if (volume < 1000000) { // Less than $1M total volume
+            console.log('Market volume too low for safe trading');
+            return false;
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Market condition check failed:', error.message);
+        return true; // Default to allow trading if check fails
+    }
+} 
+async getEnhancedJupiterQuote(inputMint, outputMint, amount, volatilityLevel) {
+    try {
+        // Adjust slippage based on volatility
+        let slippageBps = Math.floor(MAX_SLIPPAGE * 10000); // Default 1%
+        
+        if (volatilityLevel > 2.0) {
+            slippageBps = 200; // 2% for high volatility
+        } else if (volatilityLevel < 1.0) {
+            slippageBps = 50; // 0.5% for low volatility
+        }
+        
+        const response = await axios.get(`${JUPITER_API_URL}/quote`, {
+            params: {
+                inputMint,
+                outputMint,
+                amount,
+                slippageBps,
+                onlyDirectRoutes: volatilityLevel > 2.0, // Direct routes only for high volatility
+                maxAccounts: volatilityLevel > 2.0 ? 10 : 20
+            }
+        });
+        
+        return response.data;
+    } catch (error) {
+        console.error('Enhanced Jupiter quote error:', error.message);
+        return null;
+    }
+} 
+
+
+async performFinalSafetyChecks(token) {
+    try {
+        // Last-minute liquidity check
+        const currentLiquidity = await this.getCurrentLiquidity(token.address);
+        if (currentLiquidity < 50000) {
+            return { passed: false, reason: 'Liquidity dropped below threshold' };
+        }
+        
+        // Check for recent suspicious activity
+        const recentActivity = await this.checkRecentSuspiciousActivity(token.address);
+        if (recentActivity.suspicious) {
+            return { passed: false, reason: recentActivity.reason };
+        }
+        
+        // Verify contract hasn't changed
+        const contractVerification = await this.verifyContractIntegrity(token.address);
+        if (!contractVerification.valid) {
+            return { passed: false, reason: 'Contract verification failed' };
+        }
+        
+        return { passed: true };
+    } catch (error) {
+        return { passed: false, reason: `Safety check error: ${error.message}` };
+    }
+} 
+
+calculateDynamicPositionSize(baseAmount, volatilityData, overallScore) {
+    let multiplier = 1.0;
+    
+    // Adjust based on volatility risk
+    switch (volatilityData.riskLevel) {
+        case 'LOW':
+            multiplier = 1.2; // 20% more on low risk
+            break;
+        case 'MEDIUM':
+            multiplier = 1.0; // Base amount
+            break;
+        case 'HIGH':
+            multiplier = 0.7; // 30% less on high risk
+            break;
+        case 'EXTREME':
+            multiplier = 0.5; // 50% less on extreme risk
+            break;
+    }
+    
+    // Adjust based on overall confidence
+    if (overallScore > 80) multiplier *= 1.1;
+    else if (overallScore < 50) multiplier *= 0.8;
+    
+    return Math.max(baseAmount * multiplier, baseAmount * 0.3); // Minimum 30% of base
+}  
+
+calculateDynamicTarget(entryPrice, analysis) {
+    let targetMultiplier = 1.25; // Base 25% target
+    
+    const volatility = analysis.analysis.volatility.volatility;
+    const overallScore = analysis.overallScore;
+    
+    // Higher targets for lower volatility (more predictable)
+    if (volatility < 1.0) {
+        targetMultiplier = 1.30; // 30% target
+    } else if (volatility > 2.0) {
+        targetMultiplier = 1.20; // 20% target for high volatility
+    }
+    
+    // Adjust based on confidence
+    if (overallScore > 80) {
+        targetMultiplier += 0.05; // Extra 5% for high confidence
+    }
+    
+    return entryPrice * targetMultiplier;
+} 
+
+
+calculateDynamicStopLoss(entryPrice, analysis) {
+    let stopLossMultiplier = 0.95; // Base 5% stop loss
+    
+    const volatility = analysis.analysis.volatility.volatility;
+    const securityScore = analysis.analysis.security.score;
+    
+    // Tighter stops for high volatility
+    if (volatility > 2.0) {
+        stopLossMultiplier = 0.92; // 8% stop loss
+    } else if (volatility < 1.0) {
+        stopLossMultiplier = 0.97; // 3% stop loss
+    }
+    
+    // Tighter stops for lower security scores
+    if (securityScore < 60) {
+        stopLossMultiplier -= 0.02; // Additional 2% safety margin
+    }
+    
+    return entryPrice * stopLossMultiplier;
+} 
+
+async sendEnhancedBuyNotification(userId, position, analysis) {
+    const message = `
+🧠 Enhanced Auto-Buy Executed!
+
+🪙 Token: ${position.symbol}
+💰 Amount: ${position.amountUSD.toFixed(2)}
+📊 Tokens: ${position.tokensOwned.toLocaleString()}
+🎯 Entry: ${position.entryPrice.toFixed(8)}
+📈 Target: ${position.targetPrice.toFixed(8)}
+🛑 Stop-loss: ${position.stopLossPrice.toFixed(8)}
+
+📋 Analysis Summary:
+• Overall Score: ${analysis.overallScore}/100 (${analysis.recommendation})
+• Security: ${analysis.analysis.security.score}/100
+• Liquidity: ${analysis.analysis.liquidity.score}/100
+• Whale Activity: ${analysis.analysis.whale.score}/100
+• Social Sentiment: ${analysis.analysis.sentiment.score}/100
+• Volatility Risk: ${analysis.analysis.volatility.riskLevel}
+• Confidence Level: ${position.confidence}/100
+
+🔍 Key Factors:
+${analysis.analysis.security.positiveFactors?.join(', ') || 'Security checked'}
+${analysis.analysis.liquidity.reason}
+${analysis.analysis.whale.reason}
+
+Now monitoring for optimal exit...
+    `;
+    
+    await this.bot.sendMessage(userId, message);
+}
+async checkRecentSuspiciousActivity(tokenAddress) {
+    try {
+        const query = `
+        {
+          solana {
+            transfers(
+              options: {desc: "block.timestamp.time", limit: 50}
+              date: {after: "now - 30m"}
+              currency: {is: "${tokenAddress}"}
+            ) {
+              amount
+              success
+              sender { address }
+              receiver { address }
+            }
+          }
+        }`;
+        
+        const response = await axios.post(
+            'https://graphql.bitquery.io/',
+            { query },
+            {
+                headers: {
+                    'X-API-KEY': process.env.BITQUERY_API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const transfers = response.data.data.solana.transfers;
+        
+        // Check for sudden large dumps
+        const largeSells = transfers.filter(t => 
+            parseFloat(t.amount) > 100000 && this.isKnownExchangeAddress(t.receiver.address)
+        );
+        
+        if (largeSells.length > 3) {
+            return { suspicious: true, reason: 'Large sell-offs detected' };
+        }
+        
+        // Check failure rate
+        const failureRate = transfers.filter(t => !t.success).length / transfers.length;
+        if (failureRate > 0.3) {
+            return { suspicious: true, reason: 'High transaction failure rate' };
+        }
+        
+        return { suspicious: false };
+    } catch (error) {
+        return { suspicious: false };
+    }
+}
+
+async verifyContractIntegrity(tokenAddress) {
+    try {
+        const accountInfo = await this.connection.getParsedAccountInfo(
+            new PublicKey(tokenAddress)
+        );
+        
+        return {
+            valid: accountInfo.value !== null,
+            reason: accountInfo.value ? 'Contract verified' : 'Contract not found'
+        };
+    } catch (error) {
+        return { valid: false, reason: 'Verification failed' };
+    }
+} 
+
+
+
+async getCurrentLiquidity(tokenAddress) {
+    try {
+        const response = await axios.get(`${DEXSCREENER_API_URL}/tokens/${tokenAddress}`);
+        if (response.data.pairs && response.data.pairs.length > 0) {
+            return parseFloat(response.data.pairs[0].liquidity?.usd || 0);
+        }
+        return 0;
+    } catch (error) {
+        console.error('Current liquidity check failed:', error.message);
+        return 0;
+    }
+}
 
     async getLiveJupiterPrice(tokenAddress) {
         try {
