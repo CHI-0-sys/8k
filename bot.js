@@ -83,7 +83,42 @@ const TRADING_PLAN = [
     { day: 28, balance: 4137.36, profit: 1034.34, expected: 5171.70 },
     { day: 29, balance: 5171.70, profit: 1292.93, expected: 6464.63 },
     { day: 30, balance: 6464.63, profit: 1616.16, expected: 8080.79 }
-];
+]; 
+
+
+
+class RateLimiter {
+    constructor() {
+        this.limits = new Map();
+    }
+    
+    async checkLimit(key, maxRequests, timeWindow) {
+        if (!this.limits.has(key)) {
+            this.limits.set(key, { count: 0, resetTime: Date.now() + timeWindow });
+        }
+        
+        const limit = this.limits.get(key);
+        
+        if (Date.now() > limit.resetTime) {
+            limit.count = 0;
+            limit.resetTime = Date.now() + timeWindow;
+        }
+        
+        if (limit.count >= maxRequests) {
+            const waitTime = limit.resetTime - Date.now();
+            console.log(`Rate limit reached for ${key}. Waiting ${waitTime}ms`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            limit.count = 0;
+            limit.resetTime = Date.now() + timeWindow;
+        }
+        
+        limit.count++;
+        return true;
+    }
+}    
+
+
+
 
 class TradingBot {
     constructor() {
@@ -104,7 +139,8 @@ class TradingBot {
             this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
             console.log('🔄 Using polling mode');
         }
-
+        
+        this.rateLimiter = new RateLimiter();
         this.userStates = new Map();
         this.activeTrades = new Map();
         this.priceAlerts = new Map();
@@ -168,6 +204,9 @@ class TradingBot {
         }`;
     
         try {
+            // Bitquery: Usually 100-500 requests/month for free
+            await this.rateLimiter.checkLimit('bitquery', 20, 3600000); // 20 per hour
+            
             const res = await axios.post(
                 'https://graphql.bitquery.io/',
                 { query },
@@ -175,7 +214,8 @@ class TradingBot {
                     headers: {
                         'X-API-KEY': BITQUERY_API_KEY,
                         'Content-Type': 'application/json',
-                    }
+                    },
+                    timeout: 15000 // 15 second timeout for GraphQL
                 }
             );
     
@@ -205,10 +245,14 @@ class TradingBot {
     
         } catch (error) {
             console.error('❌ Bitquery token fetch failed:', error.message);
+            if (error.response?.status === 429) {
+                console.log('🚦 Bitquery rate limited, waiting 3600 seconds...');
+                await new Promise(resolve => setTimeout(resolve, 3600000)); // 1 hour wait
+            }
             return [];
         }
-    }  
-
+    }
+    
    
 
    async sendPnLChart(chatId) {
@@ -385,7 +429,109 @@ async autoSell(userId, pos, exitPrice, reason) {
         await this.bot.sendMessage(userId, `❌ Auto-sell failed for ${pos.symbol}: ${error.message}`);
     }
 }
-    
+async getDexScreenerPrices() {
+    try {
+        // DexScreener: ~300 requests/minute
+        await this.rateLimiter.checkLimit('dexscreener', 200, 60000); // Conservative 200/min
+        
+        const response = await axios.get(`${DEXSCREENER_API_URL}/search?q=SOL`, {
+            timeout: 10000,
+            headers: {
+                'User-Agent': 'TradingBot/1.0'
+            }
+        });
+        
+        const prices = {};
+        
+        if (response.data.pairs) {
+            response.data.pairs.slice(0, 10).forEach(pair => {
+                if (pair.baseToken && pair.priceUsd) {
+                    const symbol = pair.baseToken.symbol.toUpperCase();
+                    prices[symbol] = {
+                        price: parseFloat(pair.priceUsd),
+                        change24h: parseFloat(pair.priceChange?.h24 || 0),
+                        volume24h: parseFloat(pair.volume?.h24 || 0),
+                        marketCap: parseFloat(pair.marketCap || 0)
+                    };
+                }
+            });
+        }
+
+        return prices;
+    } catch (error) {
+        console.error('❌ DexScreener API error:', error.message);
+        if (error.response?.status === 429) {
+            console.log('🚦 DexScreener rate limited, waiting 30 seconds...');
+            await new Promise(resolve => setTimeout(resolve, 30000));
+        }
+        return {};
+    }
+} 
+
+async getJupiterQuote(inputMint, outputMint, amount) {
+    try {
+        // Jupiter: ~20-50 requests/second
+        await this.rateLimiter.checkLimit('jupiter', 30, 1000); // 30 per second
+        
+        const response = await axios.get(`${JUPITER_API_URL}/quote`, {
+            params: {
+                inputMint,
+                outputMint,
+                amount,
+                slippageBps: Math.floor(MAX_SLIPPAGE * 10000)
+            },
+            timeout: 8000 // 8 second timeout
+        });
+        
+        return response.data;
+    } catch (error) {
+        console.error('❌ Jupiter quote error:', error.message);
+        if (error.response?.status === 429) {
+            console.log('🚦 Jupiter rate limited, waiting 10 seconds...');
+            await new Promise(resolve => setTimeout(resolve, 10000));
+            return null;
+        }
+        return null;
+    }
+} 
+
+async getEnhancedJupiterQuote(inputMint, outputMint, amount, volatilityLevel) {
+    try {
+        await this.rateLimiter.checkLimit('jupiter', 30, 1000);
+        
+        // Adjust slippage based on volatility
+        let slippageBps = Math.floor(MAX_SLIPPAGE * 10000); // Default 1%
+        
+        if (volatilityLevel > 2.0) {
+            slippageBps = 200; // 2% for high volatility
+        } else if (volatilityLevel < 1.0) {
+            slippageBps = 50; // 0.5% for low volatility
+        }
+        
+        const response = await axios.get(`${JUPITER_API_URL}/quote`, {
+            params: {
+                inputMint,
+                outputMint,
+                amount,
+                slippageBps,
+                onlyDirectRoutes: volatilityLevel > 2.0,
+                maxAccounts: volatilityLevel > 2.0 ? 10 : 20
+            },
+            timeout: 8000
+        });
+        
+        return response.data;
+    } catch (error) {
+        console.error('Enhanced Jupiter quote error:', error.message);
+        if (error.response?.status === 429) {
+            await new Promise(resolve => setTimeout(resolve, 10000));
+        }
+        return null;
+    }
+} 
+
+
+
     
 async executeSwapSafely(route) {
     try {
@@ -996,35 +1142,30 @@ async selectBestTokenFromCandidates(tokens) {
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
-    
-    // Filter and sort by comprehensive score
-    const viableTokens = analyzedTokens
-        .filter(token => {
-            const analysis = token.analysis;
-            
-            // Minimum requirements
-            if (analysis.overallScore < 40) return false;
-            if (analysis.recommendation === 'AVOID') return false;
-            
-            // Additional safety checks
-            if (analysis.analysis?.security?.score < 50) return false;
-            if (analysis.analysis?.liquidity?.score < 30) return false;
-            
-            return true;
-        })
-        .sort((a, b) => b.finalScore - a.finalScore);
-    
-    if (viableTokens.length === 0) {
-        console.log('No tokens passed enhanced analysis criteria');
-        return null;
-    }
-    
-    const selected = viableTokens[0];
-    console.log(`Selected ${selected.symbol} with score ${selected.finalScore}/100 (${selected.analysis.recommendation})`);
-    
-    return selected; 
 
+
+    const viableTokens = analyzedTokens
+    .filter(token => {
+        const analysis = token.analysis;
+        if (analysis.overallScore < 40) return false;
+        if (analysis.recommendation === 'AVOID') return false;
+        if (analysis.analysis?.security?.score < 50) return false;
+        if (analysis.analysis?.liquidity?.score < 30) return false;
+        return true;
+    })
+    .sort((a, b) => b.finalScore - a.finalScore);
+
+if (viableTokens.length === 0) {
+    console.log('No tokens passed enhanced analysis criteria');
+    return null;
 }
+
+const selected = viableTokens[0];
+console.log(`Selected ${selected.symbol} with score ${selected.finalScore}/100`);
+
+return selected;
+} 
+    
 
 async checkDailyLimits(userId) {
     const user = this.getUserState(userId);
@@ -1663,27 +1804,31 @@ async getCurrentLiquidity(tokenAddress) {
 
     // REAL PRICE MONITORING IMPLEMENTATION
     async startPriceMonitoring() {
-        console.log('🔍 Starting real-time price monitoring...');
+        console.log('🔍 Starting conservative price monitoring...');
         
         setInterval(async () => {
             try {
                 await this.updatePrices();
+                await new Promise(resolve => setTimeout(resolve, 5000)); // 5 sec gap
                 await this.checkPriceAlerts();
+                await new Promise(resolve => setTimeout(resolve, 5000)); // 5 sec gap
                 await this.analyzeMarketConditions();
             } catch (error) {
                 console.error('❌ Price monitoring error:', error);
             }
-        }, 30000); // Every 30 seconds
+        }, 120000); // Every 2 minutes instead of 30 seconds
     }
 
     async updatePrices() {
         try {
-            // Get prices from multiple sources
-            const [cgPrices, dexPrices] = await Promise.all([
-                this.getCoinGeckoPrices(),
-                this.getDexScreenerPrices()
-            ]);
-
+            console.log('📊 Starting price update...');
+            
+            // Sequential calls to avoid overwhelming APIs
+            const cgPrices = await this.getCoinGeckoPrices();
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second gap
+            
+            const dexPrices = await this.getDexScreenerPrices();
+    
             // Merge and update cache
             const allPrices = { ...cgPrices, ...dexPrices };
             
@@ -1698,7 +1843,7 @@ async getCurrentLiquidity(tokenAddress) {
                     trend: prevPrice ? (price.price > prevPrice.price ? 'up' : 'down') : 'neutral'
                 });
             }
-
+    
             console.log(`📊 Updated prices for ${Object.keys(allPrices).length} tokens`);
         } catch (error) {
             console.error('❌ Error updating prices:', error);
