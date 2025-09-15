@@ -3213,6 +3213,8 @@ console.log(`   - USE_WEBHOOK: ${USE_WEBHOOK}`);
 console.log(`   - PORT: ${PORT}`);
 console.log(`   - SOLANA_RPC: ${process.env.SOLANA_RPC_URL || 'Default'}`);
 console.log(`   - WALLET: ${process.env.PRIVATE_KEY ? '✅' : '❌'}`);
+console.log("ENV PRIVATE_KEY length:", process.env.PRIVATE_KEY?.length);
+console.log("ENV PRIVATE_KEY preview:", process.env.PRIVATE_KEY?.slice(0, 20));
 
 // Graceful shutdown handlers
 process.on('SIGTERM', () => bot.shutdown());
