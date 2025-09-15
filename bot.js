@@ -2593,30 +2593,27 @@ Bot Status: ${USE_WEBHOOK ? '📡 Webhook' : '🔄 Polling'} | Wallet: ${this.wa
             await this.bot.sendMessage(msg.chat.id, `⏸️ Auto-trading has been paused.`);
        });
 
-       this.bot.onText(/\/wallet/, async (msg) => {
-        if (!this.isAuthorized(msg.from.id)) return;
-    
-        if (!this.wallet || !this.connection) {
-            await this.bot.sendMessage(msg.chat.id, `❌ Wallet not configured.`);
-            return;
-        }
-    
-        try {
-            const address = this.wallet.publicKey.toBase58();
-            const lamports = await this.connection.getBalance(this.wallet.publicKey);
-            const sol = lamports / LAMPORTS_PER_SOL;
-    
-            await this.bot.sendMessage(msg.chat.id, `
-    🔐 **Wallet Info**
-    🧾 Address: \`${address}\`
-    💰 Balance: ${sol.toFixed(4)} SOL
-            `.trim(), { parse_mode: 'Markdown' });
-    
-        } catch (err) {
-            console.error('❌ Error fetching wallet info:', err.message);
-            await this.bot.sendMessage(msg.chat.id, `❌ Failed to fetch wallet info.`);
-        }
-    });
+      this.bot.onText(/\/wallet/, async (msg) => {
+  if (!this.isAuthorized(msg.from.id)) return;
+
+  try {
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+    const address = wallet.publicKey.toBase58();
+    const lamports = await this.connection.getBalance(wallet.publicKey);
+    const sol = lamports / LAMPORTS_PER_SOL;
+
+    await this.bot.sendMessage(msg.chat.id, `
+🔐 **Wallet Info**
+🧾 Address: \`${address}\`
+💰 Balance: ${sol.toFixed(4)} SOL
+    `.trim(), { parse_mode: 'Markdown' });
+
+  } catch (err) {
+    console.error('❌ Error fetching wallet info:', err.message);
+    await this.bot.sendMessage(msg.chat.id, `❌ Failed to fetch wallet info.`);
+  }
+});
+
 
     
     this.bot.onText(/\/positions/, async (msg) => {
