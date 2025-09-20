@@ -2244,7 +2244,7 @@ async startAutoTrading() {
     }, 30000); // Every 30 seconds
 }
 
-    async validateTrade(userState, tokenData, amount, side) {
+    async validateTrade(userState, tokenData, amount,side ) {
         // Check if user has sufficient balance
         if (side === 'buy' && userState.currentBalance < amount) {
             return { valid: false, reason: 'Insufficient balance' };
