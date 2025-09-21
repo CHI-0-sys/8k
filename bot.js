@@ -592,6 +592,16 @@ async executeSwapSafely(route) {
     }
 } 
 
+async getHoursSinceLastTrade() {  // ← Inside class
+    let lastTradeTime = 0;
+    for (const [userId, user] of this.userStates.entries()) {
+        if (user.lastTradeAt && user.lastTradeAt > lastTradeTime) {
+            lastTradeTime = user.lastTradeTime;
+        }
+    }
+    return lastTradeTime ? (Date.now() - lastTradeTime) / (1000 * 60 * 60) : 999;
+}
+
 async comprehensiveTokenAnalysis(tokenAddress, symbol) {
     try {
         console.log(`Running comprehensive analysis for ${symbol}...`);
@@ -1144,16 +1154,45 @@ async selectBestTokenFromCandidates(tokens) {
     }
 
 
-    const viableTokens = analyzedTokens
-    .filter(token => {
-        const analysis = token.analysis;
-        if (analysis.overallScore < 40) return false;
-        if (analysis.recommendation === 'AVOID') return false;
-        if (analysis.analysis?.security?.score < 50) return false;
-        if (analysis.analysis?.liquidity?.score < 30) return false;
-        return true;
-    })
-    .sort((a, b) => b.finalScore - a.finalScore);
+
+
+// Replace the existing viableTokens filter block with this safer approach
+const viableTokens = analyzedTokens
+.filter(token => {
+    const analysis = token.analysis;
+    
+    // Critical safety checks that must always pass (non-negotiable)
+    if (analysis.analysis?.security?.score < 25) return false; // Absolute minimum security
+    if (analysis.analysis?.liquidity?.score < 15) return false; // Must have some liquidity
+    
+    // Adaptive scoring based on market conditions
+    let requiredOverallScore = 35; // Relaxed from 40
+    let requiredSecurityScore = 35; // Relaxed from 50  
+    let requiredLiquidityScore = 20; // Relaxed from 30
+    
+    // Further relax if no trades have occurred recently
+    const hoursSinceLastTrade = this.getHoursSinceLastTrade();
+    if (hoursSinceLastTrade > 48) {
+        requiredOverallScore = 25;
+        requiredSecurityScore = 30;
+        requiredLiquidityScore = 15;
+        console.log('🔄 Relaxing filters due to 48+ hours without trades');
+    }
+    
+    // Main filter logic (all must pass)
+    if (analysis.overallScore < requiredOverallScore) return false;
+    if (analysis.recommendation === 'AVOID') return false;
+    if (analysis.analysis?.security?.score < requiredSecurityScore) return false;
+    if (analysis.analysis?.liquidity?.score < requiredLiquidityScore) return false;
+    
+    // Additional safety for very low scores
+    if (analysis.overallScore < 20 && analysis.analysis?.security?.score < 30) return false;
+    
+    return true;
+})
+.sort((a, b) => b.finalScore - a.finalScore);
+
+
 
 if (viableTokens.length === 0) {
     console.log('No tokens passed enhanced analysis criteria');
