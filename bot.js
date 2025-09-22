@@ -167,6 +167,13 @@ class TradingBot {
         this.startStopLossMonitoring();
         this.setupExpressRoutes();
         this.startAutoTrading();
+        
+        this.app.listen(PORT, '0.0.0.0', () => {
+            console.log(`Server running on port ${PORT}`);
+            if (USE_WEBHOOK) {
+                console.log(`Webhook endpoint: ${WEBHOOK_URL}/webhook`);
+            }
+        });
     } 
   
 
@@ -1756,17 +1763,24 @@ async getCurrentLiquidity(tokenAddress) {
         }
     }
 
+    
     setupExpressRoutes() {
+        // Webhook endpoint
+        this.app.post('/webhook', (req, res) => {
+            console.log('Webhook received');
+            this.bot.processUpdate(req.body);
+            res.sendStatus(200);
+        });
+    
         // Health check endpoint
         this.app.get('/health', (req, res) => {
             res.json({ 
                 status: 'healthy',
-                timestamp: new Date().toISOString(),
-                bot_username: this.bot.options?.username || 'unknown'
+                timestamp: new Date().toISOString()
             });
         });
-
-        // Status endpoint
+    
+        // Status endpoint  
         this.app.get('/status', (req, res) => {
             res.json({
                 users: this.userStates.size,
@@ -1778,28 +1792,8 @@ async getCurrentLiquidity(tokenAddress) {
                 stopLossOrders: this.stopLossOrders.size
             });
         });
-
-        // Webhook endpoint
-        this.app.get('/health', (req, res) => {
-            res.json({ 
-                status: 'healthy',
-                timestamp: new Date().toISOString(),
-                bot_username: this.bot.options?.username || 'unknown'
-            });
-        });
-
-        this.app.post('/webhook', (req, res) => {
-            this.bot.processUpdate(req.body);
-            res.sendStatus(200);
-        });
     
-        // Start Express server
-        this.app.listen(PORT, '0.0.0.0', () => {
-            console.log(`🚀 Server running on port ${PORT}`);
-            if (USE_WEBHOOK) {
-                console.log(`📡 Webhook endpoint: ${WEBHOOK_URL}/webhook`);
-            }
-        });
+        // DON'T start server here - remove the app.listen() part
     }
 
     async loadUserStates() {
