@@ -1780,15 +1780,19 @@ async getCurrentLiquidity(tokenAddress) {
         });
 
         // Webhook endpoint
+        this.app.get('/health', (req, res) => {
+            res.json({ 
+                status: 'healthy',
+                timestamp: new Date().toISOString(),
+                bot_username: this.bot.options?.username || 'unknown'
+            });
+        });
+
         this.app.post('/webhook', (req, res) => {
-            console.log('=== WEBHOOK RECEIVED ===');
-            console.log('Body:', JSON.stringify(req.body, null, 2));
-            console.log('========================');
-            
             this.bot.processUpdate(req.body);
             res.sendStatus(200);
         });
-
+    
         // Start Express server
         this.app.listen(PORT, '0.0.0.0', () => {
             console.log(`🚀 Server running on port ${PORT}`);
