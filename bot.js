@@ -1365,9 +1365,9 @@ async checkMarketConditions() {
         
         const sentiment = this.marketSentiment.sentiment;
         const volume = this.marketSentiment.volume;
-        
+       
         // Don't trade in extremely bearish conditions
-        if (sentiment === 'bearish' && this.marketSentiment.losers > this.marketSentiment.gainers * 2) {
+        if (sentiment === 'bearish' && this.marketSentiment.losers > this.marketSentiment.gainers * 3) {
             console.log('Market conditions too bearish for trading');
             return false;
         }
