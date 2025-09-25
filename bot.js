@@ -191,47 +191,56 @@ class TradingBot {
         try {
             console.log('[Helius] Searching for the latest token candidates...');
     
-            // We will use the Helius DAS API's "searchAssets" method to find the newest tokens.
             const response = await axios.post(url, {
                 jsonrpc: '2.0',
                 id: 'helius-trading-bot',
                 method: 'searchAssets',
                 params: {
-                    ownerAddress: null, // We are searching the whole chain, not a specific wallet
-                    tokenType: 'fungible', // We want tokens (like meme coins), not NFTs
+                    ownerAddress: null,
+                    tokenType: 'fungible',
                     sortBy: {
-                        sortBy: 'created', // Sort by the creation date
-                        sortDirection: 'desc', // 'desc' means newest first
+                        sortBy: 'created',
+                        sortDirection: 'desc',
                     },
-                    limit: 100, // Get the top 100 newest tokens
+                    limit: 100,
                 },
             });
     
-            const assets = response.data.result.items;
+            // --- FIX IS HERE ---
+            // 1. Check if the Helius API returned a specific error message.
+            if (response.data.error) {
+                console.error(`❌ Helius API returned an error: ${response.data.error.message}`);
+                // This will tell us if the API key is wrong or if there's another issue.
+                return [];
+            }
+    
+            // 2. Safely access the results only after confirming there was no error.
+            const assets = response.data.result?.items;
             
             if (!assets || assets.length === 0) {
                 console.log('[Helius] No new token candidates were found.');
                 return [];
             }
+            // --- END OF FIX ---
     
-            // The rest of our bot expects a simple format: { address, symbol }
-            // We will map the detailed data from Helius to this format.
             const candidates = assets
                 .map(asset => ({
                     address: asset.id,
                     symbol: asset.content?.metadata?.symbol,
                 }))
-                .filter(c => c.symbol && c.address); // Important: Filter out any tokens that are missing a symbol
+                .filter(c => c.symbol && c.address);
     
             console.log(`[Helius] Found ${candidates.length} potential candidates to analyze.`);
             return candidates;
     
         } catch (error) {
-            console.error('❌ Helius token fetch failed:', error.response ? error.response.data : error.message);
+            // This catch block will now handle network errors (e.g., can't connect to Helius)
+            console.error('❌ Helius token fetch failed with a network or parsing error:', error.message);
             return [];
         }
     }
-   
+    
+    
 
    async sendPnLChart(chatId) {
     const width = 800;
