@@ -206,18 +206,13 @@ class TradingBot {
                 },
             });
     
-            // --- NEW, MORE ROBUST FIX ---
-            // 1. Log the entire data payload from Helius for debugging.
-            // This is the most important step.
             console.log('[Helius] Received raw response:', JSON.stringify(response.data, null, 2));
     
-            // 2. Check if the Helius API returned a specific error message in its payload.
             if (response.data.error) {
                 console.error(`❌ Helius API returned an error: ${response.data.error.message}`);
                 return [];
             }
     
-            // 3. Check if the 'result' object itself is missing, which is the cause of the crash.
             if (!response.data.result) {
                 console.error(`❌ Helius response is missing the 'result' object. The payload is not as expected.`);
                 return [];
@@ -229,7 +224,6 @@ class TradingBot {
                 console.log('[Helius] No new token candidates were found in the response.');
                 return [];
             }
-            // --- END OF FIX ---
     
             const candidates = assets
                 .map(asset => ({
@@ -242,10 +236,25 @@ class TradingBot {
             return candidates;
     
         } catch (error) {
-            console.error('❌ Helius token fetch failed with a network or status code error:', error.message);
+            // --- DEFINITIVE FIX IS HERE ---
+            // This enhanced catch block will inspect the detailed error from the failed network request.
+            if (error.response) {
+                // This case handles HTTP errors (e.g., 401, 403, 500) where Helius sends a response.
+                console.error('❌ Helius API request failed with a status code:');
+                console.error(`   - Status: ${error.response.status}`);
+                console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
+            } else if (error.request) {
+                // This case handles network errors where no response was received.
+                console.error('❌ Helius API request failed: No response received from server.');
+            } else {
+                // This handles other errors that occurred before the request was even sent.
+                console.error('❌ An unexpected error occurred during the Helius API request:', error.message);
+            }
             return [];
+            // --- END OF FIX ---
         }
     }
+    
     
 
    async sendPnLChart(chatId) {
