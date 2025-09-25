@@ -206,19 +206,27 @@ class TradingBot {
                 },
             });
     
-            // --- FIX IS HERE ---
-            // 1. Check if the Helius API returned a specific error message.
+            // --- NEW, MORE ROBUST FIX ---
+            // 1. Log the entire data payload from Helius for debugging.
+            // This is the most important step.
+            console.log('[Helius] Received raw response:', JSON.stringify(response.data, null, 2));
+    
+            // 2. Check if the Helius API returned a specific error message in its payload.
             if (response.data.error) {
                 console.error(`❌ Helius API returned an error: ${response.data.error.message}`);
-                // This will tell us if the API key is wrong or if there's another issue.
                 return [];
             }
     
-            // 2. Safely access the results only after confirming there was no error.
-            const assets = response.data.result?.items;
+            // 3. Check if the 'result' object itself is missing, which is the cause of the crash.
+            if (!response.data.result) {
+                console.error(`❌ Helius response is missing the 'result' object. The payload is not as expected.`);
+                return [];
+            }
+    
+            const assets = response.data.result.items;
             
             if (!assets || assets.length === 0) {
-                console.log('[Helius] No new token candidates were found.');
+                console.log('[Helius] No new token candidates were found in the response.');
                 return [];
             }
             // --- END OF FIX ---
@@ -234,12 +242,10 @@ class TradingBot {
             return candidates;
     
         } catch (error) {
-            // This catch block will now handle network errors (e.g., can't connect to Helius)
-            console.error('❌ Helius token fetch failed with a network or parsing error:', error.message);
+            console.error('❌ Helius token fetch failed with a network or status code error:', error.message);
             return [];
         }
     }
-    
     
 
    async sendPnLChart(chatId) {
