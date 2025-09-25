@@ -87,35 +87,57 @@ const TRADING_PLAN = [
 
 
 
-class RateLimiter {
+class HeliusRateLimiter {
     constructor() {
         this.limits = new Map();
+        this.requestQueue = [];
+        this.processing = false;
     }
     
-    async checkLimit(key, maxRequests, timeWindow) {
-        if (!this.limits.has(key)) {
-            this.limits.set(key, { count: 0, resetTime: Date.now() + timeWindow });
-        }
-        
-        const limit = this.limits.get(key);
-        
-        if (Date.now() > limit.resetTime) {
-            limit.count = 0;
-            limit.resetTime = Date.now() + timeWindow;
-        }
-        
-        if (limit.count >= maxRequests) {
-            const waitTime = limit.resetTime - Date.now();
-            console.log(`Rate limit reached for ${key}. Waiting ${waitTime}ms`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            limit.count = 0;
-            limit.resetTime = Date.now() + timeWindow;
-        }
-        
-        limit.count++;
-        return true;
+    async checkLimit(key, maxRequests = 100, timeWindow = 60000) {
+        return new Promise((resolve) => {
+            this.requestQueue.push({ key, maxRequests, timeWindow, resolve });
+            this.processQueue();
+        });
     }
-}    
+    
+    async processQueue() {
+        if (this.processing || this.requestQueue.length === 0) return;
+        
+        this.processing = true;
+        
+        while (this.requestQueue.length > 0) {
+            const { key, maxRequests, timeWindow, resolve } = this.requestQueue.shift();
+            
+            if (!this.limits.has(key)) {
+                this.limits.set(key, { count: 0, resetTime: Date.now() + timeWindow });
+            }
+            
+            const limit = this.limits.get(key);
+            
+            if (Date.now() > limit.resetTime) {
+                limit.count = 0;
+                limit.resetTime = Date.now() + timeWindow;
+            }
+            
+            if (limit.count >= maxRequests) {
+                const waitTime = Math.min(limit.resetTime - Date.now(), 60000); // Max 1 min wait
+                console.log(`[Helius] Rate limit reached for ${key}. Waiting ${waitTime}ms`);
+                await new Promise(res => setTimeout(res, waitTime));
+                limit.count = 0;
+                limit.resetTime = Date.now() + timeWindow;
+            }
+            
+            limit.count++;
+            resolve(true);
+            
+            // Small delay between requests
+            await new Promise(res => setTimeout(res, 50));
+        }
+        
+        this.processing = false;
+    }
+}
 
 
 
@@ -140,7 +162,7 @@ class TradingBot {
             console.log('🔄 Using polling mode');
         }
         
-        this.rateLimiter = new RateLimiter();
+        this.heliusRateLimiter = new HeliusRateLimiter();
         this.userStates = new Map();
         this.activeTrades = new Map();
         this.priceAlerts = new Map();
@@ -197,61 +219,61 @@ class TradingBot {
                 method: 'searchAssets',
                 params: {
                     ownerAddress: null,
-                    tokenType: 'fungible',
+                    creatorAddress: null,
+                    jsonUri: null,
                     sortBy: {
                         sortBy: 'created',
                         sortDirection: 'desc',
                     },
                     limit: 100,
+                    page: 1,
+                    before: null,
+                    after: null
                 },
             });
     
-            console.log('[Helius] Received raw response:', JSON.stringify(response.data, null, 2));
+            console.log('[Helius] Raw response:', JSON.stringify(response.data, null, 2));
     
             if (response.data.error) {
-                console.error(`❌ Helius API returned an error: ${response.data.error.message}`);
+                console.error(`❌ Helius API error: ${response.data.error.message}`);
                 return [];
             }
     
-            if (!response.data.result) {
-                console.error(`❌ Helius response is missing the 'result' object. The payload is not as expected.`);
+            const result = response.data.result;
+            if (!result || !result.items) {
+                console.error(`❌ Unexpected response format from Helius`);
                 return [];
             }
     
-            const assets = response.data.result.items;
-            
-            if (!assets || assets.length === 0) {
-                console.log('[Helius] No new token candidates were found in the response.');
-                return [];
-            }
+            const assets = result.items;
+            console.log(`[Helius] Found ${assets.length} assets`);
     
+            // Filter for fungible tokens only
             const candidates = assets
+                .filter(asset => asset.interface === 'FungibleToken' || asset.interface === 'FungibleAsset')
                 .map(asset => ({
                     address: asset.id,
-                    symbol: asset.content?.metadata?.symbol,
+                    symbol: asset.content?.metadata?.symbol || 'UNKNOWN',
+                    name: asset.content?.metadata?.name || 'Unknown Token',
+                    description: asset.content?.metadata?.description,
+                    image: asset.content?.files?.[0]?.uri
                 }))
-                .filter(c => c.symbol && c.address);
+                .filter(c => c.symbol !== 'UNKNOWN' && c.address && !c.symbol.includes('_'));
     
-            console.log(`[Helius] Found ${candidates.length} potential candidates to analyze.`);
-            return candidates;
+            console.log(`[Helius] Filtered to ${candidates.length} fungible token candidates`);
+            return candidates.slice(0, 50); // Limit to top 50
     
         } catch (error) {
-            // --- DEFINITIVE FIX IS HERE ---
-            // This enhanced catch block will inspect the detailed error from the failed network request.
             if (error.response) {
-                // This case handles HTTP errors (e.g., 401, 403, 500) where Helius sends a response.
-                console.error('❌ Helius API request failed with a status code:');
+                console.error('❌ Helius API request failed:');
                 console.error(`   - Status: ${error.response.status}`);
                 console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
             } else if (error.request) {
-                // This case handles network errors where no response was received.
-                console.error('❌ Helius API request failed: No response received from server.');
+                console.error('❌ Helius API request failed: No response received');
             } else {
-                // This handles other errors that occurred before the request was even sent.
-                console.error('❌ An unexpected error occurred during the Helius API request:', error.message);
+                console.error('❌ Helius API error:', error.message);
             }
             return [];
-            // --- END OF FIX ---
         }
     }
     
@@ -669,33 +691,191 @@ async checkTokenVerification(tokenAddress) {
     } catch (error) {
         return false;
     }
+}  
+
+async analyzeLiquidity(tokenAddress) {
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+    
+    try {
+        // Get token accounts to analyze distribution
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'get-token-accounts',
+            method: 'getTokenAccounts',
+            params: {
+                mint: tokenAddress,
+                limit: 100
+            }
+        });
+
+        if (response.data.error) {
+            console.error(`Helius getTokenAccounts error: ${response.data.error.message}`);
+            return { score: 20, reason: 'Could not fetch token accounts' };
+        }
+
+        const accounts = response.data.result?.token_accounts || [];
+        
+        if (accounts.length === 0) {
+            return { score: 0, reason: 'No token holders found' };
+        }
+
+        let score = 50; // Base score
+        let totalAmount = 0;
+        const amounts = [];
+
+        // Analyze holder distribution
+        accounts.forEach(account => {
+            const amount = parseFloat(account.amount || 0);
+            amounts.push(amount);
+            totalAmount += amount;
+        });
+
+        const holderCount = accounts.length;
+        const avgHolding = totalAmount / holderCount;
+        const maxHolding = Math.max(...amounts);
+        const concentration = maxHolding / totalAmount;
+
+        // Score based on holder count
+        if (holderCount > 100) score += 25;
+        else if (holderCount > 50) score += 15;
+        else if (holderCount > 20) score += 10;
+        else if (holderCount < 5) score -= 20;
+
+        // Score based on concentration (lower is better)
+        if (concentration < 0.3) score += 20; // Top holder has < 30%
+        else if (concentration < 0.5) score += 10; // Top holder has < 50%
+        else if (concentration > 0.8) score -= 25; // Top holder has > 80%
+
+        return {
+            score: Math.max(0, Math.min(100, score)),
+            reason: `${holderCount} holders, top holder: ${(concentration * 100).toFixed(1)}%`,
+            holderCount,
+            concentration,
+            totalSupply: totalAmount
+        };
+
+    } catch (error) {
+        console.error(`Liquidity analysis failed for ${tokenAddress}:`, error.message);
+        return { score: 20, reason: `Analysis failed: ${error.message}` };
+    }
 } 
 
-async getTokenMetadata(tokenAddress) {
+async getHeliusSignatures(tokenAddress, limit = 100, before = null, until = null) {
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+    
     try {
-        const mint = publicKey(tokenAddress);
+        const params = {
+            id: tokenAddress,
+            limit: limit
+        };
         
-        // Fetch the digital asset (includes metadata)
-        const digitalAsset = await fetchDigitalAsset(this.umi, mint);
-        
-        if (digitalAsset && digitalAsset.metadata) {
-            return {
-                name: digitalAsset.metadata.name,
-                symbol: digitalAsset.metadata.symbol,
-                description: digitalAsset.metadata.description,
-                image: digitalAsset.metadata.image,
-                attributes: digitalAsset.metadata.attributes,
-                creators: digitalAsset.metadata.creators,
-                sellerFeeBasisPoints: digitalAsset.metadata.sellerFeeBasisPoints,
-                updateAuthority: digitalAsset.metadata.updateAuthority,
-                isMutable: digitalAsset.metadata.isMutable,
-                primarySaleHappened: digitalAsset.metadata.primarySaleHappened,
-                collection: digitalAsset.metadata.collection,
-                uses: digitalAsset.metadata.uses
-            };
+        if (before) params.before = before;
+        if (until) params.until = until;
+
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'get-asset-signatures',
+            method: 'getSignaturesForAsset',
+            params: params
+        });
+
+        if (response.data.error) {
+            // If getSignaturesForAsset doesn't work, try alternative approach
+            console.log(`Trying alternative signature method for ${tokenAddress}`);
+            return [];
         }
+
+        return response.data.result || [];
+    } catch (error) {
+        console.error(`Helius getSignatures failed for ${tokenAddress}:`, error.message);
+        return [];
+    }
+} 
+
+async getHeliusTransactions(tokenAddress, limit = 100) {
+    try {
+        const signatures = await this.getHeliusSignatures(tokenAddress, limit);
+        if (signatures.length === 0) return [];
+
+        const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+        const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+
+        // Get transaction details in batches
+        const batchSize = 25;
+        const transactions = [];
         
-        return null;
+        for (let i = 0; i < signatures.length; i += batchSize) {
+            const batch = signatures.slice(i, i + batchSize);
+            
+            const response = await axios.post(url, {
+                jsonrpc: '2.0',
+                id: 'get-parsed-transactions',
+                method: 'getParsedTransactions',
+                params: [
+                    batch.map(s => s.signature || s),
+                    {
+                        maxSupportedTransactionVersion: 0,
+                        commitment: 'confirmed'
+                    }
+                ]
+            });
+
+            if (response.data.result) {
+                transactions.push(...response.data.result.filter(tx => tx !== null));
+            }
+
+            // Add delay between batches to avoid rate limits
+            if (i + batchSize < signatures.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+
+        return transactions;
+    } catch (error) {
+        console.error(`Helius getTransactions failed for ${tokenAddress}:`, error.message);
+        return [];
+    }
+} 
+
+
+
+async getTokenMetadata(tokenAddress) {
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+    
+    try {
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'get-asset',
+            method: 'getAsset',
+            params: {
+                id: tokenAddress
+            }
+        });
+
+        if (response.data.error) {
+            console.error(`Helius getAsset error: ${response.data.error.message}`);
+            return null;
+        }
+
+        const asset = response.data.result;
+        if (!asset) return null;
+
+        return {
+            name: asset.content?.metadata?.name,
+            symbol: asset.content?.metadata?.symbol,
+            description: asset.content?.metadata?.description,
+            image: asset.content?.files?.[0]?.uri,
+            attributes: asset.content?.metadata?.attributes,
+            creators: asset.creators,
+            royalty: asset.royalty,
+            burnt: asset.burnt,
+            supply: asset.supply,
+            mutable: asset.mutable,
+            frozen: asset.frozen
+        };
     } catch (error) {
         console.error(`Metadata fetch failed for ${tokenAddress}:`, error.message);
         return null;
@@ -823,61 +1003,104 @@ async analyzeTokenSecurity(tokenAddress) {
 
 async analyzeTokenSecurity(tokenAddress) {
     try {
-        const accountInfo = await this.connection.getParsedAccountInfo(new PublicKey(tokenAddress));
         let score = 60; // Base score
         const positiveFactors = [];
         const negativeFactors = [];
         
-        if (!accountInfo.value) {
-            return { score: 0, reason: 'Token account not found', positiveFactors: [], negativeFactors: ['Invalid token'] };
+        // Get token metadata from Helius
+        const metadata = await this.getTokenMetadata(tokenAddress);
+        
+        if (metadata) {
+            score += 15;
+            positiveFactors.push('Has valid metadata');
+            
+            // Check metadata completeness
+            if (metadata.name && metadata.symbol && metadata.description) {
+                score += 10;
+                positiveFactors.push('Complete token information');
+            }
+            
+            if (metadata.image) {
+                score += 5;
+                positiveFactors.push('Has token logo');
+            }
+            
+            if (!metadata.mutable) {
+                score += 15;
+                positiveFactors.push('Immutable metadata');
+            } else {
+                negativeFactors.push('Mutable metadata');
+            }
+            
+            if (metadata.frozen) {
+                score -= 20;
+                negativeFactors.push('Token is frozen');
+            }
+            
+            if (metadata.burnt) {
+                score -= 30;
+                negativeFactors.push('Token is burnt');
+            }
+            
+        } else {
+            score -= 15;
+            negativeFactors.push('No metadata found');
         }
         
-        // Check if token has metadata
+        // Check on-chain token account info
         try {
-            const metadataPDA = await this.getTokenMetadata(tokenAddress);
-            if (metadataPDA) {
-                score += 15;
-                positiveFactors.push('Has metadata');
+            const accountInfo = await this.connection.getParsedAccountInfo(new PublicKey(tokenAddress));
+            const mintInfo = accountInfo.value?.data?.parsed?.info;
+            
+            if (mintInfo) {
+                if (mintInfo.mintAuthority === null) {
+                    score += 20;
+                    positiveFactors.push('Mint authority renounced');
+                } else {
+                    score -= 10;
+                    negativeFactors.push('Mint authority active');
+                }
+                
+                if (mintInfo.freezeAuthority === null) {
+                    score += 15;
+                    positiveFactors.push('No freeze authority');
+                } else {
+                    score -= 10;
+                    negativeFactors.push('Has freeze authority');
+                }
+                
+                // Check supply
+                const supply = parseFloat(mintInfo.supply || 0);
+                if (supply > 0 && supply < 1e15) {
+                    score += 5;
+                    positiveFactors.push('Reasonable token supply');
+                } else if (supply >= 1e15) {
+                    score -= 15;
+                    negativeFactors.push('Extremely high token supply');
+                }
             }
         } catch (e) {
-            score -= 10;
-            negativeFactors.push('No metadata');
-        }
-        
-        // Check for verified status (simplified check)
-        const isVerified = await this.checkTokenVerification(tokenAddress);
-        if (isVerified) {
-            score += 20;
-            positiveFactors.push('Verified token');
-        }
-        
-        // Check freeze authority (tokens without freeze authority are safer)
-        if (accountInfo.value.data?.parsed?.info?.freezeAuthority === null) {
-            score += 10;
-            positiveFactors.push('No freeze authority');
-        } else {
-            negativeFactors.push('Has freeze authority');
-        }
-        
-        // Check mint authority
-        if (accountInfo.value.data?.parsed?.info?.mintAuthority === null) {
-            score += 10;
-            positiveFactors.push('Mint authority renounced');
-        } else {
-            negativeFactors.push('Mint authority active');
+            negativeFactors.push('Could not verify on-chain data');
         }
         
         return {
             score: Math.max(0, Math.min(100, score)),
-            reason: `Security analysis complete`,
+            reason: `Security analysis complete (${positiveFactors.length} positive, ${negativeFactors.length} negative factors)`,
             positiveFactors,
-            negativeFactors
+            negativeFactors,
+            metadata
         };
         
     } catch (error) {
-        return { score: 0, reason: `Security check failed: ${error.message}`, positiveFactors: [], negativeFactors: [] };
+        return { 
+            score: 0, 
+            reason: `Security check failed: ${error.message}`, 
+            positiveFactors: [], 
+            negativeFactors: ['Analysis failed'],
+            metadata: null
+        };
     }
-} 
+}
 
 async analyzeWhaleActivity(tokenAddress) {
     try {
@@ -934,6 +1157,35 @@ async analyzeWhaleActivity(tokenAddress) {
     }
 }
  
+async testHeliusConnection() {
+    console.log('🧪 Testing Helius API connection...');
+    
+    try {
+        // Test basic API connectivity
+        const candidates = await this.getHeliusTokenCandidates();
+        console.log(`✅ Token discovery: Found ${candidates.length} candidates`);
+        
+        if (candidates.length > 0) {
+            // Test metadata fetching
+            const testToken = candidates[0];
+            const metadata = await this.getTokenMetadata(testToken.address);
+            console.log(`✅ Metadata fetch: ${metadata ? 'Success' : 'Failed'}`);
+            
+            // Test liquidity analysis
+            const liquidity = await this.analyzeLiquidity(testToken.address);
+            console.log(`✅ Liquidity analysis: Score ${liquidity.score}`);
+        }
+        
+        console.log('🎉 Helius integration test complete!');
+        return true;
+    } catch (error) {
+        console.error('❌ Helius integration test failed:', error.message);
+        return false;
+    }
+} 
+
+
+
 async analyzeSentiment(tokenAddress, symbol) {
     try {
         // We will get transactions from the last hour
@@ -2685,6 +2937,19 @@ Bot Status: ${USE_WEBHOOK ? '📡 Webhook' : '🔄 Polling'} | Wallet: ${this.wa
             const tokenSymbol = match[1];
             await this.searchToken(msg.chat.id, tokenSymbol);
         });
+        
+        //test command 
+        this.bot.onText(/\/test_helius/ , async (msg) =>{
+            if (!this.isAuthorized(msg.from.id))return;
+
+            await this.bot.sendMessage(msg.chat.id,'testing helius integration....')
+            const success = await this.testHeliusConnection();
+            
+            await this.bot.sendMessage(msg.chat.id,
+                success ? 'helius integration working!' : 'helius integration failed'
+            );
+        });
+
 
         // Trade command
         this.bot.onText(/\/trade (\w+) ([\d.]+) (buy|sell)/, async (msg, match) => {
