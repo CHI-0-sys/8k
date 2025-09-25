@@ -1,7 +1,7 @@
 require('dotenv').config();
 console.log("env loaded");
 console.log("TELEGRAM_TOKEN:",process.env.TELEGRAM_TOKEN ? "Loaded" : "Missing");
-console.log("BITQUERY_API_KEY:",process.env.BITQUERY_API_KEY ? "Loaded" : "Missing");
+console.log("HELIUS_API_KEY:",process.env.HELIUS_API_KEY ? "Loaded" : "Missing");
 console.log("AUTHORISED_USERS:",process.env.AUTHORIZED_USERS);
 
 
@@ -19,7 +19,7 @@ const crypto = require('crypto');
 
 // Configuration
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const BITQUERY_API_KEY = process.env.BITQUERY_API_KEY;
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS ? process.env.AUTHORIZED_USERS.split(',') : [];
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const PRIVATE_KEY = process.env.PRIVATE_KEY; // Base58 encoded private key
@@ -179,87 +179,58 @@ class TradingBot {
 
 
 
-    async getBitqueryTokenCandidates() {
-        const query = `
-        {
-          solana {
-            transfers(
-              options: {desc: "block.timestamp.time", limit: 100}
-              date: {after: "now - 1h"}
-            ) {
-              currency {
-                address
-                symbol
-              }
-              amount
-              transaction {
-                signature
-              }
-              block {
-                timestamp {
-                  time
-                }
-              }
-              sender {
-                address
-              }
-              receiver {
-                address
-              }
-            }
-          }
-        }`;
+    async getHeliusTokenCandidates() {
+        const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+        if (!HELIUS_API_KEY) {
+            console.error('[Helius] HELIUS_API_KEY is not set in environment variables.');
+            return [];
+        }
+        
+        const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
     
         try {
-            // Bitquery: Usually 100-500 requests/month for free
-            await this.rateLimiter.checkLimit('bitquery', 20, 3600000); // 20 per hour
-            
-            const res = await axios.post(
-                'https://graphql.bitquery.io/',
-                { query },
-                {
-                    headers: {
-                        'X-API-KEY': BITQUERY_API_KEY,
-                        'Content-Type': 'application/json',
+            console.log('[Helius] Searching for the latest token candidates...');
+    
+            // We will use the Helius DAS API's "searchAssets" method to find the newest tokens.
+            const response = await axios.post(url, {
+                jsonrpc: '2.0',
+                id: 'helius-trading-bot',
+                method: 'searchAssets',
+                params: {
+                    ownerAddress: null, // We are searching the whole chain, not a specific wallet
+                    tokenType: 'fungible', // We want tokens (like meme coins), not NFTs
+                    sortBy: {
+                        sortBy: 'created', // Sort by the creation date
+                        sortDirection: 'desc', // 'desc' means newest first
                     },
-                    timeout: 15000 // 15 second timeout for GraphQL
-                }
-            );
+                    limit: 100, // Get the top 100 newest tokens
+                },
+            });
     
-            const raw = res.data.data.solana.transfers;
-            const grouped = {};
-    
-            for (const tx of raw) {
-                const addr = tx.currency.address;
-                if (!grouped[addr]) {
-                    grouped[addr] = {
-                        symbol: tx.currency.symbol,
-                        address: addr,
-                        count: 0,
-                        timestamps: [],
-                    };
-                }
-                grouped[addr].count++;
-                grouped[addr].timestamps.push(tx.block.timestamp.time);
+            const assets = response.data.result.items;
+            
+            if (!assets || assets.length === 0) {
+                console.log('[Helius] No new token candidates were found.');
+                return [];
             }
     
-            // Filter tokens with 20–200 transfers in the past 1h
-            const filtered = Object.values(grouped).filter(t => 
-                t.count >= 20 && t.count <= 200
-            );
+            // The rest of our bot expects a simple format: { address, symbol }
+            // We will map the detailed data from Helius to this format.
+            const candidates = assets
+                .map(asset => ({
+                    address: asset.id,
+                    symbol: asset.content?.metadata?.symbol,
+                }))
+                .filter(c => c.symbol && c.address); // Important: Filter out any tokens that are missing a symbol
     
-            return filtered;
+            console.log(`[Helius] Found ${candidates.length} potential candidates to analyze.`);
+            return candidates;
     
         } catch (error) {
-            console.error('❌ Bitquery token fetch failed:', error.message);
-            if (error.response?.status === 429) {
-                console.log('🚦 Bitquery rate limited, waiting 3600 seconds...');
-                await new Promise(resolve => setTimeout(resolve, 3600000)); // 1 hour wait
-            }
+            console.error('❌ Helius token fetch failed:', error.response ? error.response.data : error.message);
             return [];
         }
     }
-    
    
 
    async sendPnLChart(chatId) {
@@ -886,41 +857,32 @@ async analyzeTokenSecurity(tokenAddress) {
 
 async analyzeWhaleActivity(tokenAddress) {
     try {
-        const query = `
-        {
-          solana {
-            transfers(
-              options: {desc: "amount", limit: 20}
-              date: {after: "now - 4h"}
-              currency: {is: "${tokenAddress}"}
-            ) {
-              amount
-              sender { address }
-              receiver { address }
-            }
-          }
-        }`;
-        
-        const response = await axios.post(
-            'https://graphql.bitquery.io/',
-            { query },
-            {
-                headers: {
-                    'X-API-KEY': BITQUERY_API_KEY,
-                    'Content-Type': 'application/json'
+        // We'll use our new helper function to get the last 100 transactions
+        const transactions = await this.getHeliusTransactions(tokenAddress, 100);
+
+        if (transactions.length < 10) { // Not enough data for analysis
+            return { score: 40, reason: 'Low recent transaction volume' };
+        }
+
+        let totalVolume = 0;
+        const amounts = [];
+
+        for (const tx of transactions) {
+            for (const instruction of tx.instructions) {
+                if (instruction.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' && ['transfer', 'transferChecked'].includes(instruction.parsed.type)) {
+                    if (instruction.parsed.info.mint === tokenAddress) {
+                         const amount = parseFloat(instruction.parsed.info.tokenAmount.uiAmount);
+                         amounts.push(amount);
+                         totalVolume += amount;
+                    }
                 }
             }
-        );
-        
-        const transfers = response.data.data.solana.transfers;
-        
-        if (!transfers.length) {
-            return { score: 30, reason: 'No recent activity' };
         }
         
-        // Calculate whale activity score
-        const amounts = transfers.map(t => parseFloat(t.amount)).filter(a => a > 0);
-        const totalVolume = amounts.reduce((sum, amt) => sum + amt, 0);
+        if (amounts.length === 0) {
+            return { score: 30, reason: 'No recent transfers found' };
+        }
+
         const avgAmount = totalVolume / amounts.length;
         const maxAmount = Math.max(...amounts);
         
@@ -939,51 +901,31 @@ async analyzeWhaleActivity(tokenAddress) {
         
         return {
             score: Math.max(0, Math.min(100, score)),
-            reason: `${transfers.length} transfers, max: ${this.formatNumber(maxAmount)}`
+            reason: `${amounts.length} transfers analyzed, max transfer: ${this.formatNumber(maxAmount)}`
         };
         
     } catch (error) {
+        console.error(`Helius whale analysis failed for ${tokenAddress}:`, error.message);
         return { score: 50, reason: `Whale analysis failed: ${error.message}` };
     }
 }
  
 async analyzeSentiment(tokenAddress, symbol) {
     try {
-        // Get recent transaction count as proxy for interest
-        const query = `
-        {
-          current: solana {
-            transfers(
-              date: { after: "now - 1h" }
-              currency: { is: "${tokenAddress}" }
-            ) {
-              count
-            }
-          }
-          previous: solana {
-            transfers(
-              date: { after: "now - 2h", till: "now - 1h" }
-              currency: { is: "${tokenAddress}" }
-            ) {
-              count
-            }
-          }
-        }`;
+        // We will get transactions from the last hour
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - (60 * 60 * 1000));
+        const twoHoursAgo = new Date(now.getTime() - (2 * 60 * 60 * 1000));
+
+        // Get transactions from the last hour
+        const recentSignatures = await this.getHeliusSignatures(tokenAddress, 1000, null, oneHourAgo.toISOString());
         
-        const response = await axios.post(
-            'https://graphql.bitquery.io/',
-            { query },
-            {
-                headers: {
-                    'X-API-KEY': BITQUERY_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        
-        const currentCount = response.data.data.current.transfers[0]?.count || 0;
-        const previousCount = response.data.data.previous.transfers[0]?.count || 0;
-        
+        // Get transactions from the hour before that
+        const previousSignatures = await this.getHeliusSignatures(tokenAddress, 1000, oneHourAgo.toISOString(), twoHoursAgo.toISOString());
+
+        const currentCount = recentSignatures.length;
+        const previousCount = previousSignatures.length;
+
         let score = 50; // Neutral base
         
         if (currentCount > previousCount * 1.5) {
@@ -992,7 +934,6 @@ async analyzeSentiment(tokenAddress, symbol) {
             score -= 20; // Declining interest
         }
         
-        // Activity level scoring
         if (currentCount > 100) score += 20;
         else if (currentCount > 50) score += 10;
         else if (currentCount < 10) score -= 15;
@@ -1001,12 +942,12 @@ async analyzeSentiment(tokenAddress, symbol) {
             score: Math.max(0, Math.min(100, score)),
             reason: `${currentCount} txs/hour (vs ${previousCount} previous)`
         };
-        
+
     } catch (error) {
+        console.error(`Helius sentiment analysis failed for ${tokenAddress}:`, error.message);
         return { score: 50, reason: `Sentiment analysis failed: ${error.message}` };
     }
 }
- 
 
 async analyzeVolatility(tokenAddress) {
     try {
@@ -1116,102 +1057,133 @@ isKnownExchangeAddress(address) {
 
 
 
-
 async selectBestTokenFromCandidates(tokens) {
-    console.log(`Analyzing ${tokens.length} token candidates with enhanced criteria...`); 
-
-    
+    console.log(`[Analysis] Analyzing ${tokens.length} token candidates...`);
     
     const analyzedTokens = [];
-    
-    // Limit concurrent analysis to avoid API rate limits
     const batchSize = 3;
     for (let i = 0; i < tokens.length; i += batchSize) {
         const batch = tokens.slice(i, i + batchSize);
         
         const batchPromises = batch.map(async (token) => {
             try {
-                const analysis = await this.comprehensiveTokenAnalysis(
-                    token.address, 
-                    token.symbol
-                );
-                
-                return {
-                    ...token,
-                    analysis,
-                    finalScore: analysis.overallScore
-                };
+                const analysis = await this.comprehensiveTokenAnalysis(token.address, token.symbol);
+                return { ...token, analysis, finalScore: analysis.overallScore };
             } catch (error) {
-                console.error(`Analysis failed for ${token.symbol}:`, error.message);
-                return {
-                    ...token,
-                    analysis: { overallScore: 0, recommendation: 'AVOID' },
-                    finalScore: 0
-                };
+                console.error(`[Analysis] Analysis failed for ${token.symbol}:`, error.message);
+                return { ...token, analysis: { overallScore: 0, recommendation: 'AVOID' }, finalScore: 0 };
             }
         });
         
         const batchResults = await Promise.all(batchPromises);
         analyzedTokens.push(...batchResults);
         
-        // Small delay between batches to be nice to APIs
         if (i + batchSize < tokens.length) {
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
 
+    // --- FIX IS HERE ---
+    // 1. We 'await' the value BEFORE the filter and store it.
+    const hoursSinceLastTrade = await this.getHoursSinceLastTrade();
 
+    const viableTokens = analyzedTokens.filter(token => {
+        const analysis = token.analysis;
+        
+        if (analysis.analysis?.security?.score < 25) return false;
+        if (analysis.analysis?.liquidity?.score < 15) return false;
+        
+        let requiredOverallScore = 35;
+        let requiredSecurityScore = 35;
+        let requiredLiquidityScore = 20;
+        
+        // 2. We use the stored variable here. No 'await' is needed inside the filter.
+        if (hoursSinceLastTrade > 48) {
+            requiredOverallScore = 25;
+            requiredSecurityScore = 30;
+            requiredLiquidityScore = 15;
+            console.log('[Analysis] Relaxing filters due to 48+ hours without trades');
+        }
 
+        if (analysis.overallScore < requiredOverallScore) return false;
+        if (analysis.recommendation === 'AVOID') return false;
+        if (analysis.analysis?.security?.score < requiredSecurityScore) return false;
+        if (analysis.analysis?.liquidity?.score < requiredLiquidityScore) return false;
+        if (analysis.overallScore < 20 && analysis.analysis?.security?.score < 30) return false;
+        
+        return true;
+    }).sort((a, b) => b.finalScore - a.finalScore);
+    // --- END OF FIX ---
 
-// Replace the existing viableTokens filter block with this safer approach
-const viableTokens = analyzedTokens
-.filter(token => {
-    const analysis = token.analysis;
-    
-    // Critical safety checks that must always pass (non-negotiable)
-    if (analysis.analysis?.security?.score < 25) return false; // Absolute minimum security
-    if (analysis.analysis?.liquidity?.score < 15) return false; // Must have some liquidity
-    
-    // Adaptive scoring based on market conditions
-    let requiredOverallScore = 35; // Relaxed from 40
-    let requiredSecurityScore = 35; // Relaxed from 50  
-    let requiredLiquidityScore = 20; // Relaxed from 30
-    
-    // Further relax if no trades have occurred recently
-    const hoursSinceLastTrade = this.getHoursSinceLastTrade();
-    if (hoursSinceLastTrade > 48) {
-        requiredOverallScore = 25;
-        requiredSecurityScore = 30;
-        requiredLiquidityScore = 15;
-        console.log('🔄 Relaxing filters due to 48+ hours without trades');
+    if (viableTokens.length > 0) {
+        console.log('--- [Analysis] Top Viable Candidates ---');
+        viableTokens.slice(0, 3).forEach((token, index) => {
+            console.log(`${index + 1}. ${token.symbol} (Score: ${token.finalScore})`);
+        });
+        console.log('------------------------------------');
+    } else {
+        console.log('[Analysis] No tokens passed the viability filters.');
     }
-    
-    // Main filter logic (all must pass)
-    if (analysis.overallScore < requiredOverallScore) return false;
-    if (analysis.recommendation === 'AVOID') return false;
-    if (analysis.analysis?.security?.score < requiredSecurityScore) return false;
-    if (analysis.analysis?.liquidity?.score < requiredLiquidityScore) return false;
-    
-    // Additional safety for very low scores
-    if (analysis.overallScore < 20 && analysis.analysis?.security?.score < 30) return false;
-    
-    return true;
-})
-.sort((a, b) => b.finalScore - a.finalScore);
 
+    if (viableTokens.length === 0) {
+        return null;
+    }
 
-
-if (viableTokens.length === 0) {
-    console.log('No tokens passed enhanced analysis criteria');
-    return null;
+    const selected = viableTokens[0];
+    return selected;
 }
 
-const selected = viableTokens[0];
-console.log(`Selected ${selected.symbol} with score ${selected.finalScore}/100`);
-
-return selected;
-} 
     
+// HELPER 1: Gets transaction signatures for a token address
+async getHeliusSignatures(tokenAddress, limit = 100, before = null, until = null) {
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+    
+    try {
+        const params = { limit };
+        if (before) params.before = before;
+        if (until) params.until = until;
+
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'helius-trading-bot',
+            method: 'getSignaturesForAsset',
+            params: {
+              id: tokenAddress,
+              ...params
+            },
+        });
+        return response.data.result || [];
+    } catch (error) {
+        console.error(`Helius getSignatures failed for ${tokenAddress}:`, error.message);
+        return [];
+    }
+}
+
+// HELPER 2: Gets full, parsed transaction details from signatures
+async getHeliusTransactions(tokenAddress, limit = 100) {
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+    
+    try {
+        const signatures = await this.getHeliusSignatures(tokenAddress, limit);
+        if (signatures.length === 0) return [];
+
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'helius-trading-bot',
+            method: 'getTransactions',
+            params: {
+                transactions: signatures.map(s => s.signature),
+            },
+        });
+        return response.data.result || [];
+    } catch (error) {
+        console.error(`Helius getTransactions failed for ${tokenAddress}:`, error.message);
+        return [];
+    }
+}
+
 
 async checkDailyLimits(userId) {
     const user = this.getUserState(userId);
@@ -1226,7 +1198,60 @@ async checkDailyLimits(userId) {
     
     return true;
 } 
+async getHeliusTokenCandidates() {
+    // Get your Helius API key from the environment variables
+    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+    if (!HELIUS_API_KEY) {
+        console.error('[Helius] HELIUS_API_KEY is not set.');
+        return [];
+    }
+    
+    // The Helius API endpoint. We use a special URL that includes our key.
+    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
+    try {
+        console.log('[Helius] Searching for the latest token candidates...');
+
+        // We use the "searchAssets" method from Helius's DAS API
+        const response = await axios.post(url, {
+            jsonrpc: '2.0',
+            id: 'helius-trading-bot',
+            method: 'searchAssets',
+            params: {
+                // We want to find tokens, not NFTs owned by a specific person
+                ownerAddress: null,
+                tokenType: 'fungible',
+                // Sort by when they were created to find the newest ones
+                sortBy: {
+                    sortBy: 'created',
+                    sortDirection: 'desc',
+                },
+                // Get the top 100 new tokens
+                limit: 100,
+            },
+        });
+
+        const assets = response.data.result.items;
+        
+        if (!assets || assets.length === 0) {
+            console.log('[Helius] No new token candidates found.');
+            return [];
+        }
+
+        // Convert the Helius data into the format the rest of our bot understands
+        const candidates = assets.map(asset => ({
+            address: asset.id, // The token's address
+            symbol: asset.content.metadata.symbol, // The token's symbol (e.g., "WIF")
+        })).filter(c => c.symbol && c.address); // Filter out any that are missing a symbol or address
+
+        console.log(`[Helius] Found ${candidates.length} potential candidates.`);
+        return candidates;
+
+    } catch (error) {
+        console.error('❌ Helius token fetch failed:', error.response ? error.response.data : error.message);
+        return [];
+    }
+}
 
 async autoBuyTokenIfEligible(userId) {
     try {
@@ -1243,10 +1268,10 @@ async autoBuyTokenIfEligible(userId) {
         // The market check was MOVED FROM HERE.
         
         console.log(`[AutoBuy] Pre-flight checks passed. Starting token discovery...`);
-        
-        const candidates = await this.getBitqueryTokenCandidates();
+    
+        const candidates = await this.getHeliusTokenCandidates();
         if (!candidates.length) {
-            console.log('[AutoBuy] FAILED: No initial candidates found from Bitquery.');
+            console.log('[AutoBuy] FAILED: No initial candidates found from Helius.');
             return;
         }
         console.log(`[AutoBuy] Discovery complete. Found ${candidates.length} potential candidates. Analyzing...`);
@@ -1526,57 +1551,69 @@ Now monitoring for optimal exit...
     
     await this.bot.sendMessage(userId, message);
 }
+
 async checkRecentSuspiciousActivity(tokenAddress) {
     try {
-        const query = `
-        {
-          solana {
-            transfers(
-              options: {desc: "block.timestamp.time", limit: 50}
-              date: {after: "now - 30m"}
-              currency: {is: "${tokenAddress}"}
-            ) {
-              amount
-              success
-              sender { address }
-              receiver { address }
+        // Use our Helius helper to get the last 50 transactions for the token
+        const transactions = await this.getHeliusTransactions(tokenAddress, 50);
+
+        if (transactions.length < 10) {
+            // Not enough recent activity to make a judgment
+            return { suspicious: false };
+        }
+
+        let largeSellsToExchange = 0;
+        let failedTxCount = 0;
+
+        for (const tx of transactions) {
+            // 1. Check if the transaction failed
+            if (tx.meta && tx.meta.err !== null) {
+                failedTxCount++;
             }
-          }
-        }`;
-        
-        const response = await axios.post(
-            'https://graphql.bitquery.io/',
-            { query },
-            {
-                headers: {
-                    'X-API-KEY': process.env.BITQUERY_API_KEY,
-                    'Content-Type': 'application/json'
+
+            // 2. Check for large sell-offs by looking at token transfers
+            for (const instruction of tx.instructions) {
+                // We're looking for standard SPL Token Program transfers
+                if (instruction.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' && 
+                    ['transfer', 'transferChecked'].includes(instruction.parsed?.type)) {
+                    
+                    const info = instruction.parsed.info;
+                    
+                    // Check if it's the correct token and has all the necessary data
+                    if (info && info.mint === tokenAddress && info.destination && info.tokenAmount?.uiAmount) {
+                        const amount = parseFloat(info.tokenAmount.uiAmount);
+                        
+                        // A large amount sent TO a known exchange address is a potential dump
+                        if (amount > 100000 && this.isKnownExchangeAddress(info.destination)) {
+                            largeSellsToExchange++;
+                        }
+                    }
                 }
             }
-        );
-        
-        const transfers = response.data.data.solana.transfers;
-        
-        // Check for sudden large dumps
-        const largeSells = transfers.filter(t => 
-            parseFloat(t.amount) > 100000 && this.isKnownExchangeAddress(t.receiver.address)
-        );
-        
-        if (largeSells.length > 3) {
-            return { suspicious: true, reason: 'Large sell-offs detected' };
+        }
+
+        // If we found more than 3 large sells in the last 50 transactions, it's suspicious.
+        if (largeSellsToExchange > 3) {
+            return { suspicious: true, reason: 'Large sell-offs to exchanges detected' };
         }
         
-        // Check failure rate
-        const failureRate = transfers.filter(t => !t.success).length / transfers.length;
+        // If more than 30% of recent transactions are failing, it's suspicious.
+        const failureRate = failedTxCount / transactions.length;
         if (failureRate > 0.3) {
-            return { suspicious: true, reason: 'High transaction failure rate' };
+            return { suspicious: true, reason: 'High transaction failure rate detected' };
         }
         
+        // If no red flags are found, we're good.
         return { suspicious: false };
+
     } catch (error) {
+        console.error(`[Helius] Suspicious activity check failed for ${tokenAddress}:`, error.message);
+        // Default to not suspicious if the check itself fails, to avoid blocking a valid trade.
         return { suspicious: false };
     }
 }
+
+
 
 async verifyContractIntegrity(tokenAddress) {
     try {
@@ -1669,104 +1706,96 @@ async getCurrentLiquidity(tokenAddress) {
     }
     
     async isNotHoneypot(tokenAddress) {
-        const query = `
-        {
-          solana {
-            transfers(
-              options: {desc: "block.timestamp.time", limit: 50}
-              date: {after: "now - 1h"}
-              currency: {is: "${tokenAddress}"}
-            ) {
-              amount
-              sender { address }
-              receiver { address }
-            }
-          }
-        }`;
-    
         try {
-            const response = await axios.post(
-                'https://graphql.bitquery.io/',
-                { query },
-                {
-                    headers: {
-                        'X-API-KEY': BITQUERY_API_KEY,
-                        'Content-Type': 'application/json'
+            // Use our Helius helper to get the last 100 transactions.
+            const transactions = await this.getHeliusTransactions(tokenAddress, 100);
+    
+            if (transactions.length < 20) {
+                // Not enough transaction data to be certain, so we'll be cautious.
+                // A brand new token might fail this, which is often a good thing.
+                return false;
+            }
+    
+            const uniqueSenders = new Set();
+    
+            for (const tx of transactions) {
+                for (const instruction of tx.instructions) {
+                    // Look for SPL Token Program transfers
+                    if (instruction.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' &&
+                        ['transfer', 'transferChecked'].includes(instruction.parsed?.type)) {
+                        
+                        const info = instruction.parsed.info;
+    
+                        // We're interested in who is SENDING the token
+                        if (info && info.mint === tokenAddress && info.source) {
+                            // We only care about regular wallets, not big exchanges or contracts
+                            if (!this.isKnownExchangeAddress(info.source)) {
+                                uniqueSenders.add(info.source);
+                            }
+                        }
                     }
                 }
-            );
-    
-            const transfers = response.data.data.solana.transfers;
-    
-            // ❗️Basic logic: A honeypot typically has only buys and no sells.
-            // This checks for outgoing transfers from wallets (sell activity)
-            const uniqueSenders = new Set(transfers.map(tx => tx.sender.address));
-            const uniqueReceivers = new Set(transfers.map(tx => tx.receiver.address));
-    
-            const isSellDetected = [...uniqueSenders].some(sender => !uniqueReceivers.has(sender));
-    
-            return isSellDetected; // ✅ Token has sell activity
-        } catch (err) {
-            console.error(`❌ Honeypot check failed for ${tokenAddress}:`, err.message);
-            return false; // Treat as honeypot if API fails
-        }
-    }
-  
-    async isTrendingToken(tokenAddress) {
-        const now = new Date();
-        const fiveMinAgo = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
-        const tenMinAgo = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
-    
-        const query = `
-        {
-          current: solana {
-            transfers(
-              date: { after: "${fiveMinAgo}" }
-              currency: { is: "${tokenAddress}" }
-            ) {
-              amount
             }
-          }
-          previous: solana {
-            transfers(
-              date: { after: "${tenMinAgo}", till: "${fiveMinAgo}" }
-              currency: { is: "${tokenAddress}" }
-            ) {
-              amount
+    
+            // The logic: If a token is not a honeypot, there should be multiple,
+            // independent wallets successfully selling it. A honeypot would have
+            // only one or two senders (the deployer, the liquidity pool).
+            const hasDiverseSellers = uniqueSenders.size > 5;
+    
+            if (hasDiverseSellers) {
+                console.log(`[Helius] Honeypot check for ${tokenAddress}: PASSED (${uniqueSenders.size} unique sellers found).`);
+            } else {
+                console.log(`[Helius] Honeypot check for ${tokenAddress}: FAILED (${uniqueSenders.size} unique sellers found). Potential honeypot.`);
             }
-          }
-        }`;
     
-        try {
-            const res = await axios.post(
-                'https://graphql.bitquery.io/',
-                { query },
-                {
-                    headers: {
-                        'X-API-KEY': BITQUERY_API_KEY,
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-    
-            const currTxs = res.data.data.current.transfers.length;
-            const prevTxs = res.data.data.previous.transfers.length;
-    
-            console.log(`📈 Trend check for ${tokenAddress}: Now=${currTxs}, Before=${prevTxs}`);
-    
-            return currTxs > prevTxs * 1.5;
+            return hasDiverseSellers;
     
         } catch (err) {
-            console.error(`❌ Sentiment check failed for ${tokenAddress}:`, err.message);
+            console.error(`❌ [Helius] Honeypot check failed for ${tokenAddress}:`, err.message);
+            // If the API call fails, it's safer to assume it might be a honeypot.
             return false;
         }
-    } 
-
+    }
     
     
+  
+    async isTrendingToken(tokenAddress) {
+        try {
+            const now = new Date();
+            const fiveMinAgo = new Date(now.getTime() - (5 * 60 * 1000)).toISOString();
+            const tenMinAgo = new Date(now.getTime() - (10 * 60 * 1000)).toISOString();
     
-
-
+            // Get transaction signatures from the last 5 minutes
+            const currentSignatures = await this.getHeliusSignatures(tokenAddress, 1000, null, fiveMinAgo);
+    
+            // Get transaction signatures from the 5 minutes before that
+            const previousSignatures = await this.getHeliusSignatures(tokenAddress, 1000, fiveMinAgo, tenMinAgo);
+    
+            const currTxs = currentSignatures.length;
+            const prevTxs = previousSignatures.length;
+    
+            console.log(`[Helius] Trend check for ${tokenAddress}: Last 5 mins=${currTxs} txs, Previous 5 mins=${prevTxs} txs`);
+    
+            // A token is considered trending if its transaction count has increased by at least 50%
+            // in the most recent 5-minute window compared to the previous one.
+            // We also add a small threshold (currTxs > 5) to avoid false positives on very new/inactive tokens.
+            const isTrending = currTxs > prevTxs * 1.5 && currTxs > 5;
+            
+            if(isTrending) {
+                 console.log(`[Helius] Trend check for ${tokenAddress}: PASSED.`);
+            } else {
+                 console.log(`[Helius] Trend check for ${tokenAddress}: FAILED.`);
+            }
+    
+            return isTrending;
+    
+        } catch (err) {
+            console.error(`❌ [Helius] Trend check failed for ${tokenAddress}:`, err.message);
+            // If the check fails, it's safer to assume it's not trending.
+            return false;
+        }
+    }
+    
     
 
     async setupWebhook() {
@@ -3266,7 +3295,7 @@ const bot = new TradingBot();
 console.log('🤖 Advanced Telegram Trading Bot Started!');
 console.log('💡 System Status:');
 console.log(`   - TELEGRAM_TOKEN: ${process.env.TELEGRAM_TOKEN ? '✅' : '❌'}`);
-console.log(`   - BITQUERY_API_KEY: ${process.env.BITQUERY_API_KEY ? '✅' : '❌'}`);
+console.log(`   - HELIUS_API_KEY: ${process.env.HELIUS_API_KEY? '✅' : '❌'}`);
 console.log(`   - WEBHOOK_URL: ${WEBHOOK_URL || '❌ Not set'}`);
 console.log(`   - USE_WEBHOOK: ${USE_WEBHOOK}`);
 console.log(`   - PORT: ${PORT}`);
