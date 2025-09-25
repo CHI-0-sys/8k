@@ -1226,60 +1226,39 @@ async checkDailyLimits(userId) {
     
     return true;
 } 
+
+
 async autoBuyTokenIfEligible(userId) {
     try {
         const user = this.getUserState(userId);
         const dayIndex = user.currentDay - 1;
         const tradeAmount = TRADING_PLAN[dayIndex]?.profit;
 
-        // ADDED: Log that the function has started.
         console.log(`[AutoBuy] Triggered for user ${userId} on Day ${user.currentDay}.`);
 
-        if (!this.wallet) {
-            // ADDED: Specific log for missing wallet.
-            console.log(`[AutoBuy] FAILED: Wallet not configured.`);
-            return;
-        }
-        if (!tradeAmount) {
-            // ADDED: Specific log for completed plan.
-            console.log(`[AutoBuy] SKIPPED: Trading plan completed or day index out of bounds.`);
-            return;
-        }
-        if (!this.cooldownPassed(user)) {
-            // ADDED: Specific log for active cooldown.
-            console.log(`[AutoBuy] SKIPPED: 24-hour cooldown is still active for user ${userId}.`);
-            return;
-        }
+        // BASIC CHECKS FIRST
+        if (!this.wallet || !tradeAmount || !this.cooldownPassed(user)) return;
+        if (!await this.checkDailyLimits(userId)) return;
+
+        // The market check was MOVED FROM HERE.
         
-        if (!await this.checkDailyLimits(userId)) {
-            // ADDED: Specific log for daily limits.
-            console.log(`[AutoBuy] SKIPPED: Daily limits (e.g., 3 consecutive losses) have been met.`);
-            return;
-        }
-        if (!await this.checkMarketConditions()) {
-            // ADDED: Specific log for market conditions.
-            console.log(`[AutoBuy] SKIPPED: Market conditions are not favorable for trading.`);
-            return;
-        }
-        
-        console.log(`[AutoBuy] All pre-flight checks passed. Starting token discovery...`);
+        console.log(`[AutoBuy] Pre-flight checks passed. Starting token discovery...`);
         
         const candidates = await this.getBitqueryTokenCandidates();
         if (!candidates.length) {
             console.log('[AutoBuy] FAILED: No initial candidates found from Bitquery.');
             return;
         }
-        // ADDED: Log the number of candidates found.
         console.log(`[AutoBuy] Discovery complete. Found ${candidates.length} potential candidates. Analyzing...`);
 
         const selected = await this.selectBestTokenFromCandidates(candidates);
         if (!selected) {
-            console.log('[AutoBuy] FAILED: No tokens passed the comprehensive analysis and filtering.');
+            // The selectBestTokenFromCandidates function will now log the details, so we can keep this simple.
             await this.bot.sendMessage(userId, '🔍 Market scan complete - no suitable tokens found. Will try again later.');
             return;
         }
-        // ADDED: Log which token was selected.
-        console.log(`[AutoBuy] Analysis complete. Selected token: ${selected.symbol} (Score: ${selected.finalScore}).`);
+        
+        console.log(`[AutoBuy] Top candidate is ${selected.symbol} (Score: ${selected.finalScore}). Running final checks...`);
 
         const finalSafetyCheck = await this.performFinalSafetyChecks(selected);
         if (!finalSafetyCheck.passed) {
@@ -1287,13 +1266,20 @@ async autoBuyTokenIfEligible(userId) {
             return;
         }
         console.log(`[AutoBuy] Passed final safety checks for ${selected.symbol}.`);
+
+        // --- MARKET CHECK MOVED TO HERE ---
+        // This is the final gate before spending money.
+        if (!await this.checkMarketConditions()) {
+            console.log(`[AutoBuy] SKIPPED: Market conditions are not favorable for trading. Halting trade for ${selected.symbol}.`);
+            return;
+        }
+        // ------------------------------------
         
         const adjustedAmount = this.calculateDynamicPositionSize(
             tradeAmount, 
             selected.analysis.analysis.volatility,
             selected.analysis.overallScore
         );
-        // ADDED: Log the calculated trade amount.
         console.log(`[AutoBuy] Calculated dynamic position size: $${adjustedAmount.toFixed(2)}.`);
         
         const quote = await this.getEnhancedJupiterQuote(
@@ -1303,6 +1289,8 @@ async autoBuyTokenIfEligible(userId) {
             selected.analysis.analysis.volatility.volatility
         );
         
+        // ... the rest of the function remains the same ...
+
         if (!quote || !quote.routes?.[0]) {
             console.log(`[AutoBuy] FAILED: No enhanced Jupiter route found for ${selected.symbol}.`);
             return;
@@ -1324,7 +1312,6 @@ async autoBuyTokenIfEligible(userId) {
             }
             console.log(`[AutoBuy] ✅✅✅ TRADE EXECUTED for ${selected.symbol} | TX: ${tx.signature}`);
         } else {
-            // ADDED: Log for when live trading is off.
             console.log(`[AutoBuy] SIMULATION MODE: Live trading is off. Skipping actual transaction.`);
         }
         
@@ -1345,7 +1332,7 @@ async autoBuyTokenIfEligible(userId) {
         
         user.positions.push(position);
         user.lastTradeAt = Date.now();
-        user.isActive = true; // Note: This was already here, seems intentional to set to true after a trade.
+        user.isActive = true;
         
         await this.saveUserStates();
         
