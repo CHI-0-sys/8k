@@ -1159,7 +1159,8 @@ async selectBestTokenFromCandidates(tokens) {
 
     
 // HELPER 1: Gets transaction signatures for a token address
-async getHeliusSignatures(tokenAddress, limit = 100, before = null, until = null) {
+async getHeliusSignatures(tokenAddress, limit = 100, before = null, until = null) { 
+    console.log('[Helius] Running function version v1.5')
     const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
     const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
     
