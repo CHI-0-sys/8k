@@ -85,8 +85,6 @@ const TRADING_PLAN = [
     { day: 30, balance: 6464.63, profit: 1616.16, expected: 8080.79 }
 ]; 
 
-
-
 class HeliusRateLimiter {
     constructor() {
         this.limits = new Map();
@@ -138,9 +136,6 @@ class HeliusRateLimiter {
         this.processing = false;
     }
 }
-
-
-
 
 class TradingBot {
     constructor() {
@@ -197,12 +192,6 @@ class TradingBot {
             }
         });
     } 
-  
-
-
-
-    
-
 
     async getHeliusTokenCandidates() {
         console.log('[Token Discovery] Switched to reliable strategy: Fetching from Jupiter token list...');
@@ -256,9 +245,6 @@ class TradingBot {
             ];
         }
     }
-    
-    
-    
 
    async sendPnLChart(chatId) {
     const width = 800;
@@ -334,7 +320,6 @@ class TradingBot {
         await this.bot.sendMessage(chatId, '❌ Could not generate PnL chart.');
     }
 }
-
 
 async autoSell(userId, pos, exitPrice, reason) {
     try {
@@ -434,49 +419,11 @@ async autoSell(userId, pos, exitPrice, reason) {
         await this.bot.sendMessage(userId, `❌ Auto-sell failed for ${pos.symbol}: ${error.message}`);
     }
 }
-async getDexScreenerPrices() {
-    try {
-        // DexScreener: ~300 requests/minute
-        await this.rateLimiter.checkLimit('dexscreener', 200, 60000); // Conservative 200/min
-        
-        const response = await axios.get(`${DEXSCREENER_API_URL}/search?q=SOL`, {
-            timeout: 10000,
-            headers: {
-                'User-Agent': 'TradingBot/1.0'
-            }
-        });
-        
-        const prices = {};
-        
-        if (response.data.pairs) {
-            response.data.pairs.slice(0, 10).forEach(pair => {
-                if (pair.baseToken && pair.priceUsd) {
-                    const symbol = pair.baseToken.symbol.toUpperCase();
-                    prices[symbol] = {
-                        price: parseFloat(pair.priceUsd),
-                        change24h: parseFloat(pair.priceChange?.h24 || 0),
-                        volume24h: parseFloat(pair.volume?.h24 || 0),
-                        marketCap: parseFloat(pair.marketCap || 0)
-                    };
-                }
-            });
-        }
-
-        return prices;
-    } catch (error) {
-        console.error('❌ DexScreener API error:', error.message);
-        if (error.response?.status === 429) {
-            console.log('🚦 DexScreener rate limited, waiting 30 seconds...');
-            await new Promise(resolve => setTimeout(resolve, 30000));
-        }
-        return {};
-    }
-} 
 
 async getJupiterQuote(inputMint, outputMint, amount) {
     try {
         // Jupiter: ~20-50 requests/second
-        await this.rateLimiter.checkLimit('jupiter', 30, 1000); // 30 per second
+        await this.heliusRateLimiter.checkLimit('jupiter', 30, 1000); // 30 per second
         
         const response = await axios.get(`${JUPITER_API_URL}/quote`, {
             params: {
@@ -500,44 +447,6 @@ async getJupiterQuote(inputMint, outputMint, amount) {
     }
 } 
 
-async getEnhancedJupiterQuote(inputMint, outputMint, amount, volatilityLevel) {
-    try {
-        await this.rateLimiter.checkLimit('jupiter', 30, 1000);
-        
-        // Adjust slippage based on volatility
-        let slippageBps = Math.floor(MAX_SLIPPAGE * 10000); // Default 1%
-        
-        if (volatilityLevel > 2.0) {
-            slippageBps = 200; // 2% for high volatility
-        } else if (volatilityLevel < 1.0) {
-            slippageBps = 50; // 0.5% for low volatility
-        }
-        
-        const response = await axios.get(`${JUPITER_API_URL}/quote`, {
-            params: {
-                inputMint,
-                outputMint,
-                amount,
-                slippageBps,
-                onlyDirectRoutes: volatilityLevel > 2.0,
-                maxAccounts: volatilityLevel > 2.0 ? 10 : 20
-            },
-            timeout: 8000
-        });
-        
-        return response.data;
-    } catch (error) {
-        console.error('Enhanced Jupiter quote error:', error.message);
-        if (error.response?.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 10000));
-        }
-        return null;
-    }
-} 
-
-
-
-    
 async executeSwapSafely(route) {
     try {
         // Simulate first
@@ -597,7 +506,7 @@ async executeSwapSafely(route) {
     }
 } 
 
-async getHoursSinceLastTrade() {  // ← Inside class
+async getHoursSinceLastTrade() {
     let lastTradeTime = 0;
     for (const [userId, user] of this.userStates.entries()) {
         if (user.lastTradeAt && user.lastTradeAt > lastTradeTime) {
@@ -820,8 +729,6 @@ async getHeliusTransactions(tokenAddress, limit = 100) {
     }
 } 
 
-
-
 async getTokenMetadata(tokenAddress) {
     const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
     const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -862,125 +769,6 @@ async getTokenMetadata(tokenAddress) {
         return null;
     }
 }
-
-
-async analyzeTokenSecurity(tokenAddress) {
-    try {
-        const accountInfo = await this.connection.getParsedAccountInfo(new PublicKey(tokenAddress));
-        let score = 60; // Base score
-        const positiveFactors = [];
-        const negativeFactors = [];
-        
-        if (!accountInfo.value) {
-            return { 
-                score: 0, 
-                reason: 'Token account not found', 
-                positiveFactors: [], 
-                negativeFactors: ['Invalid token'] 
-            };
-        }
-        
-        // Get Metaplex metadata
-        const metadata = await this.getTokenMetadata(tokenAddress);
-        
-        if (metadata) {
-            score += 15;
-            positiveFactors.push('Has valid metadata');
-            
-            // Check for complete metadata
-            if (metadata.name && metadata.symbol && metadata.description) {
-                score += 10;
-                positiveFactors.push('Complete token information');
-            }
-            
-            // Check for image/logo
-            if (metadata.image) {
-                score += 5;
-                positiveFactors.push('Has token logo');
-            }
-            
-            // Check if metadata is mutable (less secure if mutable)
-            if (!metadata.isMutable) {
-                score += 10;
-                positiveFactors.push('Immutable metadata');
-            } else {
-                negativeFactors.push('Mutable metadata');
-            }
-            
-            // Check for verified collection
-            if (metadata.collection && metadata.collection.verified) {
-                score += 15;
-                positiveFactors.push('Verified collection member');
-            }
-            
-            // Check creators and royalties
-            if (metadata.creators && metadata.creators.length > 0) {
-                score += 5;
-                positiveFactors.push('Has creator information');
-                
-                // Check if all creators are verified
-                const allVerified = metadata.creators.every(creator => creator.verified);
-                if (allVerified) {
-                    score += 10;
-                    positiveFactors.push('All creators verified');
-                }
-            }
-            
-        } else {
-            score -= 10;
-            negativeFactors.push('No metadata found');
-        }
-        
-        // Check mint authority
-        const mintInfo = accountInfo.value.data?.parsed?.info;
-        if (mintInfo) {
-            if (mintInfo.mintAuthority === null) {
-                score += 15;
-                positiveFactors.push('Mint authority renounced');
-            } else {
-                score -= 5;
-                negativeFactors.push('Mint authority active');
-            }
-            
-            if (mintInfo.freezeAuthority === null) {
-                score += 10;
-                positiveFactors.push('No freeze authority');
-            } else {
-                score -= 5;
-                negativeFactors.push('Has freeze authority');
-            }
-            
-            // Check token supply
-            if (mintInfo.supply) {
-                const supply = parseInt(mintInfo.supply);
-                if (supply > 0 && supply < 1e15) { // Reasonable supply range
-                    score += 5;
-                    positiveFactors.push('Reasonable token supply');
-                } else if (supply >= 1e15) {
-                    score -= 10;
-                    negativeFactors.push('Extremely high token supply');
-                }
-            }
-        }
-        
-        return {
-            score: Math.max(0, Math.min(100, score)),
-            reason: `Security analysis complete (${positiveFactors.length} positive, ${negativeFactors.length} negative factors)`,
-            positiveFactors,
-            negativeFactors,
-            metadata
-        };
-        
-    } catch (error) {
-        return { 
-            score: 0, 
-            reason: `Security check failed: ${error.message}`, 
-            positiveFactors: [], 
-            negativeFactors: ['Analysis failed'] 
-        };
-    }
-}
-
 
 async analyzeTokenSecurity(tokenAddress) {
     try {
@@ -1165,8 +953,6 @@ async testHeliusConnection() {
     }
 } 
 
-
-
 async analyzeSentiment(tokenAddress, symbol) {
     try {
         // We will get transactions from the last hour
@@ -1279,7 +1065,6 @@ async simulateSwap(route) {
     }
 } 
 
-
 isKnownExchangeAddress(address) {
     // Known Solana exchange and market maker addresses
     const knownExchanges = [
@@ -1309,10 +1094,6 @@ isKnownExchangeAddress(address) {
     
     return knownExchanges.includes(address);
 } 
-
-
-
-
 
 async selectBestTokenFromCandidates(tokens) {
     console.log(`[Analysis] Analyzing ${tokens.length} token candidates...`);
@@ -1389,7 +1170,6 @@ async selectBestTokenFromCandidates(tokens) {
     const selected = viableTokens[0];
     return selected;
 }
-
     
 // HELPER 1: Gets transaction signatures for a token address
 async getHeliusSignatures(tokenAddress, limit = 100, before = null, until = null) { 
@@ -3507,3 +3287,4 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 module.exports = bot;
+
