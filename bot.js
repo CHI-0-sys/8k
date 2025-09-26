@@ -201,51 +201,7 @@ class TradingBot {
 
 
 
-    // DEBUGGING VERSION: Add detailed logging to see actual response
-    async getHeliusTokenCandidates() {
-        console.log('[Token Discovery] Starting multi-source token discovery...');
-        
-        try {
-            // Primary: Jupiter token list (most reliable)
-            const response = await axios.get('https://token.jup.ag/all', {
-                timeout: 15000,
-                headers: { 'User-Agent': 'TradingBot/1.0' }
-            });
     
-            if (response.data && Array.isArray(response.data)) {
-                const candidates = response.data
-                    .filter(token => {
-                        return token.symbol && 
-                               token.address && 
-                               token.decimals <= 9 && 
-                               token.symbol.length <= 8 &&
-                               !['USDC', 'USDT', 'SOL', 'WSOL'].includes(token.symbol);
-                    })
-                    .sort(() => Math.random() - 0.5)
-                    .slice(0, 50)
-                    .map(token => ({
-                        address: token.address,
-                        symbol: token.symbol,
-                        name: token.name || token.symbol
-                    }));
-    
-                console.log(`[Token Discovery] Successfully found ${candidates.length} candidates`);
-                return candidates;
-            }
-        } catch (error) {
-            console.error('[Token Discovery] Jupiter failed:', error.message);
-        }
-    
-        // Fallback to ensure bot always has tokens to analyze
-        console.log('[Token Discovery] Using fallback token list');
-        return [
-            { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' },
-            { address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', symbol: 'WIF', name: 'dogwifhat' },
-            { address: 'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82', symbol: 'BOME', name: 'Book of Meme' },
-            { address: '5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC', symbol: 'SLERF', name: 'Slerf' },
-            { address: 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5', symbol: 'MEW', name: 'cat in a dogs world' }
-        ];
-    }
 
 
     async getHeliusTokenCandidates() {
@@ -1500,60 +1456,6 @@ async checkDailyLimits(userId) {
     
     return true;
 } 
-async getHeliusTokenCandidates() {
-    // Get your Helius API key from the environment variables
-    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
-    if (!HELIUS_API_KEY) {
-        console.error('[Helius] HELIUS_API_KEY is not set.');
-        return [];
-    }
-    
-    // The Helius API endpoint. We use a special URL that includes our key.
-    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
-
-    try {
-        console.log('[Helius] Searching for the latest token candidates...');
-
-        // We use the "searchAssets" method from Helius's DAS API
-        const response = await axios.post(url, {
-            jsonrpc: '2.0',
-            id: 'helius-trading-bot',
-            method: 'searchAssets',
-            params: {
-                // We want to find tokens, not NFTs owned by a specific person
-                ownerAddress: null,
-                tokenType: 'fungible',
-                // Sort by when they were created to find the newest ones
-                sortBy: {
-                    sortBy: 'created',
-                    sortDirection: 'desc',
-                },
-                // Get the top 100 new tokens
-                limit: 100,
-            },
-        });
-
-        const assets = response.data.result.items;
-        
-        if (!assets || assets.length === 0) {
-            console.log('[Helius] No new token candidates found.');
-            return [];
-        }
-
-        // Convert the Helius data into the format the rest of our bot understands
-        const candidates = assets.map(asset => ({
-            address: asset.id, // The token's address
-            symbol: asset.content.metadata.symbol, // The token's symbol (e.g., "WIF")
-        })).filter(c => c.symbol && c.address); // Filter out any that are missing a symbol or address
-
-        console.log(`[Helius] Found ${candidates.length} potential candidates.`);
-        return candidates;
-
-    } catch (error) {
-        console.error('❌ Helius token fetch failed:', error.response ? error.response.data : error.message);
-        return [];
-    }
-}
 
 async autoBuyTokenIfEligible(userId) {
     try {
@@ -2483,36 +2385,7 @@ Use /trade ${tokenData.symbol} [amount] to trade this token.
         return (now - last) >= 86_400_000; // 24h in ms
     }
     
-    async autoSell(userId, pos, exitPrice, reason) {
-        const user = this.getUserState(userId);
-        const earned = (exitPrice / pos.entryPrice) * pos.amountUSD;
-    
-        user.currentBalance += earned;
-        user.totalTrades += 1;
-        if (reason === 'profit') user.successfulTrades += 1;
-    
-        pos.status = 'closed';
-        pos.exitPrice = exitPrice;
-        pos.soldAt = Date.now();
-        user.tradeHistory.push(pos);
-        user.positions = user.positions.filter(p => p.status === 'open');
-        user.currentDay += 1;
-        user.isActive = false;
-        user.lastTradeAt = Date.now();
-    
-        await this.saveUserStates();
-    
-        await this.bot.sendMessage(userId, `
-    💸 Auto-Sell (${reason.toUpperCase()}) triggered
-    
-    🪙 ${pos.symbol}
-    📈 Entry: $${pos.entryPrice}
-    📉 Exit: $${exitPrice}
-    📊 Result: $${(earned - pos.amountUSD).toFixed(2)} ${reason === 'profit' ? 'profit' : 'loss'}
-    ⏱ Next trade in 24h
-        `);
-    }
-    
+
 
     async assessTokenRisk(tokenData) {
         let score = 50; // Base score
