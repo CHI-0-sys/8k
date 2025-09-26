@@ -202,125 +202,50 @@ class TradingBot {
 
 
     // DEBUGGING VERSION: Add detailed logging to see actual response
-async getHeliusTokenCandidates() {
-    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
-    if (!HELIUS_API_KEY) {
-        console.error('[Helius] HELIUS_API_KEY is not set in environment variables.');
-        return [];
-    }
+    async getHeliusTokenCandidates() {
+        console.log('[Token Discovery] Starting multi-source token discovery...');
+        
+        try {
+            // Primary: Jupiter token list (most reliable)
+            const response = await axios.get('https://token.jup.ag/all', {
+                timeout: 15000,
+                headers: { 'User-Agent': 'TradingBot/1.0' }
+            });
     
-    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
-
-    try {
-        console.log('[Helius] Searching for the latest token candidates...');
-        console.log('[Helius] Using URL:', url.replace(HELIUS_API_KEY, 'xxx')); // Hide API key
-
-        const response = await axios.post(url, {
-            jsonrpc: '2.0',
-            id: 'helius-trading-bot',
-            method: 'searchAssets',
-            params: {
-                ownerAddress: null,
-                creatorAddress: null,
-                jsonUri: null,
-                sortBy: {
-                    sortBy: 'created',
-                    sortDirection: 'desc',
-                },
-                limit: 100,
-                page: 1,
-                before: null,
-                after: null
-            },
-        });
-
-        // DETAILED DEBUGGING
-        console.log('[Helius] Response status:', response.status);
-        console.log('[Helius] Response headers:', JSON.stringify(response.headers, null, 2));
-        console.log('[Helius] Full response data:', JSON.stringify(response.data, null, 2));
-        
-        // Check for different error patterns
-        if (response.data.error) {
-            console.error(`❌ Helius API returned an error:`, response.data.error);
-            return [];
-        }
-
-        // Handle different response structures
-        let assets = [];
-        
-        if (response.data.result) {
-            if (response.data.result.items) {
-                assets = response.data.result.items;
-                console.log(`[Helius] Found ${assets.length} assets in result.items`);
-            } else if (Array.isArray(response.data.result)) {
-                assets = response.data.result;
-                console.log(`[Helius] Found ${assets.length} assets in result array`);
-            } else {
-                console.log('[Helius] Result structure:', Object.keys(response.data.result));
+            if (response.data && Array.isArray(response.data)) {
+                const candidates = response.data
+                    .filter(token => {
+                        return token.symbol && 
+                               token.address && 
+                               token.decimals <= 9 && 
+                               token.symbol.length <= 8 &&
+                               !['USDC', 'USDT', 'SOL', 'WSOL'].includes(token.symbol);
+                    })
+                    .sort(() => Math.random() - 0.5)
+                    .slice(0, 50)
+                    .map(token => ({
+                        address: token.address,
+                        symbol: token.symbol,
+                        name: token.name || token.symbol
+                    }));
+    
+                console.log(`[Token Discovery] Successfully found ${candidates.length} candidates`);
+                return candidates;
             }
-        } else {
-            console.log('[Helius] No result field. Response keys:', Object.keys(response.data));
-            return [];
+        } catch (error) {
+            console.error('[Token Discovery] Jupiter failed:', error.message);
         }
-
-        if (!assets || assets.length === 0) {
-            console.log('[Helius] No assets found in response');
-            return [];
-        }
-
-        console.log('[Helius] Sample asset structure:', JSON.stringify(assets[0], null, 2));
-
-        // Filter and map tokens - handle different asset structures
-        const candidates = assets
-            .filter(asset => {
-                // Log what we're filtering
-                console.log(`[Helius] Checking asset: ${asset.id}, interface: ${asset.interface}, grouping: ${asset.grouping}`);
-                
-                // Try different ways to identify fungible tokens
-                return asset.interface === 'FungibleToken' || 
-                       asset.interface === 'FungibleAsset' ||
-                       asset.interface === 'V1_NFT' && asset.grouping === null ||
-                       (!asset.interface && !asset.grouping); // Fallback for tokens without clear interface
-            })
-            .map(asset => {
-                const metadata = asset.content?.metadata || {};
-                return {
-                    address: asset.id,
-                    symbol: metadata.symbol || 'UNKNOWN',
-                    name: metadata.name || 'Unknown Token',
-                    description: metadata.description,
-                    image: asset.content?.files?.[0]?.uri
-                };
-            })
-            .filter(c => c.symbol !== 'UNKNOWN' && c.address && !c.symbol.includes('_'))
-            .slice(0, 50);
-
-        console.log(`[Helius] Final candidates: ${candidates.length}`);
-        if (candidates.length > 0) {
-            console.log('[Helius] Sample candidate:', JSON.stringify(candidates[0], null, 2));
-        }
-
-        return candidates;
-
-    } catch (error) {
-        console.error('❌ [Helius] Detailed error information:');
-        console.error('   Error type:', error.constructor.name);
-        console.error('   Error message:', error.message);
-        
-        if (error.response) {
-            console.error('   HTTP Status:', error.response.status);
-            console.error('   HTTP Status Text:', error.response.statusText);
-            console.error('   Response Headers:', JSON.stringify(error.response.headers, null, 2));
-            console.error('   Response Data:', JSON.stringify(error.response.data, null, 2));
-        } else if (error.request) {
-            console.error('   No response received. Request details:');
-            console.error('   Request URL:', error.config?.url);
-            console.error('   Request Method:', error.config?.method);
-        }
-        
-        return [];
+    
+        // Fallback to ensure bot always has tokens to analyze
+        console.log('[Token Discovery] Using fallback token list');
+        return [
+            { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' },
+            { address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', symbol: 'WIF', name: 'dogwifhat' },
+            { address: 'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82', symbol: 'BOME', name: 'Book of Meme' },
+            { address: '5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK8PSWmrRC', symbol: 'SLERF', name: 'Slerf' },
+            { address: 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5', symbol: 'MEW', name: 'cat in a dogs world' }
+        ];
     }
-}
 
 // ALTERNATIVE APPROACH 1: Try getting recent transactions instead
 async getHeliusTokenCandidatesAlternative1() {
