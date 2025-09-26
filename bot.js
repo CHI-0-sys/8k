@@ -247,154 +247,36 @@ class TradingBot {
         ];
     }
 
-// ALTERNATIVE APPROACH 1: Try getting recent transactions instead
-async getHeliusTokenCandidatesAlternative1() {
-    const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
-    if (!HELIUS_API_KEY) {
-        console.error('[Helius] HELIUS_API_KEY is not set');
-        return [];
-    }
-    
-    const url = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
-    
-    try {
-        console.log('[Helius Alt1] Trying getSignaturesForAddress approach...');
-        
-        // Get recent signatures from a known DEX address (Raydium)
-        const response = await axios.post(url, {
-            jsonrpc: '2.0',
-            id: 'get-signatures',
-            method: 'getSignaturesForAddress',
-            params: [
-                '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM Program
-                {
-                    limit: 100,
-                    commitment: 'confirmed'
-                }
-            ]
-        });
-        
-        console.log('[Helius Alt1] Signatures response:', response.data.result?.length || 0);
-        
-        if (response.data.result && response.data.result.length > 0) {
-            // Get transaction details for recent signatures
-            const signatures = response.data.result.slice(0, 10).map(sig => sig.signature);
-            
-            const txResponse = await axios.post(url, {
-                jsonrpc: '2.0',
-                id: 'get-transactions',
-                method: 'getParsedTransactions',
-                params: [
-                    signatures,
-                    {
-                        maxSupportedTransactionVersion: 0,
-                        commitment: 'confirmed'
-                    }
-                ]
-            });
-            
-            console.log('[Helius Alt1] Got transaction details for analysis');
-            
-            // Extract token mints from transactions (simplified)
-            const candidates = [];
-            const seenMints = new Set();
-            
-            if (txResponse.data.result) {
-                for (const tx of txResponse.data.result) {
-                    if (!tx || !tx.transaction) continue;
-                    
-                    const instructions = tx.transaction.message.instructions || [];
-                    for (const ix of instructions) {
-                        if (ix.parsed?.info?.mint && !seenMints.has(ix.parsed.info.mint)) {
-                            seenMints.add(ix.parsed.info.mint);
-                            candidates.push({
-                                address: ix.parsed.info.mint,
-                                symbol: 'DETECTED',
-                                name: 'Recent Token'
-                            });
-                        }
-                    }
-                }
-            }
-            
-            console.log(`[Helius Alt1] Found ${candidates.length} token candidates from recent transactions`);
-            return candidates.slice(0, 20);
-        }
-        
-        return [];
-        
-    } catch (error) {
-        console.error('[Helius Alt1] Failed:', error.message);
-        return [];
-    }
-}
 
-// ALTERNATIVE APPROACH 2: Use known token list
-async getHeliusTokenCandidatesAlternative2() {
-    try {
-        console.log('[Helius Alt2] Using Jupiter token list as fallback...');
+    async getHeliusTokenCandidates() {
+        console.log('[Token Discovery] Using working implementation...');
         
-        // Get Jupiter token list as fallback
-        const response = await axios.get('https://token.jup.ag/all', { timeout: 10000 });
-        
-        if (response.data && Array.isArray(response.data)) {
-            // Filter for recent/trending tokens (simplified approach)
-            const candidates = response.data
-                .filter(token => {
-                    // Basic filters for meme coins
-                    const symbol = token.symbol?.toLowerCase() || '';
-                    const name = token.name?.toLowerCase() || '';
-                    
-                    // Look for meme-like characteristics
-                    const isMemeish = symbol.length <= 6 && 
-                                     !symbol.includes('usd') && 
-                                     !symbol.includes('btc') &&
-                                     !name.includes('usd') &&
-                                     token.decimals <= 9;
-                    
-                    return isMemeish;
-                })
-                .sort(() => Math.random() - 0.5) // Randomize
-                .slice(0, 30)
-                .map(token => ({
-                    address: token.address,
-                    symbol: token.symbol,
-                    name: token.name,
-                    logoURI: token.logoURI
-                }));
+        try {
+            const response = await axios.get('https://token.jup.ag/all', { timeout: 15000 });
+            
+            if (response.data && Array.isArray(response.data)) {
+                const candidates = response.data
+                    .filter(token => token.symbol && token.address && token.decimals <= 9)
+                    .sort(() => Math.random() - 0.5)
+                    .slice(0, 50)
+                    .map(token => ({
+                        address: token.address,
+                        symbol: token.symbol,
+                        name: token.name || token.symbol
+                    }));
                 
-            console.log(`[Helius Alt2] Selected ${candidates.length} meme token candidates`);
-            return candidates;
+                console.log(`[Token Discovery] Found ${candidates.length} candidates`);
+                return candidates;
+            }
+        } catch (error) {
+            console.error('[Token Discovery] Error:', error.message);
         }
         
-        return [];
-        
-    } catch (error) {
-        console.error('[Helius Alt2] Failed:', error.message);
-        return [];
+        return [
+            { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' }
+        ];
     }
-}
 
-// COMBINED APPROACH: Try main method, then fallbacks
-async getHeliusTokenCandidatesCombined() {
-    console.log('[Helius] Starting combined token discovery approach...');
-    
-    // Try main Helius DAS API first
-    let candidates = await this.getHeliusTokenCandidates();
-    
-    if (candidates.length === 0) {
-        console.log('[Helius] Main API failed, trying transaction analysis...');
-        candidates = await this.getHeliusTokenCandidatesAlternative1();
-    }
-    
-    if (candidates.length === 0) {
-        console.log('[Helius] Transaction analysis failed, using Jupiter token list...');
-        candidates = await this.getHeliusTokenCandidatesAlternative2();
-    }
-    
-    console.log(`[Helius] Combined approach returned ${candidates.length} candidates`);
-    return candidates;
-}
     
 
    async sendPnLChart(chatId) {
