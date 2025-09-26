@@ -249,34 +249,59 @@ class TradingBot {
 
 
     async getHeliusTokenCandidates() {
-        console.log('[Token Discovery] Using working implementation...');
+        console.log('[Token Discovery] Switched to reliable strategy: Fetching from Jupiter token list...');
         
         try {
-            const response = await axios.get('https://token.jup.ag/all', { timeout: 15000 });
-            
+            // We will get the list of all tokens known by the Jupiter aggregator.
+            const response = await axios.get('https://token.jup.ag/all', {
+                timeout: 15000, // 15-second timeout
+                headers: { 'User-Agent': 'SolanaTradingBot/1.0' } // Set a user agent
+            });
+    
             if (response.data && Array.isArray(response.data)) {
+                // Filter the massive list down to potential meme coins
                 const candidates = response.data
-                    .filter(token => token.symbol && token.address && token.decimals <= 9)
-                    .sort(() => Math.random() - 0.5)
-                    .slice(0, 50)
+                    .filter(token => {
+                        // We want tokens with a symbol, address, and a reasonable number of decimals.
+                        // We also filter out major tokens like SOL, USDC, and USDT.
+                        return token.symbol && 
+                               token.address && 
+                               token.decimals <= 9 && 
+                               token.symbol.length <= 8 && // Meme coins often have short symbols
+                               !['USDC', 'USDT', 'SOL', 'WSOL', 'JUP', 'PYTH', 'JTO'].includes(token.symbol);
+                    })
+                    // Randomize the list so we don't analyze the same tokens every time
+                    .sort(() => Math.random() - 0.5) 
+                    // Take a random sample of 50 to analyze
+                    .slice(0, 50) 
                     .map(token => ({
                         address: token.address,
                         symbol: token.symbol,
                         name: token.name || token.symbol
                     }));
-                
-                console.log(`[Token Discovery] Found ${candidates.length} candidates`);
+    
+                console.log(`[Token Discovery] Successfully found ${candidates.length} potential candidates from the Jupiter list.`);
                 return candidates;
             }
+            
+            console.error('[Token Discovery] Failed to parse a valid list from Jupiter.');
+            return [];
+    
         } catch (error) {
-            console.error('[Token Discovery] Error:', error.message);
+            console.error('❌ Jupiter token list fetch failed:', error.message);
+            // If Jupiter fails, we provide a small, hardcoded list of well-known meme tokens
+            // to ensure the bot can always proceed to the analysis stage.
+            console.log('[Token Discovery] Using fallback token list due to API failure.');
+            return [
+                { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' },
+                { address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', symbol: 'WIF', name: 'dogwifhat' },
+                { address: 'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82', symbol: 'BOME', name: 'Book of Meme' },
+                { address: 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5', symbol: 'MEW', name: 'cat in a dogs world' }
+            ];
         }
-        
-        return [
-            { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' }
-        ];
     }
-
+    
+    
     
 
    async sendPnLChart(chatId) {
