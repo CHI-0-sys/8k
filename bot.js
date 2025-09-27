@@ -193,12 +193,11 @@ class TradingBot {
     } 
 
     async getHeliusTokenCandidates() {
-        console.log('[Token Discovery] NEW STRATEGY: Fetching recent pairs from DexScreener...');
+        console.log('[Token Discovery] CORRECTED STRATEGY: Fetching recent pairs from DexScreener...');
         try {
-            const response = await axios.get(`${DEXSCREENER_API_URL}/pairs/solana/sol`, {
-                params: {
-                    limit: 100, // Get the 100 most recent pairs against SOL
-                },
+            // CORRECTED: The correct endpoint to find pairs for a specific token (Wrapped SOL)
+            const wrappedSolAddress = 'So11111111111111111111111111111111111111112';
+            const response = await axios.get(`${DEXSCREENER_API_URL}/tokens/${wrappedSolAddress}/pairs`, {
                 timeout: 15000
             });
 
@@ -211,6 +210,10 @@ class TradingBot {
                         const liquidity = pair.liquidity?.usd || 0;
                         const volume = pair.volume?.h24 || 0;
                         const ageMinutes = (Date.now() - (pair.pairCreatedAt || 0)) / 60000;
+
+                        // Ensure the base token is not SOL itself
+                        const isBaseSol = pair.baseToken.address === wrappedSolAddress;
+                        if (isBaseSol) return false;
 
                         return (
                             liquidity > 5000 && // At least $5k liquidity
@@ -232,7 +235,7 @@ class TradingBot {
                 return candidates;
             }
             
-            console.error('[Token Discovery] Failed to parse a valid list from DexScreener.');
+            console.error('[Token Discovery] Failed to parse a valid list from DexScreener. Response did not contain a .pairs array.');
             return [];
 
         } catch (error) {
@@ -2831,6 +2834,4 @@ class TradingBot {
         console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
     });
     
-    module.exports = bot; 
-    
-
+    module.exports = bot;
