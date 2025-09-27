@@ -195,35 +195,32 @@ class TradingBot {
     async getHeliusTokenCandidates() {
         console.log('[Token Discovery] CORRECTED STRATEGY: Fetching recent pairs from DexScreener...');
         try {
-            // CORRECTED: The correct endpoint to find pairs for a specific token (Wrapped SOL)
-            const wrappedSolAddress = 'So11111111111111111111111111111111111111112';
-            const response = await axios.get(`${DEXSCREENER_API_URL}/tokens/${wrappedSolAddress}/pairs`, {
+            // This is the correct endpoint to get all new pairs on Solana.
+            const response = await axios.get(`${DEXSCREENER_API_URL}/pairs/solana`, {
+                params: {
+                    limit: 100, // Get the 100 most recent pairs
+                },
                 timeout: 15000
             });
 
             if (response.data && response.data.pairs) {
                 const candidates = response.data.pairs
-                    // Sort by pair creation time, newest first
                     .sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
-                    // Filter for tokens with some basic viability
                     .filter(pair => {
                         const liquidity = pair.liquidity?.usd || 0;
                         const volume = pair.volume?.h24 || 0;
                         const ageMinutes = (Date.now() - (pair.pairCreatedAt || 0)) / 60000;
-
-                        // Ensure the base token is not SOL itself
-                        const isBaseSol = pair.baseToken.address === wrappedSolAddress;
-                        if (isBaseSol) return false;
+                        const isSolPair = pair.quoteToken.address === COMMON_TOKENS.SOL;
 
                         return (
-                            liquidity > 5000 && // At least $5k liquidity
-                            volume > 1000 && // At least $1k in 24h volume
-                            ageMinutes > 10 && // Older than 10 minutes to avoid immediate rugs
+                            isSolPair && // Must be a pair against SOL
+                            liquidity > 5000 && 
+                            volume > 1000 &&
+                            ageMinutes > 10 && 
                             pair.baseToken.symbol &&
                             pair.baseToken.address
                         );
                     })
-                    // Limit to the top 30 most recent viable pairs for analysis
                     .slice(0, 30)
                     .map(pair => ({
                         address: pair.baseToken.address,
@@ -241,7 +238,6 @@ class TradingBot {
         } catch (error) {
             console.error('❌ DexScreener token discovery failed:', error.message);
             console.log('[Token Discovery] Using fallback token list due to API failure.');
-            // Fallback remains the same
             return [
                 { address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', symbol: 'BONK', name: 'Bonk' },
                 { address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', symbol: 'WIF', name: 'dogwifhat' },
@@ -1124,7 +1120,8 @@ class TradingBot {
         
             const candidates = await this.getHeliusTokenCandidates();
             if (!candidates.length) {
-                console.log('[AutoBuy] FAILED: No initial candidates found from Helius.');
+                // CORRECTED LOG MESSAGE
+                console.log('[AutoBuy] FAILED: No initial candidates found from Token Discovery.');
                 return;
             }
             console.log(`[AutoBuy] Discovery complete. Found ${candidates.length} potential candidates. Analyzing...`);
