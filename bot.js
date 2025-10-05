@@ -1184,7 +1184,6 @@ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) *
     }
 }
 
-// ============ INITIALIZE ============
 const bot = new TradingBot();
 
 console.log('\n=== MEME TOKEN TRADING BOT ===');
