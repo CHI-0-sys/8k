@@ -20,14 +20,14 @@ const USE_WEBHOOK = process.env.USE_WEBHOOK === 'true';
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // Trading Parameters
-const DAILY_PROFIT_TARGET = 0.25; // 25%
-const DAILY_STOP_LOSS = 0.05; // 5%
-const PER_TRADE_PROFIT_TARGET = 0.10; // 10% default
-const PER_TRADE_STOP_LOSS = 0.02; // 2%
-const SCALP_PROFIT_MIN = 0.05; // 5%
-const SCALP_PROFIT_MAX = 0.10; // 10%
+const DAILY_PROFIT_TARGET = 0.25;
+const DAILY_STOP_LOSS = 0.05;
+const PER_TRADE_PROFIT_TARGET = 0.10;
+const PER_TRADE_STOP_LOSS = 0.02;
+const SCALP_PROFIT_MIN = 0.05;
+const SCALP_PROFIT_MAX = 0.10;
 const EXTENDED_HOLD_MINUTES = 15;
-const EXTENDED_HOLD_TARGET = 0.25; // 25%
+const EXTENDED_HOLD_TARGET = 0.25;
 const COOLDOWN_HOURS = 24;
 const MIN_LIQUIDITY_USD = 8000;
 const VOLUME_SPIKE_MULTIPLIER = 1.8;
@@ -37,7 +37,7 @@ const BASE_PRIORITY_FEE_SOL = 0.001;
 const HOT_LAUNCH_PRIORITY_FEE_SOL = 0.003;
 
 // DEX Configuration
-const JUPITER_API_URL = 'https://quote-api.jup.ag/v6';
+const JUPITER_API_URL = 'https://api.jup.ag/v6';
 const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -302,18 +302,37 @@ class TradingEngine {
         }
         return this.userStates.get(userId);
     }
+
+    hasActiveUsers() {
+        for (const [userId, user] of this.userStates.entries()) {
+            if (user.isActive) return true;
+        }
+        return false;
+    }
     
     async tradingCycle() {
         if (this.isRunning) return;
+
+        // Check if any user is active before scanning
+        if (!this.hasActiveUsers()) {
+            console.log("[Engine] No active users, skipping cycle");
+            return;
+        }
+
         this.isRunning = true;
 
         try {
             console.log("\n=== Trading Cycle Start ===");
 
-            // Get first authorized user or bot owner
             const userId = this.bot.ownerId || (AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null);
             if (!userId) {
                 console.log("[Engine] No authorized user configured");
+                return;
+            }
+
+            const user = this.getUserState(userId);
+            if (!user.isActive) {
+                console.log("[Engine] User not active, skipping cycle");
                 return;
             }
 
@@ -372,24 +391,19 @@ class TradingEngine {
                user.dailyProfitPercent <= -DAILY_STOP_LOSS;
     }
 
-    // FIXED: Added missing calculateSlippage method
     calculateSlippage(liquidityUSD) {
-        // Dynamic slippage based on liquidity
-        // Higher liquidity = lower slippage needed
-        if (liquidityUSD >= 50000) return 300; // 3%
-        if (liquidityUSD >= 20000) return 500; // 5%
-        if (liquidityUSD >= 10000) return 800; // 8%
-        return 1200; // 12% for low liquidity
+        if (liquidityUSD >= 50000) return 300;
+        if (liquidityUSD >= 20000) return 500;
+        if (liquidityUSD >= 10000) return 800;
+        return 1200;
     }
 
-    // FIXED: Added missing getCurrentPrice method
     async getCurrentPrice(tokenAddress) {
         try {
-            // Get current price using Jupiter quote for 1 token
             const quote = await this.getJupiterQuote(
                 tokenAddress,
                 USDC_MINT,
-                1000000000, // 1 token with 9 decimals
+                1000000000,
                 300
             );
 
@@ -398,8 +412,7 @@ class TradingEngine {
                 return null;
             }
 
-            // Price = USDC received / tokens sold
-            const priceUSD = parseFloat(quote.outAmount) / 1000000; // USDC has 6 decimals
+            const priceUSD = parseFloat(quote.outAmount) / 1000000;
             return priceUSD;
         } catch (error) {
             console.error(`[Price] Error fetching price:`, error.message);
@@ -407,13 +420,11 @@ class TradingEngine {
         }
     }
 
-    // FIXED: Added balance verification
     async verifyWalletBalance(requiredUSDC) {
         try {
             const usdcMint = new PublicKey(USDC_MINT);
             const walletPubkey = this.wallet.publicKey;
 
-            // Get token accounts
             const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
                 walletPubkey,
                 { mint: usdcMint }
@@ -455,7 +466,6 @@ class TradingEngine {
             for (const token of candidates) {
                 console.log(`[Scanner] Checking ${token.symbol} (${token.bondingProgress.toFixed(1)}%)...`);
     
-                // Volume spike check
                 const volume = await this.bitquery.getVolumeHistory(token.address);
                 if (!volume.spike) {
                     console.log(`[Scanner] ${token.symbol}: No volume spike, skipping.\n`);
@@ -468,14 +478,12 @@ class TradingEngine {
                 const ratioText = isFinite(ratio) ? ratio.toFixed(2) + 'x' : '∞';
                 console.log(`  Volume Spike: ${ratioText}`);
     
-                // Whale dump check
                 const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
                 if (whaleDump) {
                     console.log(`[Scanner] ${token.symbol}: Whale dump detected, skipping.\n`);
                     continue;
                 }
     
-                // Found valid token
                 console.log(`[Scanner] 🎯 SIGNAL FOUND: ${token.symbol}`);
                 console.log(`  Bonding: ${token.bondingProgress.toFixed(1)}%`);
                 console.log(`  Liquidity: $${token.liquidityUSD.toFixed(0)}`);
@@ -519,7 +527,6 @@ class TradingEngine {
             
             const data = await res.json();
             
-            // FIXED: Handle Jupiter V6 response structure correctly
             if (!data || !data.inAmount || !data.outAmount) {
                 console.log('[Jupiter] Invalid quote response structure');
                 return null;
@@ -531,7 +538,7 @@ class TradingEngine {
                 ...data,
                 inAmount: data.inAmount,
                 outAmount: data.outAmount,
-                route: data // Keep full response for swap
+                route: data
             };
         } catch (err) {
             console.error('[Jupiter] Quote error:', err.message);
@@ -550,7 +557,6 @@ class TradingEngine {
                 throw new Error('Insufficient USDC balance for buy');
             }
 
-            // FIXED: Verify wallet has sufficient balance
             const balanceCheck = await this.verifyWalletBalance(user.currentBalance);
             if (!balanceCheck.success) {
                 throw new Error(`Insufficient wallet balance. Have: ${balanceCheck.balance}, Need: ${user.currentBalance}`);
@@ -572,7 +578,7 @@ class TradingEngine {
                 throw new Error(`Swap failed: ${tx.error}`);
             }
 
-            const tokensReceived = parseFloat(quote.outAmount) / (10 ** 9); // Assume 9 decimals
+            const tokensReceived = parseFloat(quote.outAmount) / (10 ** 9);
             const usdcSpent = parseFloat(quote.inAmount) / 1000000;
             const entryPrice = usdcSpent / tokensReceived;
             
@@ -882,7 +888,6 @@ class TradingBot {
         this.app = express();
         this.app.use(express.json());
 
-        // FIXED: Set ownerId before bot initialization
         this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
 
         if (USE_WEBHOOK && WEBHOOK_URL) {
@@ -927,7 +932,6 @@ class TradingBot {
         }
     }
 
-    // FIXED: Added safe message sending helper
     async sendMessage(chatId, text, options = {}) {
         try {
             if (!chatId) {
@@ -981,6 +985,7 @@ Bot is now scanning for opportunities...
             await this.sendMessage(msg.chat.id, `
 🛑 <b>AUTO-TRADING STOPPED</b>
 
+All API calls halted. No more scans or trades will be executed.
 Use /start to resume trading.
             `.trim(), { parse_mode: 'HTML' });
         });
@@ -1031,7 +1036,7 @@ Success Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrade
 📊 <b>OPEN POSITION:</b>
 Token: ${pos.symbol}
 Entry: ${pos.entryPrice.toFixed(8)}
-Current: ${currentPrice ? `+${currentPrice.toFixed(8)}` : 'Loading...'}
+Current: ${currentPrice ? currentPrice.toFixed(8) : 'Loading...'}
 Change: ${priceChange}%
 Target: ${pos.targetPrice.toFixed(8)}
 Stop: ${pos.stopLossPrice.toFixed(8)}
@@ -1091,7 +1096,7 @@ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) *
 
 <b>Trading Commands:</b>
 /start - Start auto-trading
-/stop - Stop auto-trading
+/stop - Stop auto-trading & API calls
 /balance - View balance & P&L
 /status - Trading status & position
 /history - Recent trades
@@ -1155,6 +1160,8 @@ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) *
         console.log('[Trading] Starting cycles...');
         
         setInterval(async () => {
+            if (!this.engine.hasActiveUsers()) return;
+            
             for (const [userId, user] of this.engine.userStates.entries()) {
                 if (user.isActive && user.position) {
                     await this.engine.monitorPosition(userId);
