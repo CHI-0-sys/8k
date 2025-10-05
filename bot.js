@@ -882,7 +882,7 @@ Next trading day: Day ${user.currentDay + 1}
     }
 }
 
-// ============ TELEGRAM BOT ============
+// ============ TELEGRAM BOT ==========>
 class TradingBot {
     constructor() {
         this.app = express();
