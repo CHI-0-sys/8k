@@ -1,4 +1,6 @@
 .env
 node_modules/
 *.log
-.DS_Store
+*.db
+*.cache
+package-lock.json

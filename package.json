@@ -1,53 +1,45 @@
 {
-  "name": "8k",
-  "version": "1.0.0",
-  "description": "30-Day 25% Trading Challenge Bot for Telegram",
+  "name": "solana-trading-bot-enhanced",
+  "version": "2.0.0",
+  "description": "Enhanced Solana Trading Bot with Multi-DEX, Technical Analysis, Backtesting, and MEV Protection",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js || echo 'Bot crashed!'",
+    "start": "node bot.js",
     "dev": "nodemon bot.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "backtest": "node scripts/run-backtest.js",
+    "test": "jest",
+    "lint": "eslint .",
+    "logs": "tail -f logs/combined.log"
   },
   "keywords": [
-    "telegram",
-    "bot",
-    "trading",
-    "meme-tokens",
+    "solana",
+    "trading-bot",
     "cryptocurrency",
-    "pumpfun",
-    "solana"
+    "automated-trading",
+    "pump-fun"
   ],
-  "author": "Emmanuel Chibuike",
+  "author": "",
   "license": "MIT",
   "dependencies": {
-    "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
-    "@metaplex-foundation/umi": "^1.4.0",
-    "@metaplex-foundation/umi-bundle-defaults": "^1.4.0",
-    "@solana/spl-token": "^0.3.11",
-    "@solana/web3.js": "^1.98.2",
-    "axios": "^1.10.0",
+    "@solana/web3.js": "^1.87.6",
+    "abort-controller": "^3.0.0",
+    "axios": "^1.6.2",
     "bs58": "^5.0.0",
-    "chartjs-node-canvas": "^5.0.0",
-    "dotenv": "^16.5.0",
-    "express": "^5.1.0",
-    "mongodb": "^6.17.0",
-    "mongoose": "^8.16.1",
-    "node-telegram-bot-api": "^0.61.0",
-    "ws": "^8.18.3"
+    "dotenv": "^16.3.1",
+    "express": "^4.21.2",
+    "node-fetch": "^2.7.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "winston": "^3.11.0",
+    "winston-daily-rotate-file": "^4.7.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "eslint": "^8.55.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
   },
   "engines": {
     "node": ">=16.0.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/CHI-0-sys/8k.git"
-  },
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/CHI-0-sys/8k/issues"
-  },
-  "homepage": "https://github.com/CHI-0-sys/8k#readme"
+  }
 }
