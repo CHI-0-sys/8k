@@ -1988,35 +1988,82 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 
 class TradingBot {
     constructor() {
-    this.app = express();
-    this.app.use(express.json());
-    this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+        this.app = express();
+        this.app.use(express.json());
+        this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
 
-    // ONLY initialize bot, DON'T start server yet
-    if (!USE_WEBHOOK) {
-        logger.info('Starting in POLLING mode');
-        this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-    } else if (USE_WEBHOOK && WEBHOOK_URL) {
-        logger.info('Starting in WEBHOOK mode');
-        // DON'T pass webHook config here - we'll handle it manually
-        this.bot = new TelegramBot(TELEGRAM_TOKEN);
-        // Server will be started in init() method
-    } else {
-        logger.warn('Webhook config incomplete, using POLLING');
-        this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-    }
+        // 🔧 FIX: Properly initialize bot based on mode
+        const useWebhook = USE_WEBHOOK === true || USE_WEBHOOK === 'true';
+        
+        console.log('🤖 Bot Configuration:', {
+            useWebhook,
+            hasWebhookUrl: !!WEBHOOK_URL,
+            port: PORT,
+            authorizedUsers: AUTHORIZED_USERS.length
+        });
 
-    this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
-    this.wallet = this.loadWallet(PRIVATE_KEY);
-    this.database = new DatabaseManager('./data/trading.db');
-    this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-    this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
-    
-    // Health monitoring
-    if (ENABLE_HEALTH_MONITORING) {
-        this.healthMonitor = new HealthMonitor(logger, this);
+        if (useWebhook && WEBHOOK_URL) {
+            console.log('🌐 Starting in WEBHOOK mode');
+            logger.info('Starting in WEBHOOK mode');
+            // Don't enable polling in webhook mode
+            this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
+                webHook: false // We'll set this manually later
+            });
+            this.useWebhook = true;
+        } else {
+            console.log('📡 Starting in POLLING mode');
+            logger.info('Starting in POLLING mode');
+            this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
+                polling: {
+                    interval: 1000,
+                    autoStart: true,
+                    params: {
+                        timeout: 10
+                    }
+                }
+            });
+            this.useWebhook = false;
+            
+            // Add polling error handlers
+            this.bot.on('polling_error', (error) => {
+                logger.error('Polling error', { 
+                    code: error.code,
+                    message: error.message 
+                });
+            });
+        }
+
+        // Common error handler
+        this.bot.on('error', (error) => {
+            logger.error('Bot error', { error: error.message });
+        });
+
+        // Test connection immediately
+        this.bot.getMe()
+            .then(info => {
+                console.log('✅ Connected to Telegram:', info.username);
+                logger.info('Bot connected to Telegram', { 
+                    username: info.username, 
+                    id: info.id 
+                });
+            })
+            .catch(err => {
+                console.error('❌ Failed to connect to Telegram:', err.message);
+                logger.error('Bot connection failed', { error: err.message });
+            });
+
+        // Rest of initialization
+        this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
+        this.wallet = this.loadWallet(PRIVATE_KEY);
+        this.database = new DatabaseManager('./data/trading.db');
+        this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+        this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+        
+        // Health monitoring
+        if (ENABLE_HEALTH_MONITORING) {
+            this.healthMonitor = new HealthMonitor(logger, this);
+        }
     }
-}
 
 async init() {
     logger.info('Trading bot initializing...');
@@ -2777,8 +2824,17 @@ Can lose all capital. Trade responsibly.
     }
 
     async setupWebhook() {
+        if (!this.useWebhook || !WEBHOOK_URL) {
+            logger.info('Webhook not configured, skipping setup');
+            return;
+        }
+    
         // Setup webhook endpoint
         this.app.post('/webhook', (req, res) => {
+            logger.debug('Webhook received', { 
+                hasBody: !!req.body,
+                updateId: req.body?.update_id 
+            });
             this.bot.processUpdate(req.body);
             res.sendStatus(200);
         });
@@ -2787,13 +2843,13 @@ Can lose all capital. Trade responsibly.
         this.app.get('/health', (req, res) => {
             const stats = this.bitquery.getStats();
             const rpcStatus = this.rpcConnection.getStatus();
-            const user = this.engine.getUserState(this.ownerId);
+            const user = this.ownerId ? this.engine.getUserState(this.ownerId) : null;
             
             res.json({ 
                 status: 'healthy', 
-                mode: 'webhook',
+                mode: this.useWebhook ? 'webhook' : 'polling',
                 timestamp: new Date().toISOString(),
-                uptime: process.uptime(),
+                uptime: Math.floor(process.uptime()),
                 version: '2.0.0',
                 features: {
                     paperTrading: ENABLE_PAPER_TRADING,
@@ -2814,15 +2870,52 @@ Can lose all capital. Trade responsibly.
             });
         });
     
-        // Set webhook with Telegram
+        // Root endpoint
+        this.app.get('/', (req, res) => {
+            res.json({
+                name: 'Solana Trading Bot',
+                version: '2.0.0',
+                status: 'running',
+                mode: 'webhook'
+            });
+        });
+    
+        // Delete any existing webhook first
         try {
-            await this.bot.setWebHook(`${WEBHOOK_URL}/webhook`);
-            logger.info(`Webhook set: ${WEBHOOK_URL}/webhook`);
+            await this.bot.deleteWebHook();
+            logger.info('Existing webhook deleted');
+            await sleep(1000); // Wait a second
+        } catch (err) {
+            logger.warn('No existing webhook to delete');
+        }
+    
+        // Set new webhook
+        try {
+            const webhookUrl = `${WEBHOOK_URL}/webhook`;
+            await this.bot.setWebHook(webhookUrl, {
+                allowed_updates: ['message', 'callback_query']
+            });
+            
+            logger.info('Webhook configured', { url: webhookUrl });
+            
+            // Verify webhook
+            const webhookInfo = await this.bot.getWebHookInfo();
+            logger.info('Webhook info', {
+                url: webhookInfo.url,
+                hasCustomCertificate: webhookInfo.has_custom_certificate,
+                pendingUpdateCount: webhookInfo.pending_update_count,
+                lastErrorDate: webhookInfo.last_error_date,
+                lastErrorMessage: webhookInfo.last_error_message
+            });
+    
+            console.log('✅ Webhook active:', webhookUrl);
+            
         } catch (err) {
             logger.error('Webhook setup failed', { error: err.message });
             throw err;
         }
     }
+
     startTrading() {
         logger.info('Starting trading cycles...');
         
