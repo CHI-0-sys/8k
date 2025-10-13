@@ -2049,8 +2049,21 @@ class TradingBot {
             logger.info('Trading cycles started');
 
             // Start HTTP server
-            this.app.listen(PORT, '0.0.0.0', () => {
+            const server = this.app.listen(PORT, '0.0.0.0', () => {
                 logger.info(`HTTP server running on port ${PORT}`);
+            }).on('error', (err) => {
+                if (err.code === 'EADDRINUSE') {
+                    logger.error(`Port ${PORT} already in use. Waiting 3s and retrying...`);
+                    setTimeout(() => {
+                        server.close();
+                        this.app.listen(PORT, '0.0.0.0', () => {
+                            logger.info(`HTTP server running on port ${PORT}`);
+                        });
+                    }, 3000);
+                } else {
+                    logger.error('Server error:', err);
+                    process.exit(1);
+                }
             });
 
             logger.info('✅ Trading bot fully initialized and operational');
