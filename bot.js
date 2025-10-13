@@ -2047,24 +2047,12 @@ class TradingBot {
             // Start trading cycles
             this.startTrading();
             logger.info('Trading cycles started');
-
+            
             // Start HTTP server
-            const server = this.app.listen(PORT, '0.0.0.0', () => {
-                logger.info(`HTTP server running on port ${PORT}`);
-            }).on('error', (err) => {
-                if (err.code === 'EADDRINUSE') {
-                    logger.error(`Port ${PORT} already in use. Waiting 3s and retrying...`);
-                    setTimeout(() => {
-                        server.close();
-                        this.app.listen(PORT, '0.0.0.0', () => {
-                            logger.info(`HTTP server running on port ${PORT}`);
-                        });
-                    }, 3000);
-                } else {
-                    logger.error('Server error:', err);
-                    process.exit(1);
-                }
-            });
+            // Start HTTP server
+            this.server = this.app.listen(PORT, '0.0.0.0', () => {
+            logger.info(`HTTP server running on port ${PORT}`);
+           });
 
             logger.info('✅ Trading bot fully initialized and operational');
 
@@ -2879,22 +2867,32 @@ Can lose all capital. Trade responsibly.
         logger.info('Initiating graceful shutdown...');
         
         try {
+            // Close HTTP server first
+            if (this.server) {
+                await new Promise((resolve) => {
+                    this.server.close(() => {
+                        logger.info('HTTP server closed');
+                        resolve();
+                    });
+                });
+            }
+    
             // Save current state
             await this.engine.saveState();
             logger.info('State saved');
-
+    
             // Stop health monitoring
             if (this.healthMonitor) {
                 this.healthMonitor.stop();
                 logger.info('Health monitor stopped');
             }
-
+    
             // Close database
             if (this.database) {
                 await this.database.close();
                 logger.info('Database closed');
             }
-
+    
             // Delete webhook if using
             if (USE_WEBHOOK) {
                 await this.bot.deleteWebHook().catch(err => 
@@ -2902,24 +2900,23 @@ Can lose all capital. Trade responsibly.
                 );
                 logger.info('Webhook deleted');
             }
-
+    
             // Final stats
             const stats = this.bitquery.getStats();
             logger.info('Final API stats', {
                 queries: stats.queries,
                 estimatedPoints: stats.estimatedPoints
             });
-
+    
             logger.info('✅ Shutdown complete');
             process.exit(0);
-
+    
         } catch (error) {
             logger.error('Shutdown error', { error: error.message });
             process.exit(1);
         }
     }
 }
-
 // ============ STARTUP & ERROR HANDLING ============
 
 async function main() {
