@@ -66,8 +66,8 @@ const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS ||
     'https://rpc.ankr.com/solana,https://solana-api.projectserum.com')
     .split(',')
     .filter(url => url.trim());
-
-const PORT = process.env.PORT || 3000;
+    
+const PORT = process.env.PORT || 4002;
 const USE_WEBHOOK = process.env.USE_WEBHOOK === 'true';
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
@@ -1988,79 +1988,95 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 
 class TradingBot {
     constructor() {
-        this.app = express();
-        this.app.use(express.json());
-        this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+    this.app = express();
+    this.app.use(express.json());
+    this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
 
-        if (!USE_WEBHOOK) {
-            logger.info('Starting in POLLING mode');
-            this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-        } else if (USE_WEBHOOK && WEBHOOK_URL) {
-            logger.info('Starting in WEBHOOK mode');
-            this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
-                webHook: { port: PORT, host: '0.0.0.0' }
+    // ONLY initialize bot, DON'T start server yet
+    if (!USE_WEBHOOK) {
+        logger.info('Starting in POLLING mode');
+        this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+    } else if (USE_WEBHOOK && WEBHOOK_URL) {
+        logger.info('Starting in WEBHOOK mode');
+        // DON'T pass webHook config here - we'll handle it manually
+        this.bot = new TelegramBot(TELEGRAM_TOKEN);
+        // Server will be started in init() method
+    } else {
+        logger.warn('Webhook config incomplete, using POLLING');
+        this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+    }
+
+    this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
+    this.wallet = this.loadWallet(PRIVATE_KEY);
+    this.database = new DatabaseManager('./data/trading.db');
+    this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+    this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+    
+    // Health monitoring
+    if (ENABLE_HEALTH_MONITORING) {
+        this.healthMonitor = new HealthMonitor(logger, this);
+    }
+}
+
+async init() {
+    logger.info('Trading bot initializing...');
+    
+    try {
+        // Initialize database
+        await this.database.init();
+        logger.info('Database initialized');
+
+        // Initialize Bitquery
+        await this.bitquery.init();
+        logger.info('Bitquery initialized');
+
+        // Initialize trading engine
+        await this.engine.init();
+        logger.info('Trading engine initialized');
+
+        // Setup Telegram commands
+        this.setupCommands();
+        logger.info('Telegram commands setup');
+
+        // Start health monitoring
+        if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
+            this.healthMonitor.start(5);
+            logger.info('Health monitoring started');
+        }
+
+        // Start trading cycles
+        this.startTrading();
+        logger.info('Trading cycles started');
+
+        // ====== START HTTP SERVER ONLY ONCE ======
+        await new Promise((resolve, reject) => {
+            const server = this.app.listen(PORT, '0.0.0.0', () => {
+                logger.info(`HTTP server running on port ${PORT}`);
+                this.server = server;
+                resolve();
+            }).on('error', (err) => {
+                if (err.code === 'EADDRINUSE') {
+                    logger.error(`Port ${PORT} is already in use. Check if another instance is running.`);
+                    reject(new Error(`Port ${PORT} already in use. Stop other instances or use a different PORT.`));
+                } else {
+                    logger.error('Server error:', err);
+                    reject(err);
+                }
             });
-            this.setupWebhook();
-        } else {
-            logger.warn('Webhook config incomplete, using POLLING');
-            this.bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+        });
+
+        // Setup webhook AFTER server is running
+        if (USE_WEBHOOK && WEBHOOK_URL) {
+            await this.setupWebhook();
         }
 
-        this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
-        this.wallet = this.loadWallet(PRIVATE_KEY);
-        this.database = new DatabaseManager('./data/trading.db');
-        this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-        this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
-        
-        // Health monitoring
-        if (ENABLE_HEALTH_MONITORING) {
-            this.healthMonitor = new HealthMonitor(logger, this);
-        }
+        logger.info('✅ Trading bot fully initialized and operational');
+
+    } catch (error) {
+        logger.error('Initialization failed', { error: error.message, stack: error.stack });
+        throw error;
     }
-
-    async init() {
-        logger.info('Trading bot initializing...');
-        
-        try {
-            // Initialize database
-            await this.database.init();
-            logger.info('Database initialized');
-
-            // Initialize Bitquery
-            await this.bitquery.init();
-            logger.info('Bitquery initialized');
-
-            // Initialize trading engine
-            await this.engine.init();
-            logger.info('Trading engine initialized');
-
-            // Setup Telegram commands
-            this.setupCommands();
-            logger.info('Telegram commands setup');
-
-            // Start health monitoring
-            if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
-                this.healthMonitor.start(5); // Check every 5 minutes
-                logger.info('Health monitoring started');
-            }
-
-            // Start trading cycles
-            this.startTrading();
-            logger.info('Trading cycles started');
-            
-            // Start HTTP server
-            // Start HTTP server
-            this.server = this.app.listen(PORT, '0.0.0.0', () => {
-            logger.info(`HTTP server running on port ${PORT}`);
-           });
-
-            logger.info('✅ Trading bot fully initialized and operational');
-
-        } catch (error) {
-            logger.error('Initialization failed', { error: error.message, stack: error.stack });
-            throw error;
-        }
-    }
+}
 
     loadWallet(privateKey) {
         if (!privateKey) {
@@ -2760,12 +2776,14 @@ Can lose all capital. Trade responsibly.
         return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
     }
 
-    setupWebhook() {
+    async setupWebhook() {
+        // Setup webhook endpoint
         this.app.post('/webhook', (req, res) => {
             this.bot.processUpdate(req.body);
             res.sendStatus(200);
         });
-
+    
+        // Health check endpoint
         this.app.get('/health', (req, res) => {
             const stats = this.bitquery.getStats();
             const rpcStatus = this.rpcConnection.getStatus();
@@ -2795,15 +2813,16 @@ Can lose all capital. Trade responsibly.
                 rpcStatus: rpcStatus
             });
         });
-
-        this.bot.setWebHook(`${WEBHOOK_URL}/webhook`).then(() => {
+    
+        // Set webhook with Telegram
+        try {
+            await this.bot.setWebHook(`${WEBHOOK_URL}/webhook`);
             logger.info(`Webhook set: ${WEBHOOK_URL}/webhook`);
-        }).catch(err => {
+        } catch (err) {
             logger.error('Webhook setup failed', { error: err.message });
-            process.exit(1);
-        });
+            throw err;
+        }
     }
-
     startTrading() {
         logger.info('Starting trading cycles...');
         
@@ -2867,32 +2886,22 @@ Can lose all capital. Trade responsibly.
         logger.info('Initiating graceful shutdown...');
         
         try {
-            // Close HTTP server first
-            if (this.server) {
-                await new Promise((resolve) => {
-                    this.server.close(() => {
-                        logger.info('HTTP server closed');
-                        resolve();
-                    });
-                });
-            }
-    
             // Save current state
             await this.engine.saveState();
             logger.info('State saved');
-    
+
             // Stop health monitoring
             if (this.healthMonitor) {
                 this.healthMonitor.stop();
                 logger.info('Health monitor stopped');
             }
-    
+
             // Close database
             if (this.database) {
                 await this.database.close();
                 logger.info('Database closed');
             }
-    
+
             // Delete webhook if using
             if (USE_WEBHOOK) {
                 await this.bot.deleteWebHook().catch(err => 
@@ -2900,23 +2909,24 @@ Can lose all capital. Trade responsibly.
                 );
                 logger.info('Webhook deleted');
             }
-    
+
             // Final stats
             const stats = this.bitquery.getStats();
             logger.info('Final API stats', {
                 queries: stats.queries,
                 estimatedPoints: stats.estimatedPoints
             });
-    
+
             logger.info('✅ Shutdown complete');
             process.exit(0);
-    
+
         } catch (error) {
             logger.error('Shutdown error', { error: error.message });
             process.exit(1);
         }
     }
 }
+
 // ============ STARTUP & ERROR HANDLING ============
 
 async function main() {
