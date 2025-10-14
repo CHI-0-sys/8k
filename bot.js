@@ -1987,144 +1987,131 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 // Add this to the end of bot.js after TradingEngine class
 
 class TradingBot {
-    constructor() {
-        this.app = express();
-        this.app.use(express.json());
-        this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+    // In TradingBot constructor, replace the initialization section with:
 
-        // 🔧 FIX: Properly initialize bot based on mode
-        const useWebhook = USE_WEBHOOK === true || USE_WEBHOOK === 'true';
-        
-        console.log('🤖 Bot Configuration:', {
-            useWebhook,
-            hasWebhookUrl: !!WEBHOOK_URL,
-            port: PORT,
-            authorizedUsers: AUTHORIZED_USERS.length
-        });
+constructor() {
+    this.app = express();
+    this.app.use(express.json());
+    this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
 
-        if (useWebhook && WEBHOOK_URL) {
-            console.log('🌐 Starting in WEBHOOK mode');
-            logger.info('Starting in WEBHOOK mode');
-            // Don't enable polling in webhook mode
-            this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
-                webHook: false // We'll set this manually later
-            });
-            this.useWebhook = true;
-        } else {
-            console.log('📡 Starting in POLLING mode');
-            logger.info('Starting in POLLING mode');
-            this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
-                polling: {
-                    interval: 1000,
-                    autoStart: true,
-                    params: {
-                        timeout: 10
-                    }
+    const useWebhook = USE_WEBHOOK === true || USE_WEBHOOK === 'true';
+    
+    console.log('🤖 Bot Configuration:', {
+        useWebhook,
+        hasWebhookUrl: !!WEBHOOK_URL,
+        port: PORT,
+        authorizedUsers: AUTHORIZED_USERS.length
+    });
+
+    // CRITICAL FIX: Choose ONE mode, not both
+    if (useWebhook && WEBHOOK_URL) {
+        console.log('🌐 Starting in WEBHOOK mode');
+        logger.info('Starting in WEBHOOK mode');
+        this.bot = new TelegramBot(TELEGRAM_TOKEN);
+        this.useWebhook = true;
+    } else {
+        console.log('📡 Starting in POLLING mode');
+        logger.info('Starting in POLLING mode');
+        this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
+            polling: {
+                interval: 300,        // 300ms between polls
+                autoStart: true,
+                params: {
+                    timeout: 30       // Long polling timeout
                 }
+            }
+        });
+        this.useWebhook = false;
+        
+        this.bot.on('polling_error', (error) => {
+            logger.error('Polling error', { 
+                code: error.code,
+                message: error.message 
             });
-            this.useWebhook = false;
-            
-            // Add polling error handlers
-            this.bot.on('polling_error', (error) => {
-                logger.error('Polling error', { 
-                    code: error.code,
-                    message: error.message 
-                });
-            });
-        }
+        });
+    }
 
-        // Common error handler
-        this.bot.on('error', (error) => {
-            logger.error('Bot error', { error: error.message });
+    // Common error handler
+    this.bot.on('error', (error) => {
+        logger.error('Bot error', { error: error.message });
+    });
+
+    // Verify connection
+    this.bot.getMe()
+        .then(info => {
+            console.log('✅ Connected to Telegram:', info.username);
+            logger.info('Bot connected to Telegram', { 
+                username: info.username, 
+                id: info.id 
+            });
+        })
+        .catch(err => {
+            console.error('❌ Failed to connect to Telegram:', err.message);
+            logger.error('Bot connection failed', { error: err.message });
         });
 
-        // Test connection immediately
-        this.bot.getMe()
-            .then(info => {
-                console.log('✅ Connected to Telegram:', info.username);
-                logger.info('Bot connected to Telegram', { 
-                    username: info.username, 
-                    id: info.id 
-                });
-            })
-            .catch(err => {
-                console.error('❌ Failed to connect to Telegram:', err.message);
-                logger.error('Bot connection failed', { error: err.message });
-            });
-
-        // Rest of initialization
-        this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
-        this.wallet = this.loadWallet(PRIVATE_KEY);
-        this.database = new DatabaseManager('./data/trading.db');
-        this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-        this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
-        
-        // Health monitoring
-        if (ENABLE_HEALTH_MONITORING) {
-            this.healthMonitor = new HealthMonitor(logger, this);
-        }
+    // Initialize components
+    this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
+    this.wallet = this.loadWallet(PRIVATE_KEY);
+    this.database = new DatabaseManager('./data/trading.db');
+    this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+    this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+    
+    if (ENABLE_HEALTH_MONITORING) {
+        this.healthMonitor = new HealthMonitor(logger, this);
     }
+} 
+
 
 async init() {
     logger.info('Trading bot initializing...');
     
     try {
-        // Initialize database
         await this.database.init();
         logger.info('Database initialized');
 
-        // Initialize Bitquery
         await this.bitquery.init();
         logger.info('Bitquery initialized');
 
-        // Initialize trading engine
-        await this.engine.init();
-        logger.info('Trading engine initialized');
-
-        // Setup Telegram commands
+        // Setup commands BEFORE starting anything
         this.setupCommands();
         logger.info('Telegram commands setup');
 
-        // Start health monitoring
+        await this.engine.init();
+        logger.info('Trading engine initialized');
+
         if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
             this.healthMonitor.start(5);
             logger.info('Health monitoring started');
         }
 
-        // Start trading cycles
         this.startTrading();
         logger.info('Trading cycles started');
 
-        // ====== START HTTP SERVER ONLY ONCE ======
+        // Start HTTP server
         await new Promise((resolve, reject) => {
             const server = this.app.listen(PORT, '0.0.0.0', () => {
                 logger.info(`HTTP server running on port ${PORT}`);
                 this.server = server;
                 resolve();
             }).on('error', (err) => {
-                if (err.code === 'EADDRINUSE') {
-                    logger.error(`Port ${PORT} is already in use. Check if another instance is running.`);
-                    reject(new Error(`Port ${PORT} already in use. Stop other instances or use a different PORT.`));
-                } else {
-                    logger.error('Server error:', err);
-                    reject(err);
-                }
+                logger.error('Server error:', err);
+                reject(err);
             });
         });
 
-        // Setup webhook AFTER server is running
-        if (USE_WEBHOOK && WEBHOOK_URL) {
+        // Setup webhook ONLY if configured
+        if (this.useWebhook && WEBHOOK_URL) {
             await this.setupWebhook();
         }
 
         logger.info('✅ Trading bot fully initialized and operational');
 
     } catch (error) {
-        logger.error('Initialization failed', { error: error.message, stack: error.stack });
+        logger.error('Initialization failed', { error: error.message });
         throw error;
     }
 }
-
     loadWallet(privateKey) {
         if (!privateKey) {
             throw new Error('PRIVATE_KEY not set in environment');
