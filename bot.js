@@ -1409,10 +1409,10 @@ async executeBuy(userId, token) {
         user.position = position;
         user.currentBalance -= usdcSpent;
 
-        // Add to portfolio
+
         this.portfolioManager.addPosition(token.address, position);
 
-        // Save to database
+    
         if (this.database) {
             await this.database.createPosition(userId, position);
         }
