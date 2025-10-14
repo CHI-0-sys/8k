@@ -1979,7 +1979,6 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
     `.trim();
 }
 
-// End of TradingEngine class methods
 } 
 
 
@@ -2149,663 +2148,529 @@ async init() {
             });
         }
     }
-
+    
+    
     setupCommands() {
         logger.info('Setting up Telegram bot commands...');
-
-        // ============ START COMMAND ============
-        this.bot.onText(/\/start/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) {
-                await this.sendMessage(msg.chat.id, '❌ Unauthorized. Contact bot owner.');
-                logger.warn('Unauthorized start attempt', { userId: msg.from.id });
-                return;
-            }
-
-            const user = this.engine.getUserState(msg.from.id);
-            
-            // Load user from database if exists
-            const dbUser = await this.database.getUser(msg.from.id.toString());
-            if (!dbUser) {
-                await this.database.createUser(msg.from.id.toString(), user.currentBalance);
-                logger.info('New user created', { userId: msg.from.id, balance: user.currentBalance });
-            }
-
-            user.isActive = true;
-            await this.engine.saveState();
-
-            const modeText = ENABLE_PAPER_TRADING ? '📝 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
-            const strategy = this.engine.getActiveStrategy();
-
-            await this.sendMessage(msg.chat.id, `
-🤖 <b>AUTO-TRADING ACTIVATED</b>
-
-${modeText}
-
-📊 <b>Strategy:</b>
-• Pump.fun ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding
-• Volume spike ${VOLUME_SPIKE_MULTIPLIER}x
-• Scalp ${(strategy.scalpMin * 100).toFixed(0)}-${(strategy.scalpMax * 100).toFixed(0)}% (0-${EXTENDED_HOLD_MINUTES}min)
-• Extended ${(strategy.extendedTarget * 100).toFixed(0)}% (${EXTENDED_HOLD_MINUTES}min+)
-
-🎯 <b>Daily Targets:</b>
-Profit: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
-
-⚙️ <b>Features:</b>
-Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}
-MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}
-Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}
-Health Monitor: ${ENABLE_HEALTH_MONITORING ? '✅' : '❌'}
-Anomaly Detection: ${ENABLE_ANOMALY_DETECTION ? '✅' : '❌'}
-
-💼 <b>Account:</b>
-Balance: ${user.currentBalance.toFixed(2)} USDC
-Day: ${user.currentDay}
-Scan Interval: ${SCAN_INTERVAL_MINUTES}min
-
-🚀 Bot is scanning for opportunities...
-Use /help for commands
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('User activated bot', { userId: msg.from.id });
-        });
-
-        // ============ STOP COMMAND ============
-        this.bot.onText(/\/stop/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const user = this.engine.getUserState(msg.from.id);
-            user.isActive = false;
-            await this.engine.saveState();
-
-            const stats = this.bitquery.getStats();
-            const rpcStatus = this.rpcConnection.getStatus();
-
-            await this.sendMessage(msg.chat.id, `
-🛑 <b>AUTO-TRADING STOPPED</b>
-
-📊 <b>Session Stats:</b>
-API Queries: ${stats.queries}
-Est. Points: ${stats.estimatedPoints}
-Avg: ${stats.pointsPerQuery} pts/query
-
-🔌 <b>RPC Status:</b>
-Current: ${rpcStatus.isPrimary ? 'Primary' : 'Fallback'}
-Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
-
-${user.position ? '⚠️ You have an open position. Monitor it manually.' : ''}
-
-Use /start to resume trading.
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('User stopped bot', { userId: msg.from.id });
-        });
-
-        // ============ BALANCE COMMAND ============
-        this.bot.onText(/\/balance/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const user = this.engine.getUserState(msg.from.id);
-            const todayTrades = user.tradeHistory.filter(t => 
-                t.exitTime > user.dailyResetAt
-            ).length;
-
-            const winningToday = user.tradeHistory.filter(t => 
-                t.exitTime > user.dailyResetAt && t.profit > 0
-            ).length;
-
-            const profitToday = user.tradeHistory
-                .filter(t => t.exitTime > user.dailyResetAt)
-                .reduce((sum, t) => sum + t.profit, 0);
-
-            let profitInfo = '';
-            if (ENABLE_PROFIT_TAKING && user.totalProfitTaken > 0) {
-                profitInfo = `
-💰 <b>Profit Taking:</b>
-Secured: ${user.totalProfitTaken.toFixed(2)} USDC
-Combined: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)} USDC
-`;
-            }
-            
-            await this.sendMessage(msg.chat.id, `
-💼 <b>BALANCE OVERVIEW</b>
-
-<b>Trading Capital:</b> ${user.currentBalance.toFixed(2)} USDC
-<b>Starting Balance:</b> ${user.startingBalance.toFixed(2)} USDC
-<b>Daily Start:</b> ${user.dailyStartBalance.toFixed(2)} USDC
-
-📈 <b>Daily Performance:</b>
-P&L: ${user.dailyProfitPercent >= 0 ? '📈 +' : '📉 '}${user.dailyProfitPercent.toFixed(2)}%
-Profit: ${profitToday >= 0 ? '+' : ''}${profitToday.toFixed(2)} USDC
-Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-${profitInfo}
-📊 <b>Trading Stats:</b>
-Today: ${todayTrades} trades (${winningToday} wins)
-Total: ${user.totalTrades} trades
-Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
-
-<b>Day ${user.currentDay}</b> of 30-day challenge
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Balance checked', { userId: msg.from.id, balance: user.currentBalance });
-        });
-
-        // ============ STATUS COMMAND ============
-        this.bot.onText(/\/status/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const user = this.engine.getUserState(msg.from.id);
-            const hasPosition = user.position !== null;
-            const dailyTargetHit = this.engine.isDailyTargetHit(user);
-
-            let statusEmoji = user.isActive ? '🟢' : '🔴';
-            let statusText = user.isActive ? 'Active' : 'Stopped';
-            if (dailyTargetHit) {
-                statusEmoji = '⏸️';
-                statusText += ' (Cooldown)';
-            }
-
-            const rpcStatus = this.rpcConnection.getStatus();
-            const rpcEmoji = rpcStatus.isPrimary ? '✅' : '⚠️';
-
-            const circuitStatus = this.engine.circuitBreaker.getStatus();
-            const circuitEmoji = circuitStatus.isTripped ? '🚨' : '✅';
-
-            let positionInfo = '';
-            if (hasPosition) {
-                const pos = user.position;
-                const currentPrice = await this.engine.getCurrentPrice(pos.tokenAddress);
-                const priceChange = currentPrice ? 
-                    ((currentPrice - pos.entryPrice) / pos.entryPrice * 100).toFixed(2) : '?';
-                const holdTime = ((Date.now() - pos.entryTime) / 60000).toFixed(1);
-                const unrealizedPnL = currentPrice ? 
-                    ((pos.tokensOwned * currentPrice) - pos.investedUSDC).toFixed(2) : '?';
-                
-                positionInfo = `
-
-📊 <b>CURRENT POSITION:</b>
-Token: ${pos.symbol}
-Entry: $${pos.entryPrice.toFixed(8)}
-Current: $${currentPrice ? currentPrice.toFixed(8) : '...'}
-Change: ${priceChange}%
-Unrealized P&L: ${unrealizedPnL} USDC
-
-🎯 <b>Targets:</b>
-Target: $${pos.targetPrice.toFixed(8)}
-Stop: $${pos.stopLossPrice.toFixed(8)}
-Hold: ${holdTime}m
-Mode: ${pos.scalpMode ? 'Scalp' : 'Extended'}
-
-Invested: ${pos.investedUSDC.toFixed(2)} USDC
-Tokens: ${pos.tokensOwned.toFixed(4)}`;
-            }
-
-            const portfolioStats = this.engine.portfolioManager.getStats();
-
-            await this.sendMessage(msg.chat.id, `
-${statusEmoji} <b>BOT STATUS</b>
-
-<b>Trading:</b> ${statusText}
-<b>Mode:</b> ${ENABLE_PAPER_TRADING ? '📝 Paper' : '💰 Live'}
-<b>Day:</b> ${user.currentDay}/30
-<b>Balance:</b> ${user.currentBalance.toFixed(2)} USDC
-<b>Daily P&L:</b> ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
-
-${rpcEmoji} <b>RPC Connection:</b>
-Status: ${rpcStatus.isPrimary ? 'Primary' : `Fallback #${rpcStatus.currentIndex}`}
-Endpoint: ${rpcStatus.currentUrl.substring(0, 40)}...
-Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
-
-${circuitEmoji} <b>Circuit Breaker:</b>
-Status: ${circuitStatus.isTripped ? 'TRIPPED' : 'Active'}
-Consecutive Losses: ${circuitStatus.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}
-Daily Losses: ${circuitStatus.dailyLosses}/${MAX_DAILY_LOSSES}
-${circuitStatus.isTripped ? `Cooldown: ${Math.floor(circuitStatus.cooldownRemaining / 60)}m remaining` : ''}
-
-📊 <b>Portfolio:</b>
-Positions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}
-Total Invested: ${portfolioStats.totalInvested.toFixed(2)} USDC
-
-📈 <b>Performance:</b>
-Trades: ${user.totalTrades}
-Wins: ${user.successfulTrades}
-Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
-Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}${positionInfo}
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Status checked', { userId: msg.from.id });
-        });
-
-        // ============ PERFORMANCE COMMAND ============
-        this.bot.onText(/\/performance/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const report = this.engine.performanceTracker.getDetailedReport();
-            const user = this.engine.getUserState(msg.from.id);
-
-            await this.sendMessage(msg.chat.id, `
-📊 <b>PERFORMANCE REPORT</b>
-
-<b>📈 Summary:</b>
-Total Trades: ${report.summary.totalTrades}
-Wins: ${report.summary.winningTrades}
-Losses: ${report.summary.losingTrades}
-Win Rate: ${report.summary.winRate}
-Profit Factor: ${report.summary.profitFactor}
-Expectancy: ${report.summary.expectancy}
-
-<b>💰 Profit Metrics:</b>
-Total Profit: +${report.profitMetrics.totalProfit} USDC
-Total Loss: -${report.profitMetrics.totalLoss} USDC
-Net P&L: ${report.profitMetrics.netProfit} USDC
-Avg Win: ${report.profitMetrics.avgWinPercent}
-Avg Loss: ${report.profitMetrics.avgLossPercent}
-
-<b>📊 Extremes:</b>
-Best Trade: +${report.extremes.largestWin}
-Worst Trade: ${report.extremes.largestLoss}
-Best Streak: ${report.extremes.consecutiveWins} wins
-Worst Streak: ${report.extremes.consecutiveLosses} losses
-Current Streak: ${report.extremes.currentStreak}
-
-<b>⚙️ Strategy:</b>
-Level: ${report.strategy.currentLevel}
-Last Adjustment: ${new Date(report.strategy.lastAdjustment).toLocaleDateString()}
-${ENABLE_AUTO_ADJUSTMENT ? `Next Review: ${new Date(report.strategy.nextReview).toLocaleDateString()}` : 'Auto-adjust: OFF'}
-
-<b>💼 Account Growth:</b>
-Starting: ${user.startingBalance.toFixed(2)} USDC
-Current: ${user.currentBalance.toFixed(2)} USDC
-Total Return: ${((user.currentBalance - user.startingBalance) / user.startingBalance * 100).toFixed(2)}%
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Performance viewed', { userId: msg.from.id });
-        });
-
-        // ============ HISTORY COMMAND ============
-        this.bot.onText(/\/history/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const user = this.engine.getUserState(msg.from.id);
-            
-            if (!user.tradeHistory.length) {
-                await this.sendMessage(msg.chat.id, '📭 <b>No trades yet</b>\n\nStart trading to see your history.', { 
-                    parse_mode: 'HTML' 
-                });
-                return;
-            }
-
-            const recent = user.tradeHistory.slice(-10).reverse();
-            let text = `📜 <b>TRADE HISTORY</b>\n<b>Last 10 trades:</b>\n\n`;
-
-            recent.forEach((trade, index) => {
-                const emoji = trade.profit > 0 ? '✅' : '❌';
-                const labels = { 
-                    'scalp_profit': 'Scalp', 
-                    'extended_profit': 'Extended', 
-                    'stop_loss': 'Stop' 
-                };
-                
-                text += `${emoji} <b>${trade.symbol}</b> (${labels[trade.reason] || trade.reason})\n`;
-                text += `  Entry: $${trade.entryPrice.toFixed(8)}\n`;
-                text += `  Exit: $${trade.exitPrice.toFixed(8)}\n`;
-                text += `  P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profitPercent.toFixed(2)}%)\n`;
-                text += `  Hold: ${trade.holdTimeMinutes}m\n\n`;
-            });
-
-            const totalProfit = user.tradeHistory.reduce((sum, t) => sum + t.profit, 0);
-            text += `<b>Total P&L:</b> ${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)} USDC`;
-
-            await this.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
-            logger.info('History viewed', { userId: msg.from.id, trades: recent.length });
-        });
-
-        // ============ STATS COMMAND ============
-        this.bot.onText(/\/stats/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const stats = this.bitquery.getStats();
-            const monthlyEstimate = stats.estimatedPoints * (30 * 24 * 60 / SCAN_INTERVAL_MINUTES);
-
-            await this.sendMessage(msg.chat.id, `
-📊 <b>API USAGE STATISTICS</b>
-
-<b>Current Session:</b>
-Queries: ${stats.queries}
-Est. Points: ${stats.estimatedPoints.toLocaleString()}
-Avg: ${stats.pointsPerQuery} pts/query
-
-<b>Monthly Projection:</b>
-Estimated: ${Math.floor(monthlyEstimate).toLocaleString()} points
-Limit: 3,000,000 points
-Status: ${monthlyEstimate <= 3000000 ? '✅ Within Limit' : '⚠️ Over Limit'}
-Usage: ${(monthlyEstimate / 3000000 * 100).toFixed(1)}%
-
-<b>Configuration:</b>
-Scan Interval: ${SCAN_INTERVAL_MINUTES}min
-Max Analyze: ${MAX_CANDIDATES_TO_ANALYZE} tokens
-Volume Check: ${ENABLE_VOLUME_CHECK ? 'ON (80pts)' : 'OFF'}
-Whale Check: ${ENABLE_WHALE_CHECK ? 'ON (40pts)' : 'OFF'}
-Cache: ${SHARED_CACHE_ENABLED ? `ON (${CACHE_DURATION_MINUTES}min)` : 'OFF'}
-
-<b>Per Cycle Cost:</b>
-Base Query: 150 pts
-Volume Checks: ${ENABLE_VOLUME_CHECK ? MAX_CANDIDATES_TO_ANALYZE * 80 : 0} pts
-Whale Checks: ${ENABLE_WHALE_CHECK ? MAX_CANDIDATES_TO_ANALYZE * 40 : 0} pts
-Total/Cycle: ${150 + (ENABLE_VOLUME_CHECK ? MAX_CANDIDATES_TO_ANALYZE * 80 : 0) + (ENABLE_WHALE_CHECK ? MAX_CANDIDATES_TO_ANALYZE * 40 : 0)} pts
-
-<b>Optimization Tips:</b>
-${monthlyEstimate > 2500000 ? '⚠️ Consider increasing SCAN_INTERVAL_MINUTES' : ''}
-${monthlyEstimate > 2500000 ? '⚠️ Or reduce MAX_CANDIDATES_TO_ANALYZE' : ''}
-${monthlyEstimate <= 2000000 ? '✅ Excellent API usage efficiency!' : ''}
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Stats viewed', { userId: msg.from.id });
-        });
-
-        // ============ PROFITS COMMAND ============
-        this.bot.onText(/\/profits/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const user = this.engine.getUserState(msg.from.id);
-            
-            if (!ENABLE_PROFIT_TAKING) {
-                await this.sendMessage(msg.chat.id, `
-💰 <b>PROFIT TAKING</b>
-
-Status: ❌ Disabled
-
-To enable profit taking, set in configuration:
-ENABLE_PROFIT_TAKING=true
-PROFIT_TAKING_THRESHOLD=100
-PROFIT_TAKING_PERCENTAGE=0.5
-                `.trim(), { parse_mode: 'HTML' });
-                return;
-            }
-
-            if (user.profitTakingHistory.length === 0) {
-                await this.sendMessage(msg.chat.id, `
-💰 <b>PROFIT TAKING</b>
-
-Status: ✅ Enabled
-Threshold: ${PROFIT_TAKING_THRESHOLD} USDC
-Percentage: ${(PROFIT_TAKING_PERCENTAGE * 100).toFixed(0)}%
-
-No profits taken yet. Keep trading!
-                `.trim(), { parse_mode: 'HTML' });
-                return;
-            }
-
-            const recent = user.profitTakingHistory.slice(-10).reverse();
-            let text = `💰 <b>PROFIT TAKING HISTORY</b>\n\n`;
-
-            recent.forEach((pt) => {
-                const date = new Date(pt.date).toLocaleDateString();
-                text += `📅 <b>Day ${pt.day}</b> (${date})\n`;
-                text += `  Daily Profit: ${pt.dailyProfit.toFixed(2)} USDC\n`;
-                text += `  Taken (${(PROFIT_TAKING_PERCENTAGE * 100)}%): ${pt.profitTaken.toFixed(2)} USDC\n`;
-                text += `  Reinvested: ${(pt.dailyProfit - pt.profitTaken).toFixed(2)} USDC\n\n`;
-            });
-
-            text += `<b>Summary:</b>\n`;
-            text += `Total Secured: ${user.totalProfitTaken.toFixed(2)} USDC\n`;
-            text += `Trading Capital: ${user.currentBalance.toFixed(2)} USDC\n`;
-            text += `<b>Combined Value: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)} USDC</b>`;
-
-            await this.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
-            logger.info('Profits viewed', { userId: msg.from.id });
-        });
-
-        // ============ HEALTH COMMAND ============
-        this.bot.onText(/\/health/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            if (!ENABLE_HEALTH_MONITORING || !this.healthMonitor) {
-                await this.sendMessage(msg.chat.id, `
-🏥 <b>HEALTH MONITORING</b>
-
-Status: ❌ Disabled
-
-To enable, set: ENABLE_HEALTH_MONITORING=true
-                `.trim(), { parse_mode: 'HTML' });
-                return;
-            }
-
-            const status = this.healthMonitor.getStatus();
-            const healthEmoji = status.healthy ? '✅' : '⚠️';
-
-            await this.sendMessage(msg.chat.id, `
-🏥 <b>SYSTEM HEALTH</b>
-
-Status: ${healthEmoji} ${status.healthy ? 'Healthy' : 'Issues Detected'}
-Uptime: ${status.uptime}
-
-<b>📊 Metrics:</b>
-Total Requests: ${status.metrics.totalRequests}
-Success Rate: ${status.metrics.successRate}
-Failed: ${status.metrics.failedRequests}
-
-<b>💾 Memory:</b>
-Heap Used: ${status.metrics.memoryUsage.heapUsed}
-Heap Total: ${status.metrics.memoryUsage.heapTotal}
-RSS: ${status.metrics.memoryUsage.rss}
-
-<b>🚨 Alerts:</b>
-Active: ${status.activeAlerts}
-Total: ${status.totalAlerts}
-
-${status.metrics.lastError ? `<b>Last Error:</b>\n${status.metrics.lastError}\n${new Date(status.metrics.lastErrorTime).toLocaleString()}` : 'No recent errors'}
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Health checked', { userId: msg.from.id });
-        });
-
-        // ============ ANOMALIES COMMAND ============
-        this.bot.onText(/\/anomalies/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            if (!ENABLE_ANOMALY_DETECTION || !this.engine.anomalyDetector) {
-                await this.sendMessage(msg.chat.id, `
-🔍 <b>ANOMALY DETECTION</b>
-
-Status: ❌ Disabled
-
-To enable, set: ENABLE_ANOMALY_DETECTION=true
-                `.trim(), { parse_mode: 'HTML' });
-                return;
-            }
-
-            const summary = this.engine.anomalyDetector.getSummary();
-            const unresolved = await this.database.getUnresolvedAnomalies(msg.from.id.toString());
-
-            await this.sendMessage(msg.chat.id, `
-🔍 <b>ANOMALY DETECTION</b>
-
-<b>Baseline Metrics:</b>
-Win Rate: ${summary.baseline.avgWinRate.toFixed(1)}%
-Avg Profit: ${summary.baseline.avgProfitPercent.toFixed(2)}%
-Avg Hold: ${summary.baseline.avgHoldTime.toFixed(1)}m
-
-<b>Recent Performance:</b>
-Trades Analyzed: ${summary.recentTradesCount}
-Win Rate: ${summary.recentStats.winRate}%
-Avg Profit: ${summary.recentStats.avgProfit}%
-Avg Hold: ${summary.recentStats.avgHoldTime}m
-
-<b>🚨 Unresolved Anomalies:</b> ${unresolved.length}
-
-${unresolved.length > 0 ? unresolved.slice(0, 5).map(a => {
-    const date = new Date(a.created_at * 1000).toLocaleString();
-    return `\n${a.severity === 'HIGH' ? '🔴' : a.severity === 'MEDIUM' ? '🟡' : '🟢'} ${a.anomaly_type}\n  ${a.description}\n  ${date}`;
-}).join('\n') : 'All clear! No anomalies detected.'}
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Anomalies viewed', { userId: msg.from.id });
-        });
-
-        // ============ PORTFOLIO COMMAND ============
-        this.bot.onText(/\/portfolio/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            const portfolioStats = this.engine.portfolioManager.getStats();
-
-            if (portfolioStats.totalPositions === 0) {
-                await this.sendMessage(msg.chat.id, `
-📊 <b>PORTFOLIO</b>
-
-No active positions.
-
-Max Positions: ${MAX_CONCURRENT_POSITIONS}
-Max Per Token: ${(MAX_POSITION_PER_TOKEN * 100).toFixed(0)}%
-
-Bot is scanning for opportunities...
-                `.trim(), { parse_mode: 'HTML' });
-                return;
-            }
-
-            let text = `📊 <b>PORTFOLIO OVERVIEW</b>\n\n`;
-            text += `<b>Active Positions:</b> ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}\n`;
-            text += `<b>Total Invested:</b> ${portfolioStats.totalInvested.toFixed(2)} USDC\n\n`;
-
-            for (const pos of portfolioStats.positions) {
-                text += `<b>${pos.symbol}</b>\n`;
-                text += `  Invested: ${pos.invested} USDC\n`;
-                text += `  Allocation: ${pos.allocation}\n\n`;
-            }
-
-            await this.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
-            logger.info('Portfolio viewed', { userId: msg.from.id });
-        });
-
-        // ============ BACKTEST COMMAND ============
-        this.bot.onText(/\/backtest(?:\s+(\d+))?/, async (msg, match) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            if (!ENABLE_BACKTESTING) {
-                await this.sendMessage(msg.chat.id, '📈 <b>Backtesting disabled</b>\n\nSet ENABLE_BACKTESTING=true to enable.', {
-                    parse_mode: 'HTML'
-                });
-                return;
-            }
-
-            await this.sendMessage(msg.chat.id, '⏳ Running backtest... This may take a few minutes.', {
-                parse_mode: 'HTML'
-            });
-
+    
+        // Single message handler that works with both webhook and polling
+        this.bot.on('message', async (msg) => {
             try {
-                const days = parseInt(match[1]) || 30;
-                const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-                const endDate = new Date().toISOString().split('T')[0];
-
-                const strategy = {
-                    name: 'Current Strategy',
-                    minBondingProgress: MIN_BONDING_PROGRESS,
-                    maxBondingProgress: MAX_BONDING_PROGRESS,
-                    minLiquidity: MIN_LIQUIDITY_USD,
-                    volumeSpikeMultiplier: VOLUME_SPIKE_MULTIPLIER,
-                    scalpProfitMin: SCALP_PROFIT_MIN,
-                    scalpProfitMax: SCALP_PROFIT_MAX,
-                    extendedHoldTarget: EXTENDED_HOLD_TARGET,
-                    stopLoss: PER_TRADE_STOP_LOSS,
-                    extendedHoldMinutes: EXTENDED_HOLD_MINUTES,
-                    positionSizeMode: POSITION_SIZE_MODE,
-                    percentagePositionSize: PERCENTAGE_POSITION_SIZE
-                };
-
-                const backtest = new BacktestEngine(logger, this.database);
-                await backtest.initialize(20, startDate, endDate, strategy);
-
-                // Note: In production, you'd load real historical data
-                const historicalData = await backtest.loadHistoricalData('mock', startDate, endDate);
-                const report = await backtest.runBacktest(historicalData);
-                await backtest.saveResults(report);
-
-                await this.sendMessage(msg.chat.id, `
-📈 <b>BACKTEST RESULTS</b>
-
-<b>Period:</b> ${startDate} to ${endDate} (${days} days)
-<b>Strategy:</b> ${report.summary.strategyName}
-
-<b>Capital:</b>
-Initial: ${report.summary.initialCapital} USDC
-Final: ${report.summary.finalCapital} USDC
-Return: ${report.summary.totalReturnPercent}%
-
-<b>Performance:</b>
-Total Trades: ${report.performance.totalTrades}
-Win Rate: ${report.performance.winRate}%
-Profit Factor: ${report.performance.profitFactor}
-Expectancy: ${report.performance.expectancy}%
-
-<b>Trades:</b>
-Winning: ${report.performance.winningTrades}
-Losing: ${report.performance.losingTrades}
-Avg Win: ${report.performance.avgWin}%
-Avg Loss: ${report.performance.avgLoss}%
-
-<b>Risk:</b>
-Max Drawdown: ${report.risk.maxDrawdown}%
-Sharpe Ratio: ${report.risk.sharpeRatio}
-Avg Hold: ${report.risk.avgHoldTime}min
-
-${parseFloat(report.performance.winRate) >= 60 ? '✅ Strategy shows promise!' : '⚠️ Strategy needs optimization'}
-                `.trim(), { parse_mode: 'HTML' });
-
-                logger.info('Backtest completed', { userId: msg.from.id, days });
-
-            } catch (error) {
-                logger.error('Backtest failed', { error: error.message });
-                await this.sendMessage(msg.chat.id, `❌ Backtest failed: ${error.message}`, {
-                    parse_mode: 'HTML'
+                // Only process text messages
+                if (!msg.text) {
+                    return;
+                }
+    
+                const userId = msg.from.id;
+                const chatId = msg.chat.id;
+                const command = msg.text.split(' ')[0].toLowerCase();
+    
+                logger.info('Message received', { 
+                    userId, 
+                    command,
+                    text: msg.text.substring(0, 50)
                 });
+    
+                // Skip non-commands
+                if (!command.startsWith('/')) {
+                    return;
+                }
+    
+                // Authorization check
+                if (!this.isAuthorized(userId)) {
+                    await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
+                    logger.warn('Unauthorized command attempt', { userId, command });
+                    return;
+                }
+    
+                // Route commands
+                switch (command) {
+                    case '/start':
+                        await this.handleStart(userId, chatId);
+                        break;
+    
+                    case '/stop':
+                        await this.handleStop(userId, chatId);
+                        break;
+    
+                    case '/balance':
+                        await this.handleBalance(userId, chatId);
+                        break;
+    
+                    case '/status':
+                        await this.handleStatus(userId, chatId);
+                        break;
+    
+                    case '/performance':
+                        await this.handlePerformance(userId, chatId);
+                        break;
+    
+                    case '/history':
+                        await this.handleHistory(userId, chatId);
+                        break;
+    
+                    case '/stats':
+                        await this.handleStats(userId, chatId);
+                        break;
+    
+                    case '/profits':
+                        await this.handleProfits(userId, chatId);
+                        break;
+    
+                    case '/health':
+                        await this.handleHealth(userId, chatId);
+                        break;
+    
+                    case '/anomalies':
+                        await this.handleAnomalies(userId, chatId);
+                        break;
+    
+                    case '/portfolio':
+                        await this.handlePortfolio(userId, chatId);
+                        break;
+    
+                    case '/backtest':
+                        const days = msg.text.split(' ')[1] || '30';
+                        await this.handleBacktest(userId, chatId, parseInt(days));
+                        break;
+    
+                    case '/help':
+                        await this.handleHelp(userId, chatId);
+                        break;
+    
+                    default:
+                        logger.debug('Unknown command', { command });
+                }
+    
+            } catch (error) {
+                logger.error('Message handler error', { 
+                    error: error.message,
+                    stack: error.stack,
+                    text: msg.text 
+                });
+                
+                try {
+                    await this.sendMessage(msg.chat.id, 
+                        `❌ Error processing command: ${error.message}`, 
+                        { parse_mode: 'HTML' }
+                    );
+                } catch (sendErr) {
+                    logger.error('Failed to send error message', { error: sendErr.message });
+                }
             }
         });
-
-        // ============ HELP COMMAND ============
-        this.bot.onText(/\/help/, async (msg) => {
-            if (!this.isAuthorized(msg.from.id)) return;
-
-            await this.sendMessage(msg.chat.id, `
-📚 <b>COMMAND REFERENCE</b>
-
-<b>🎮 Trading Controls:</b>
-/start - Activate bot trading
-/stop - Stop bot trading
-/balance - View account balance
-/status - Check bot & position status
-
-<b>📊 Analytics:</b>
-/performance - Detailed performance metrics
-/history - Recent trade history
-/stats - API usage statistics
-/profits - Profit taking history
-/portfolio - View active positions
-
-<b>🔧 Advanced:</b>
-/health - System health check
-/anomalies - View detected anomalies
-/backtest [days] - Run backtest simulation
-
-<b>ℹ️ Information:</b>
-/help - Show this menu
-
-<b>⚙️ Current Settings:</b>
-Mode: ${ENABLE_PAPER_TRADING ? '📝 Paper Trading' : '💰 Live Trading'}
-Daily Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-Scan Interval: ${SCAN_INTERVAL_MINUTES}min
-Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}
-
-<b>⚠️ Risk Warning:</b>
-High-risk trading. Monitor daily.
-Can lose all capital. Trade responsibly.
-            `.trim(), { parse_mode: 'HTML' });
-
-            logger.info('Help viewed', { userId: msg.from.id });
+    
+        logger.info('✅ Message handlers configured');
+    }
+    
+    // ============ COMMAND HANDLERS ============
+    
+    async handleStart(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        
+        const dbUser = await this.database.getUser(userId.toString());
+        if (!dbUser) {
+            await this.database.createUser(userId.toString(), user.currentBalance);
+            logger.info('New user created', { userId, balance: user.currentBalance });
+        }
+    
+        user.isActive = true;
+        await this.engine.saveState();
+    
+        const modeText = ENABLE_PAPER_TRADING ? '📝 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
+        const strategy = this.engine.getActiveStrategy();
+    
+        await this.sendMessage(chatId, `
+    🤖 <b>AUTO-TRADING ACTIVATED</b>
+    
+    ${modeText}
+    
+    📊 <b>Strategy:</b>
+    • Pump.fun ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding
+    • Volume spike ${VOLUME_SPIKE_MULTIPLIER}x
+    • Scalp ${(strategy.scalpMin * 100).toFixed(0)}-${(strategy.scalpMax * 100).toFixed(0)}% (0-${EXTENDED_HOLD_MINUTES}min)
+    • Extended ${(strategy.extendedTarget * 100).toFixed(0)}% (${EXTENDED_HOLD_MINUTES}min+)
+    
+    🎯 <b>Daily Targets:</b>
+    Profit: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
+    Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
+    
+    ⚙️ <b>Features:</b>
+    Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}
+    MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}
+    Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}
+    Health Monitor: ${ENABLE_HEALTH_MONITORING ? '✅' : '❌'}
+    Anomaly Detection: ${ENABLE_ANOMALY_DETECTION ? '✅' : '❌'}
+    
+    💼 <b>Account:</b>
+    Balance: ${user.currentBalance.toFixed(2)} USDC
+    Day: ${user.currentDay}
+    Scan Interval: ${SCAN_INTERVAL_MINUTES}min
+    
+    🚀 Bot is scanning for opportunities...
+    Use /help for commands
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('User activated bot', { userId });
+    }
+    
+    async handleStop(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        user.isActive = false;
+        await this.engine.saveState();
+    
+        const stats = this.bitquery.getStats();
+        const rpcStatus = this.rpcConnection.getStatus();
+    
+        await this.sendMessage(chatId, `
+    🛑 <b>AUTO-TRADING STOPPED</b>
+    
+    📊 <b>Session Stats:</b>
+    API Queries: ${stats.queries}
+    Est. Points: ${stats.estimatedPoints}
+    Avg: ${stats.pointsPerQuery} pts/query
+    
+    🔌 <b>RPC Status:</b>
+    Current: ${rpcStatus.isPrimary ? 'Primary' : 'Fallback'}
+    Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
+    
+    ${user.position ? '⚠️ You have an open position. Monitor it manually.' : ''}
+    
+    Use /start to resume trading.
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('User stopped bot', { userId });
+    }
+    
+    async handleBalance(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        const todayTrades = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt).length;
+        const winningToday = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt && t.profit > 0).length;
+        const profitToday = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt).reduce((sum, t) => sum + t.profit, 0);
+    
+        let profitInfo = '';
+        if (ENABLE_PROFIT_TAKING && user.totalProfitTaken > 0) {
+            profitInfo = `
+    💰 <b>Profit Taking:</b>
+    Secured: ${user.totalProfitTaken.toFixed(2)} USDC
+    Combined: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)} USDC
+    `;
+        }
+        
+        await this.sendMessage(chatId, `
+    💼 <b>BALANCE OVERVIEW</b>
+    
+    <b>Trading Capital:</b> ${user.currentBalance.toFixed(2)} USDC
+    <b>Starting Balance:</b> ${user.startingBalance.toFixed(2)} USDC
+    <b>Daily Start:</b> ${user.dailyStartBalance.toFixed(2)} USDC
+    
+    📈 <b>Daily Performance:</b>
+    P&L: ${user.dailyProfitPercent >= 0 ? '📈 +' : '📉 '}${user.dailyProfitPercent.toFixed(2)}%
+    Profit: ${profitToday >= 0 ? '+' : ''}${profitToday.toFixed(2)} USDC
+    Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
+    ${profitInfo}
+    📊 <b>Trading Stats:</b>
+    Today: ${todayTrades} trades (${winningToday} wins)
+    Total: ${user.totalTrades} trades
+    Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
+    
+    <b>Day ${user.currentDay}</b> of 30-day challenge
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Balance checked', { userId, balance: user.currentBalance });
+    }
+    
+    async handleStatus(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        const hasPosition = user.position !== null;
+        const dailyTargetHit = this.engine.isDailyTargetHit(user);
+    
+        let statusEmoji = user.isActive ? '🟢' : '🔴';
+        let statusText = user.isActive ? 'Active' : 'Stopped';
+        if (dailyTargetHit) {
+            statusEmoji = '⏸️';
+            statusText += ' (Cooldown)';
+        }
+    
+        const rpcStatus = this.rpcConnection.getStatus();
+        const rpcEmoji = rpcStatus.isPrimary ? '✅' : '⚠️';
+    
+        const circuitStatus = this.engine.circuitBreaker.getStatus();
+        const circuitEmoji = circuitStatus.isTripped ? '🚨' : '✅';
+    
+        let positionInfo = '';
+        if (hasPosition) {
+            const pos = user.position;
+            const currentPrice = await this.engine.getCurrentPrice(pos.tokenAddress);
+            const priceChange = currentPrice ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100).toFixed(2) : '?';
+            const holdTime = ((Date.now() - pos.entryTime) / 60000).toFixed(1);
+            const unrealizedPnL = currentPrice ? ((pos.tokensOwned * currentPrice) - pos.investedUSDC).toFixed(2) : '?';
+            
+            positionInfo = `
+    
+    📊 <b>CURRENT POSITION:</b>
+    Token: ${pos.symbol}
+    Entry: $${pos.entryPrice.toFixed(8)}
+    Current: $${currentPrice ? currentPrice.toFixed(8) : '...'}
+    Change: ${priceChange}%
+    Unrealized P&L: ${unrealizedPnL} USDC
+    
+    🎯 <b>Targets:</b>
+    Target: $${pos.targetPrice.toFixed(8)}
+    Stop: $${pos.stopLossPrice.toFixed(8)}
+    Hold: ${holdTime}m
+    Mode: ${pos.scalpMode ? 'Scalp' : 'Extended'}
+    
+    Invested: ${pos.investedUSDC.toFixed(2)} USDC
+    Tokens: ${pos.tokensOwned.toFixed(4)}`;
+        }
+    
+        const portfolioStats = this.engine.portfolioManager.getStats();
+    
+        await this.sendMessage(chatId, `
+    ${statusEmoji} <b>BOT STATUS</b>
+    
+    <b>Trading:</b> ${statusText}
+    <b>Mode:</b> ${ENABLE_PAPER_TRADING ? '📝 Paper' : '💰 Live'}
+    <b>Day:</b> ${user.currentDay}/30
+    <b>Balance:</b> ${user.currentBalance.toFixed(2)} USDC
+    <b>Daily P&L:</b> ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+    
+    ${rpcEmoji} <b>RPC Connection:</b>
+    Status: ${rpcStatus.isPrimary ? 'Primary' : `Fallback #${rpcStatus.currentIndex}`}
+    Endpoint: ${rpcStatus.currentUrl.substring(0, 40)}...
+    Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
+    
+    ${circuitEmoji} <b>Circuit Breaker:</b>
+    Status: ${circuitStatus.isTripped ? 'TRIPPED' : 'Active'}
+    Consecutive Losses: ${circuitStatus.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}
+    Daily Losses: ${circuitStatus.dailyLosses}/${MAX_DAILY_LOSSES}
+    ${circuitStatus.isTripped ? `Cooldown: ${Math.floor(circuitStatus.cooldownRemaining / 60)}m remaining` : ''}
+    
+    📊 <b>Portfolio:</b>
+    Positions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}
+    Total Invested: ${portfolioStats.totalInvested.toFixed(2)} USDC
+    
+    📈 <b>Performance:</b>
+    Trades: ${user.totalTrades}
+    Wins: ${user.successfulTrades}
+    Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
+    Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}${positionInfo}
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Status checked', { userId });
+    }
+    
+    async handlePerformance(userId, chatId) {
+        const report = this.engine.performanceTracker.getDetailedReport();
+        const user = this.engine.getUserState(userId);
+    
+        await this.sendMessage(chatId, `
+    📊 <b>PERFORMANCE REPORT</b>
+    
+    <b>📈 Summary:</b>
+    Total Trades: ${report.summary.totalTrades}
+    Wins: ${report.summary.winningTrades}
+    Losses: ${report.summary.losingTrades}
+    Win Rate: ${report.summary.winRate}
+    Profit Factor: ${report.summary.profitFactor}
+    Expectancy: ${report.summary.expectancy}
+    
+    <b>💰 Profit Metrics:</b>
+    Total Profit: +${report.profitMetrics.totalProfit} USDC
+    Total Loss: -${report.profitMetrics.totalLoss} USDC
+    Net P&L: ${report.profitMetrics.netProfit} USDC
+    Avg Win: ${report.profitMetrics.avgWinPercent}
+    Avg Loss: ${report.profitMetrics.avgLossPercent}
+    
+    <b>📊 Extremes:</b>
+    Best Trade: +${report.extremes.largestWin}
+    Worst Trade: ${report.extremes.largestLoss}
+    Best Streak: ${report.extremes.consecutiveWins} wins
+    Worst Streak: ${report.extremes.consecutiveLosses} losses
+    Current Streak: ${report.extremes.currentStreak}
+    
+    <b>⚙️ Strategy:</b>
+    Level: ${report.strategy.currentLevel}
+    Last Adjustment: ${new Date(report.strategy.lastAdjustment).toLocaleDateString()}
+    ${ENABLE_AUTO_ADJUSTMENT ? `Next Review: ${new Date(report.strategy.nextReview).toLocaleDateString()}` : 'Auto-adjust: OFF'}
+    
+    <b>💼 Account Growth:</b>
+    Starting: ${user.startingBalance.toFixed(2)} USDC
+    Current: ${user.currentBalance.toFixed(2)} USDC
+    Total Return: ${((user.currentBalance - user.startingBalance) / user.startingBalance * 100).toFixed(2)}%
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Performance viewed', { userId });
+    }
+    
+    async handleHistory(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        
+        if (!user.tradeHistory.length) {
+            await this.sendMessage(chatId, '📭 <b>No trades yet</b>\n\nStart trading to see your history.', { parse_mode: 'HTML' });
+            return;
+        }
+    
+        const recent = user.tradeHistory.slice(-10).reverse();
+        let text = `📜 <b>TRADE HISTORY</b>\n<b>Last 10 trades:</b>\n\n`;
+    
+        recent.forEach((trade) => {
+            const emoji = trade.profit > 0 ? '✅' : '❌';
+            const labels = { 'scalp_profit': 'Scalp', 'extended_profit': 'Extended', 'stop_loss': 'Stop' };
+            
+            text += `${emoji} <b>${trade.symbol}</b> (${labels[trade.reason] || trade.reason})\n`;
+            text += `  Entry: $${trade.entryPrice.toFixed(8)}\n`;
+            text += `  Exit: $${trade.exitPrice.toFixed(8)}\n`;
+            text += `  P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profitPercent.toFixed(2)}%)\n`;
+            text += `  Hold: ${trade.holdTimeMinutes}m\n\n`;
         });
-
-        logger.info('✅ All Telegram commands configured');
+    
+        const totalProfit = user.tradeHistory.reduce((sum, t) => sum + t.profit, 0);
+        text += `<b>Total P&L:</b> ${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)} USDC`;
+    
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('History viewed', { userId });
+    }
+    
+    async handleStats(userId, chatId) {
+        const stats = this.bitquery.getStats();
+        const monthlyEstimate = stats.estimatedPoints * (30 * 24 * 60 / SCAN_INTERVAL_MINUTES);
+    
+        await this.sendMessage(chatId, `
+    📊 <b>API USAGE STATISTICS</b>
+    
+    <b>Current Session:</b>
+    Queries: ${stats.queries}
+    Est. Points: ${stats.estimatedPoints.toLocaleString()}
+    Avg: ${stats.pointsPerQuery} pts/query
+    
+    <b>Monthly Projection:</b>
+    Estimated: ${Math.floor(monthlyEstimate).toLocaleString()} points
+    Limit: 3,000,000 points
+    Status: ${monthlyEstimate <= 3000000 ? '✅ Within Limit' : '⚠️ Over Limit'}
+    Usage: ${(monthlyEstimate / 3000000 * 100).toFixed(1)}%
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Stats viewed', { userId });
+    }
+    
+    async handleProfits(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        
+        if (!ENABLE_PROFIT_TAKING) {
+            await this.sendMessage(chatId, '💰 <b>PROFIT TAKING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+    
+        if (user.profitTakingHistory.length === 0) {
+            await this.sendMessage(chatId, `💰 <b>PROFIT TAKING</b>\n\nStatus: ✅ Enabled\nNo profits taken yet. Keep trading!`, { parse_mode: 'HTML' });
+            return;
+        }
+    
+        const recent = user.profitTakingHistory.slice(-10).reverse();
+        let text = `💰 <b>PROFIT TAKING HISTORY</b>\n\n`;
+    
+        recent.forEach((pt) => {
+            const date = new Date(pt.date).toLocaleDateString();
+            text += `📅 <b>Day ${pt.day}</b> (${date})\nTaken: ${pt.profitTaken.toFixed(2)} USDC\n\n`;
+        });
+    
+        text += `<b>Total Secured:</b> ${user.totalProfitTaken.toFixed(2)} USDC`;
+    
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('Profits viewed', { userId });
+    }
+    
+    async handleHealth(userId, chatId) {
+        if (!ENABLE_HEALTH_MONITORING || !this.healthMonitor) {
+            await this.sendMessage(chatId, '🏥 <b>HEALTH MONITORING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+    
+        const status = this.healthMonitor.getStatus();
+        const healthEmoji = status.healthy ? '✅' : '⚠️';
+    
+        await this.sendMessage(chatId, `
+    🏥 <b>SYSTEM HEALTH</b>
+    
+    Status: ${healthEmoji} ${status.healthy ? 'Healthy' : 'Issues Detected'}
+    Uptime: ${status.uptime}
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Health checked', { userId });
+    }
+    
+    async handleAnomalies(userId, chatId) {
+        if (!ENABLE_ANOMALY_DETECTION || !this.engine.anomalyDetector) {
+            await this.sendMessage(chatId, '🔍 <b>ANOMALY DETECTION</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+    
+        const summary = this.engine.anomalyDetector.getSummary();
+        await this.sendMessage(chatId, `
+    🔍 <b>ANOMALY DETECTION</b>
+    
+    Baseline Win Rate: ${summary.baseline.avgWinRate.toFixed(1)}%
+    All clear!
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Anomalies viewed', { userId });
+    }
+    
+    async handlePortfolio(userId, chatId) {
+        const portfolioStats = this.engine.portfolioManager.getStats();
+    
+        if (portfolioStats.totalPositions === 0) {
+            await this.sendMessage(chatId, `📊 <b>PORTFOLIO</b>\n\nNo active positions.`, { parse_mode: 'HTML' });
+            return;
+        }
+    
+        let text = `📊 <b>PORTFOLIO</b>\n\nPositions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}\n`;
+    
+        for (const pos of portfolioStats.positions) {
+            text += `\n<b>${pos.symbol}</b>\nInvested: ${pos.invested} USDC\nAllocation: ${pos.allocation}`;
+        }
+    
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('Portfolio viewed', { userId });
+    }
+    
+    async handleBacktest(userId, chatId, days) {
+        if (!ENABLE_BACKTESTING) {
+            await this.sendMessage(chatId, '📈 Backtesting disabled', { parse_mode: 'HTML' });
+            return;
+        }
+    
+        await this.sendMessage(chatId, 'Backtest feature coming soon...', { parse_mode: 'HTML' });
+        logger.info('Backtest requested', { userId, days });
+    }
+    
+    async handleHelp(userId, chatId) {
+        await this.sendMessage(chatId, `
+    📚 <b>COMMAND REFERENCE</b>
+    
+    /start - Activate trading
+    /stop - Stop trading
+    /balance - View balance
+    /status - Bot status
+    /performance - Metrics
+    /history - Trade history
+    /stats - API usage
+    /profits - Profit history
+    /health - System health
+    /portfolio - Positions
+    /help - This menu
+        `.trim(), { parse_mode: 'HTML' });
+    
+        logger.info('Help viewed', { userId });
     }
 
+      
+
+       
+                 
+                
     isAuthorized(userId) {
         return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
     }
