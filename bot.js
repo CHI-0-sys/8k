@@ -2061,56 +2061,106 @@ constructor() {
     }
 } 
 
-
 async init() {
     logger.info('Trading bot initializing...');
     
     try {
+        // Initialize database
         await this.database.init();
         logger.info('Database initialized');
 
+        // Initialize Bitquery
         await this.bitquery.init();
         logger.info('Bitquery initialized');
 
-        // Setup commands BEFORE starting anything
-        this.setupCommands();
-        logger.info('Telegram commands setup');
-
+        // Initialize trading engine
         await this.engine.init();
         logger.info('Trading engine initialized');
 
+        // Setup Telegram commands
+        this.setupCommands();
+        logger.info('Telegram commands setup');
+
+        // Start health monitoring
         if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
             this.healthMonitor.start(5);
             logger.info('Health monitoring started');
         }
 
+        // Start trading cycles
         this.startTrading();
         logger.info('Trading cycles started');
 
-        // Start HTTP server
+        // ====== START HTTP SERVER ONLY ONCE ======
         await new Promise((resolve, reject) => {
             const server = this.app.listen(PORT, '0.0.0.0', () => {
                 logger.info(`HTTP server running on port ${PORT}`);
                 this.server = server;
                 resolve();
             }).on('error', (err) => {
-                logger.error('Server error:', err);
-                reject(err);
+                if (err.code === 'EADDRINUSE') {
+                    logger.error(`Port ${PORT} is already in use`);
+                    reject(new Error(`Port ${PORT} already in use`));
+                } else {
+                    logger.error('Server error:', err);
+                    reject(err);
+                }
             });
         });
 
-        // Setup webhook ONLY if configured
-        if (this.useWebhook && WEBHOOK_URL) {
+        // Setup webhook AFTER server is running
+        if (USE_WEBHOOK && WEBHOOK_URL) {
             await this.setupWebhook();
         }
+
+        // ============ MEMORY MANAGEMENT ============
+        // Clear cache periodically to prevent memory leak
+        if (this.bitquery.cache) {
+            setInterval(() => {
+                const sizeBefore = this.bitquery.cache.size;
+                this.bitquery.cache.clear();
+                logger.info('Cache cleared', { sizeBefore, sizeAfter: 0 });
+            }, 5 * 60 * 1000); // Clear every 5 minutes
+        }
+
+        // Cleanup old trades from memory (keep only last 100)
+        setInterval(() => {
+            for (const [userId, user] of this.engine.userStates.entries()) {
+                if (user.tradeHistory.length > 100) {
+                    const removed = user.tradeHistory.length - 100;
+                    user.tradeHistory = user.tradeHistory.slice(-100);
+                    logger.info('Trade history trimmed', { userId, removed });
+                }
+            }
+        }, 10 * 60 * 1000); // Every 10 minutes
+
+        // Monitor and log memory every minute
+        setInterval(() => {
+            const mem = process.memoryUsage();
+            const heapPercent = (mem.heapUsed / mem.heapTotal * 100).toFixed(1);
+            
+            logger.info('Memory snapshot', {
+                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
+                heapPercent: heapPercent + '%',
+                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+            });
+            
+            // Force garbage collection if memory is critically high
+            if (heapPercent > 85 && global.gc) {
+                logger.warn('Critical memory usage, triggering garbage collection');
+                global.gc();
+            }
+        }, 60 * 1000); // Every minute
 
         logger.info('✅ Trading bot fully initialized and operational');
 
     } catch (error) {
-        logger.error('Initialization failed', { error: error.message });
+        logger.error('Initialization failed', { error: error.message, stack: error.stack });
         throw error;
     }
 }
+
     loadWallet(privateKey) {
         if (!privateKey) {
             throw new Error('PRIVATE_KEY not set in environment');
