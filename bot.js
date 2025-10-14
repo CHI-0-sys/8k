@@ -2107,7 +2107,12 @@ async init() {
                 }
             });
         });
+           
+        this.app.get('/test-server', (req, res) => {
+            res.json({ status: 'server_ok', timestamp: new Date().toISOString() });
+        }); 
 
+        
         // Setup webhook AFTER server is running
         if (USE_WEBHOOK && WEBHOOK_URL) {
             await this.setupWebhook();
