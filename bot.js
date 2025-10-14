@@ -2061,74 +2061,127 @@ constructor() {
     }
 } 
 
+
+    
+// FIXED: Replace your TradingBot.init() method with this version
+
 async init() {
     logger.info('Trading bot initializing...');
     
     try {
         // Initialize database
         await this.database.init();
-        logger.info('Database initialized');
+        logger.info('✅ Database initialized');
 
         // Initialize Bitquery
         await this.bitquery.init();
-        logger.info('Bitquery initialized');
+        logger.info('✅ Bitquery initialized');
 
         // Initialize trading engine
         await this.engine.init();
-        logger.info('Trading engine initialized');
+        logger.info('✅ Trading engine initialized');
 
-        // Setup Telegram commands
-        this.setupCommands();
-        logger.info('Telegram commands setup');
-
-        // Start health monitoring
-        if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
-            this.healthMonitor.start(5);
-            logger.info('Health monitoring started');
-        }
-
-        // Start trading cycles
-        this.startTrading();
-        logger.info('Trading cycles started');
-
-        // ====== START HTTP SERVER ONLY ONCE ======
+        // ============ CRITICAL FIX: START SERVER FIRST ============
+        console.log(`🚀 Starting HTTP server on port ${PORT}...`);
+        
         await new Promise((resolve, reject) => {
             const server = this.app.listen(PORT, '0.0.0.0', () => {
+                console.log(`✅ HTTP server listening on 0.0.0.0:${PORT}`);
                 logger.info(`HTTP server running on port ${PORT}`);
                 this.server = server;
                 resolve();
             }).on('error', (err) => {
                 if (err.code === 'EADDRINUSE') {
+                    console.error(`❌ Port ${PORT} is already in use`);
                     logger.error(`Port ${PORT} is already in use`);
                     reject(new Error(`Port ${PORT} already in use`));
                 } else {
+                    console.error('❌ Server error:', err);
                     logger.error('Server error:', err);
                     reject(err);
                 }
             });
         });
-           
-        this.app.get('/test-server', (req, res) => {
-            res.json({ status: 'server_ok', timestamp: new Date().toISOString() });
-        }); 
 
-        
-        // Setup webhook AFTER server is running
-        if (USE_WEBHOOK && WEBHOOK_URL) {
-            await this.setupWebhook();
+        // Add basic endpoints BEFORE webhook setup
+        this.app.get('/test-server', (req, res) => {
+            console.log('📡 Test endpoint hit');
+            res.json({ 
+                status: 'server_ok', 
+                timestamp: new Date().toISOString(),
+                mode: this.useWebhook ? 'webhook' : 'polling'
+            });
+        });
+
+        this.app.get('/health', (req, res) => {
+            console.log('🏥 Health check hit');
+            res.json({ 
+                status: 'healthy',
+                uptime: Math.floor(process.uptime()),
+                mode: this.useWebhook ? 'webhook' : 'polling',
+                timestamp: new Date().toISOString()
+            });
+        });
+
+        this.app.get('/', (req, res) => {
+            console.log('📍 Root endpoint hit');
+            res.json({
+                name: 'Solana Trading Bot',
+                version: '2.0.0',
+                status: 'running',
+                mode: this.useWebhook ? 'webhook' : 'polling',
+                webhook: this.useWebhook ? `${WEBHOOK_URL}/webhook` : null
+            });
+        });
+
+        // Wait a moment for server to be fully ready
+        await sleep(2000);
+
+        // Test that server is responding
+        try {
+            const testResponse = await fetchWithTimeout(`http://localhost:${PORT}/test-server`, {}, 5000);
+            if (!testResponse.ok) {
+                throw new Error('Server test failed');
+            }
+            console.log('✅ Server responding correctly');
+            logger.info('Server test passed');
+        } catch (error) {
+            console.error('❌ Server test failed:', error.message);
+            throw new Error('Server not responding to test requests');
         }
 
+        // ============ NOW SETUP WEBHOOK ============
+        if (this.useWebhook && WEBHOOK_URL) {
+            console.log('🌐 Setting up webhook...');
+            await this.setupWebhook();
+            console.log('✅ Webhook configured');
+        } else {
+            console.log('📡 Using polling mode - no webhook needed');
+        }
+
+        // Setup Telegram commands
+        this.setupCommands();
+        logger.info('✅ Telegram commands setup');
+
+        // Start health monitoring
+        if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
+            this.healthMonitor.start(5);
+            logger.info('✅ Health monitoring started');
+        }
+
+        // Start trading cycles
+        this.startTrading();
+        logger.info('✅ Trading cycles started');
+
         // ============ MEMORY MANAGEMENT ============
-        // Clear cache periodically to prevent memory leak
         if (this.bitquery.cache) {
             setInterval(() => {
                 const sizeBefore = this.bitquery.cache.size;
                 this.bitquery.cache.clear();
                 logger.info('Cache cleared', { sizeBefore, sizeAfter: 0 });
-            }, 5 * 60 * 1000); // Clear every 5 minutes
+            }, 5 * 60 * 1000);
         }
 
-        // Cleanup old trades from memory (keep only last 100)
         setInterval(() => {
             for (const [userId, user] of this.engine.userStates.entries()) {
                 if (user.tradeHistory.length > 100) {
@@ -2137,9 +2190,8 @@ async init() {
                     logger.info('Trade history trimmed', { userId, removed });
                 }
             }
-        }, 10 * 60 * 1000); // Every 10 minutes
+        }, 10 * 60 * 1000);
 
-        // Monitor and log memory every minute
         setInterval(() => {
             const mem = process.memoryUsage();
             const heapPercent = (mem.heapUsed / mem.heapTotal * 100).toFixed(1);
@@ -2151,20 +2203,33 @@ async init() {
                 rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
             });
             
-            // Force garbage collection if memory is critically high
             if (heapPercent > 85 && global.gc) {
                 logger.warn('Critical memory usage, triggering garbage collection');
                 global.gc();
             }
-        }, 60 * 1000); // Every minute
+        }, 60 * 1000);
 
+        console.log('='.repeat(50));
+        console.log('✅ BOT FULLY INITIALIZED AND OPERATIONAL');
+        console.log(`Mode: ${this.useWebhook ? 'WEBHOOK' : 'POLLING'}`);
+        console.log(`Server: http://0.0.0.0:${PORT}`);
+        if (this.useWebhook) {
+            console.log(`Webhook: ${WEBHOOK_URL}/webhook`);
+        }
+        console.log('='.repeat(50));
+        
         logger.info('✅ Trading bot fully initialized and operational');
 
     } catch (error) {
+        console.error('❌ INITIALIZATION FAILED:', error.message);
         logger.error('Initialization failed', { error: error.message, stack: error.stack });
         throw error;
     }
 }
+
+
+
+
 
     loadWallet(privateKey) {
         if (!privateKey) {
@@ -2729,8 +2794,8 @@ async init() {
     isAuthorized(userId) {
         return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
     }
-
-    // In setupWebhook() method, update the webhook endpoint:
+    
+    // FIXED: Replace your setupWebhook() method with this
 
 async setupWebhook() {
     if (!this.useWebhook || !WEBHOOK_URL) {
@@ -2738,39 +2803,36 @@ async setupWebhook() {
         return;
     }
 
-    // Main webhook endpoint - IMPROVED LOGGING
+    console.log('🔧 Configuring webhook endpoints...');
+
+    // Main webhook endpoint - THIS MUST BE DEFINED BEFORE SETTING WEBHOOK
     this.app.post('/webhook', (req, res) => {
         const timestamp = new Date().toISOString();
         console.log(`[${timestamp}] 📨 WEBHOOK POST RECEIVED`);
-        console.log('Headers:', req.headers);
+        
+        // Log headers for debugging
+        console.log('Headers:', JSON.stringify(req.headers, null, 2));
         console.log('Body:', JSON.stringify(req.body, null, 2));
         
-        logger.info('Webhook received raw update', { 
+        logger.info('Webhook received', { 
             updateId: req.body?.update_id,
             hasMessage: !!req.body?.message,
-            hasCallbackQuery: !!req.body?.callback_query,
-            body: JSON.stringify(req.body)
+            from: req.body?.message?.from?.username,
+            text: req.body?.message?.text
         });
 
-        if (!req.body) {
-            console.log('⚠️ Empty body received');
+        // Validate request body
+        if (!req.body || typeof req.body !== 'object') {
+            console.log('⚠️ Invalid body received');
+            logger.warn('Invalid webhook body');
             res.sendStatus(400);
             return;
         }
 
         try {
-            if (req.body.message) {
-                console.log('✅ Processing message:', {
-                    from: req.body.message.from?.username,
-                    text: req.body.message.text,
-                    chatId: req.body.message.chat?.id
-                });
-            }
-
-            // Process the update
+            // Process the update with the bot
             this.bot.processUpdate(req.body);
             console.log('✅ Update processed successfully');
-            
             res.sendStatus(200);
         } catch (error) {
             console.error('❌ Error processing webhook:', error);
@@ -2782,109 +2844,116 @@ async setupWebhook() {
         }
     });
 
-    // Test endpoint to verify webhook is working
+    // Test endpoint
     this.app.get('/webhook/test', (req, res) => {
         console.log('🧪 Webhook test endpoint called');
         res.json({ 
             status: 'webhook_active',
             url: `${WEBHOOK_URL}/webhook`,
-            timestamp: new Date().toISOString()
-        });
-    });
-
-    // Health check endpoint
-    this.app.get('/health', (req, res) => {
-        const stats = this.bitquery.getStats();
-        const rpcStatus = this.rpcConnection.getStatus();
-        const user = this.ownerId ? this.engine.getUserState(this.ownerId) : null;
-        
-        console.log('🏥 Health check requested');
-        
-        res.json({ 
-            status: 'healthy', 
-            mode: 'webhook',
             timestamp: new Date().toISOString(),
-            uptime: Math.floor(process.uptime()),
-            version: '2.0.0',
-            webhook: {
-                url: `${WEBHOOK_URL}/webhook`,
-                configured: true,
-                testUrl: `${WEBHOOK_URL}/webhook/test`
-            },
-            trading: {
-                isActive: user?.isActive || false,
-                hasPosition: user?.position !== null,
-                currentBalance: user?.currentBalance || 0
-            }
+            server_uptime: Math.floor(process.uptime())
         });
     });
 
-    // Root endpoint
-    this.app.get('/', (req, res) => {
-        res.json({
-            name: 'Solana Trading Bot',
-            version: '2.0.0',
-            status: 'running',
-            mode: 'webhook',
-            webhook: `${WEBHOOK_URL}/webhook`
-        });
-    });
+    console.log('✅ Webhook endpoints registered');
 
-    // Delete existing webhook
+    // Delete any existing webhook first
     try {
+        console.log('🗑️ Deleting existing webhook...');
         await this.bot.deleteWebHook();
         logger.info('Existing webhook deleted');
         await sleep(1000);
     } catch (err) {
+        console.log('⚠️ No existing webhook to delete');
         logger.warn('No existing webhook to delete', { error: err.message });
     }
 
-    // Set new webhook
+    // Verify the webhook URL is accessible
+    const webhookUrl = `${WEBHOOK_URL}/webhook`;
+    console.log(`🔍 Verifying webhook URL: ${webhookUrl}`);
+
     try {
-        const webhookUrl = `${WEBHOOK_URL}/webhook`;
-        console.log('Setting webhook to:', webhookUrl);
+        // Test if Railway can reach our webhook endpoint
+        const testUrl = `${WEBHOOK_URL}/webhook/test`;
+        console.log(`Testing: ${testUrl}`);
         
-        await this.bot.setWebHook(webhookUrl, {
+        const testResponse = await fetchWithTimeout(testUrl, {}, 10000);
+        if (!testResponse.ok) {
+            throw new Error(`Webhook test endpoint returned ${testResponse.status}`);
+        }
+        
+        const testData = await testResponse.json();
+        console.log('✅ Webhook URL is accessible:', testData);
+        logger.info('Webhook URL verified', testData);
+        
+    } catch (err) {
+        console.error('❌ Webhook URL not accessible:', err.message);
+        logger.error('Webhook URL verification failed', { error: err.message });
+        throw new Error(`Webhook URL ${WEBHOOK_URL} is not accessible: ${err.message}`);
+    }
+
+    // Now set the webhook with Telegram
+    try {
+        console.log(`📡 Setting Telegram webhook to: ${webhookUrl}`);
+        
+        const setResult = await this.bot.setWebHook(webhookUrl, {
             allowed_updates: ['message', 'callback_query'],
-            drop_pending_updates: false
+            drop_pending_updates: true, // Drop old updates to start fresh
+            max_connections: 40
         });
         
-        logger.info('Webhook configured', { url: webhookUrl });
-        await sleep(500);
+        console.log('Set webhook result:', setResult);
+        logger.info('Webhook set', { url: webhookUrl, result: setResult });
+        
+        // Wait for Telegram to process
+        await sleep(2000);
 
-        // Verify webhook info
+        // Verify webhook was set correctly
         const webhookInfo = await this.bot.getWebHookInfo();
-        console.log('Webhook Info:', {
+        console.log('📊 Webhook Info:', {
             url: webhookInfo.url,
             has_custom_certificate: webhookInfo.has_custom_certificate,
             pending_update_count: webhookInfo.pending_update_count,
             last_error_date: webhookInfo.last_error_date,
             last_error_message: webhookInfo.last_error_message,
-            max_connections: webhookInfo.max_connections
+            max_connections: webhookInfo.max_connections,
+            allowed_updates: webhookInfo.allowed_updates
         });
         
         logger.info('Webhook verified', {
             url: webhookInfo.url,
-            hasCustomCertificate: webhookInfo.has_custom_certificate,
-            pendingUpdateCount: webhookInfo.pending_update_count,
+            pendingUpdates: webhookInfo.pending_update_count,
             lastError: webhookInfo.last_error_message
         });
 
-        // If there's a webhook error, log it prominently
+        // Check for errors
         if (webhookInfo.last_error_date) {
-            console.error('WEBHOOK ERROR DETECTED:');
-            console.error('Last Error Date:', new Date(webhookInfo.last_error_date * 1000));
-            console.error('Error Message:', webhookInfo.last_error_message);
+            const errorDate = new Date(webhookInfo.last_error_date * 1000);
+            console.error('⚠️ WEBHOOK HAS PREVIOUS ERROR:');
+            console.error('  Date:', errorDate.toISOString());
+            console.error('  Message:', webhookInfo.last_error_message);
+            logger.warn('Webhook has previous error', {
+                date: errorDate.toISOString(),
+                message: webhookInfo.last_error_message
+            });
         }
 
-        console.log('Webhook active:', webhookUrl);
+        // Verify URL matches
+        if (webhookInfo.url !== webhookUrl) {
+            throw new Error(`Webhook URL mismatch: Expected ${webhookUrl}, got ${webhookInfo.url}`);
+        }
+
+        console.log('✅ Webhook successfully configured and verified');
+        logger.info('Webhook setup complete', { url: webhookUrl });
         
     } catch (err) {
-        console.error('Webhook setup failed:', err.message);
+        console.error('❌ Failed to set webhook:', err.message);
         logger.error('Webhook setup failed', { error: err.message, stack: err.stack });
         throw err;
     }
 }
+   
+
 
     startTrading() {
         logger.info('Starting trading cycles...');
