@@ -2809,163 +2809,124 @@ async init() {
     
     // FIXED: Replace your setupWebhook() method with this
 
-async setupWebhook() {
-    if (!this.useWebhook || !WEBHOOK_URL) {
-        logger.info('Webhook not configured, skipping setup');
-        return;
-    }
-
-    console.log('🔧 Configuring webhook endpoints...');
-
-    // Main webhook endpoint - THIS MUST BE DEFINED BEFORE SETTING WEBHOOK
-    this.app.post('/webhook', (req, res) => {
-        const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] 📨 WEBHOOK POST RECEIVED`);
-        
-        // Log headers for debugging
-        console.log('Headers:', JSON.stringify(req.headers, null, 2));
-        console.log('Body:', JSON.stringify(req.body, null, 2));
-        
-        logger.info('Webhook received', { 
-            updateId: req.body?.update_id,
-            hasMessage: !!req.body?.message,
-            from: req.body?.message?.from?.username,
-            text: req.body?.message?.text
-        });
-
-        // Validate request body
-        if (!req.body || typeof req.body !== 'object') {
-            console.log('⚠️ Invalid body received');
-            logger.warn('Invalid webhook body');
-            res.sendStatus(400);
+    async setupWebhook() {
+        if (!this.useWebhook || !WEBHOOK_URL) {
+            logger.info('Webhook not configured, skipping setup');
             return;
         }
-
+    
+        console.log('🔧 Configuring webhook endpoints...');
+    
+        // Main webhook endpoint
+        this.app.post('/webhook', (req, res) => {
+            const timestamp = new Date().toISOString();
+            console.log(`[${timestamp}] 📨 WEBHOOK POST RECEIVED`);
+            
+            logger.info('Webhook received', { 
+                updateId: req.body?.update_id,
+                hasMessage: !!req.body?.message,
+                from: req.body?.message?.from?.username,
+                text: req.body?.message?.text
+            });
+    
+            if (!req.body || typeof req.body !== 'object') {
+                console.log('⚠️ Invalid body received');
+                logger.warn('Invalid webhook body');
+                res.sendStatus(400);
+                return;
+            }
+    
+            try {
+                this.bot.processUpdate(req.body);
+                console.log('✅ Update processed successfully');
+                res.sendStatus(200);
+            } catch (error) {
+                console.error('❌ Error processing webhook:', error);
+                logger.error('Webhook processing error', { 
+                    error: error.message,
+                    stack: error.stack
+                });
+                res.sendStatus(500);
+            }
+        });
+    
+        // Test endpoint
+        this.app.get('/webhook/test', (req, res) => {
+            console.log('🧪 Webhook test endpoint called');
+            res.json({ 
+                status: 'webhook_active',
+                url: `${WEBHOOK_URL}/webhook`,
+                timestamp: new Date().toISOString(),
+                server_uptime: Math.floor(process.uptime())
+            });
+        });
+    
+        console.log('✅ Webhook endpoints registered');
+    
+        // Delete existing webhook
         try {
-            // Process the update with the bot
-            this.bot.processUpdate(req.body);
-            console.log('✅ Update processed successfully');
-            res.sendStatus(200);
-        } catch (error) {
-            console.error('❌ Error processing webhook:', error);
-            logger.error('Webhook processing error', { 
-                error: error.message,
-                stack: error.stack
-            });
-            res.sendStatus(500);
+            console.log('🗑️ Deleting existing webhook...');
+            await this.bot.deleteWebHook();
+            logger.info('Existing webhook deleted');
+            await sleep(1000);
+        } catch (err) {
+            console.log('⚠️ No existing webhook to delete');
+            logger.warn('No existing webhook to delete', { error: err.message });
         }
-    });
-
-    // Test endpoint
-    this.app.get('/webhook/test', (req, res) => {
-        console.log('🧪 Webhook test endpoint called');
-        res.json({ 
-            status: 'webhook_active',
-            url: `${WEBHOOK_URL}/webhook`,
-            timestamp: new Date().toISOString(),
-            server_uptime: Math.floor(process.uptime())
-        });
-    });
-
-    console.log('✅ Webhook endpoints registered');
-
-    // Delete any existing webhook first
-    try {
-        console.log('🗑️ Deleting existing webhook...');
-        await this.bot.deleteWebHook();
-        logger.info('Existing webhook deleted');
-        await sleep(1000);
-    } catch (err) {
-        console.log('⚠️ No existing webhook to delete');
-        logger.warn('No existing webhook to delete', { error: err.message });
-    }
-
-    // Verify the webhook URL is accessible
-    const webhookUrl = `${WEBHOOK_URL}/webhook`;
-    console.log(`🔍 Verifying webhook URL: ${webhookUrl}`);
-
-    try {
-        // Test if Railway can reach our webhook endpoint
-        const testUrl = `${WEBHOOK_URL}/webhook/test`;
-        console.log(`Testing: ${testUrl}`);
+    
+        // ============ REMOVED: External webhook verification ============
+        // Railway's routing needs time to stabilize, skip the self-test
         
-        const testResponse = await fetchWithTimeout(testUrl, {}, 10000);
-        if (!testResponse.ok) {
-            throw new Error(`Webhook test endpoint returned ${testResponse.status}`);
-        }
-        
-        const testData = await testResponse.json();
-        console.log('✅ Webhook URL is accessible:', testData);
-        logger.info('Webhook URL verified', testData);
-        
-    } catch (err) {
-        console.error('❌ Webhook URL not accessible:', err.message);
-        logger.error('Webhook URL verification failed', { error: err.message });
-        throw new Error(`Webhook URL ${WEBHOOK_URL} is not accessible: ${err.message}`);
-    }
-
-    // Now set the webhook with Telegram
-    try {
+        const webhookUrl = `${WEBHOOK_URL}/webhook`;
         console.log(`📡 Setting Telegram webhook to: ${webhookUrl}`);
-        
-        const setResult = await this.bot.setWebHook(webhookUrl, {
-            allowed_updates: ['message', 'callback_query'],
-            drop_pending_updates: true, // Drop old updates to start fresh
-            max_connections: 40
-        });
-        
-        console.log('Set webhook result:', setResult);
-        logger.info('Webhook set', { url: webhookUrl, result: setResult });
-        
-        // Wait for Telegram to process
-        await sleep(2000);
-
-        // Verify webhook was set correctly
-        const webhookInfo = await this.bot.getWebHookInfo();
-        console.log('📊 Webhook Info:', {
-            url: webhookInfo.url,
-            has_custom_certificate: webhookInfo.has_custom_certificate,
-            pending_update_count: webhookInfo.pending_update_count,
-            last_error_date: webhookInfo.last_error_date,
-            last_error_message: webhookInfo.last_error_message,
-            max_connections: webhookInfo.max_connections,
-            allowed_updates: webhookInfo.allowed_updates
-        });
-        
-        logger.info('Webhook verified', {
-            url: webhookInfo.url,
-            pendingUpdates: webhookInfo.pending_update_count,
-            lastError: webhookInfo.last_error_message
-        });
-
-        // Check for errors
-        if (webhookInfo.last_error_date) {
-            const errorDate = new Date(webhookInfo.last_error_date * 1000);
-            console.error('⚠️ WEBHOOK HAS PREVIOUS ERROR:');
-            console.error('  Date:', errorDate.toISOString());
-            console.error('  Message:', webhookInfo.last_error_message);
-            logger.warn('Webhook has previous error', {
-                date: errorDate.toISOString(),
-                message: webhookInfo.last_error_message
+    
+        try {
+            const setResult = await this.bot.setWebHook(webhookUrl, {
+                allowed_updates: ['message', 'callback_query'],
+                drop_pending_updates: true,
+                max_connections: 40
             });
+            
+            console.log('✅ Webhook set:', setResult);
+            logger.info('Webhook set', { url: webhookUrl, result: setResult });
+            
+            await sleep(2000);
+    
+            // Verify with Telegram
+            const webhookInfo = await this.bot.getWebHookInfo();
+            console.log('📊 Webhook Info:', {
+                url: webhookInfo.url,
+                pending_update_count: webhookInfo.pending_update_count,
+                last_error_date: webhookInfo.last_error_date,
+                last_error_message: webhookInfo.last_error_message
+            });
+            
+            logger.info('Webhook verified with Telegram', {
+                url: webhookInfo.url,
+                pendingUpdates: webhookInfo.pending_update_count,
+                lastError: webhookInfo.last_error_message
+            });
+    
+            if (webhookInfo.last_error_date) {
+                const errorDate = new Date(webhookInfo.last_error_date * 1000);
+                console.error('⚠️ WEBHOOK HAS PREVIOUS ERROR:');
+                console.error('  Date:', errorDate.toISOString());
+                console.error('  Message:', webhookInfo.last_error_message);
+            }
+    
+            if (webhookInfo.url !== webhookUrl) {
+                throw new Error(`Webhook URL mismatch: Expected ${webhookUrl}, got ${webhookInfo.url}`);
+            }
+    
+            console.log('✅ Webhook successfully configured');
+            logger.info('Webhook setup complete', { url: webhookUrl });
+            
+        } catch (err) {
+            console.error('❌ Failed to set webhook:', err.message);
+            logger.error('Webhook setup failed', { error: err.message, stack: err.stack });
+            throw err;
         }
-
-        // Verify URL matches
-        if (webhookInfo.url !== webhookUrl) {
-            throw new Error(`Webhook URL mismatch: Expected ${webhookUrl}, got ${webhookInfo.url}`);
-        }
-
-        console.log('✅ Webhook successfully configured and verified');
-        logger.info('Webhook setup complete', { url: webhookUrl });
-        
-    } catch (err) {
-        console.error('❌ Failed to set webhook:', err.message);
-        logger.error('Webhook setup failed', { error: err.message, stack: err.stack });
-        throw err;
     }
-}
-   
-
 
     startTrading() {
         logger.info('Starting trading cycles...');
