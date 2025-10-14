@@ -8,15 +8,27 @@ const { Connection, PublicKey, VersionedTransaction, LAMPORTS_PER_SOL, Keypair, 
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
 const AbortController = require('abort-controller');
+const fs = require('fs');
+const path = require('path');
 
 // Import our new modules
 const DatabaseManager = require('./modules/database');
 const TechnicalIndicators = require('./modules/indicators');
-const BacktestEngine = require('./modules/backtest');
+// const BacktestEngine = require('./modules/backtest');
 const DEXAggregator = require('./modules/dex-aggregator');
 const MEVProtection = require('./modules/mev-protection');
 const HealthMonitor = require('./modules/health-monitor');
 const AnomalyDetector = require('./modules/anomaly-detector');
+
+// ============ CREATE REQUIRED DIRECTORIES FIRST ============
+const requiredDirs = ['logs', 'data'];
+requiredDirs.forEach(dir => {
+    const dirPath = path.join(__dirname, dir);
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+        console.log(`✅ Created directory: ${dir}/`);
+    }
+});
 
 // ============ WINSTON LOGGING SETUP ============
 const logger = winston.createLogger({
