@@ -32,9 +32,6 @@ requiredDirs.forEach(dir => {
 
 // ============ WINSTON LOGGING SETUP ============
 // ========================= LOGGER CONFIG =========================
-const winston = require('winston');
-const path = require('path');
-const fs = require('fs');
 
 // Ensure the "logs" directory exists
 const logDir = path.join(__dirname, 'logs');
