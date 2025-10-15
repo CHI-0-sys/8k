@@ -2822,32 +2822,39 @@ async init() {
             const timestamp = new Date().toISOString();
             console.log(`[${timestamp}] 📨 WEBHOOK POST RECEIVED`);
             
-            logger.info('Webhook received', { 
-                updateId: req.body?.update_id,
-                hasMessage: !!req.body?.message,
-                from: req.body?.message?.from?.username,
-                text: req.body?.message?.text
+            // CRITICAL: Respond to Telegram IMMEDIATELY
+            res.sendStatus(200);
+            
+            // Then process asynchronously (don't await)
+            setImmediate(() => {
+                try {
+                    console.log('Body:', JSON.stringify(req.body, null, 2));
+                    
+                    if (!req.body || typeof req.body !== 'object') {
+                        console.log('⚠️ Invalid body received');
+                        logger.warn('Invalid webhook body');
+                        return;
+                    }
+        
+                    logger.info('Webhook received', { 
+                        updateId: req.body?.update_id,
+                        hasMessage: !!req.body?.message,
+                        from: req.body?.message?.from?.username,
+                        text: req.body?.message?.text
+                    });
+        
+                    // Process the update
+                    this.bot.processUpdate(req.body);
+                    console.log('✅ Update processed successfully');
+                    
+                } catch (error) {
+                    console.error('❌ Error processing webhook:', error);
+                    logger.error('Webhook processing error', { 
+                        error: error.message,
+                        stack: error.stack
+                    });
+                }
             });
-    
-            if (!req.body || typeof req.body !== 'object') {
-                console.log('⚠️ Invalid body received');
-                logger.warn('Invalid webhook body');
-                res.sendStatus(400);
-                return;
-            }
-    
-            try {
-                this.bot.processUpdate(req.body);
-                console.log('✅ Update processed successfully');
-                res.sendStatus(200);
-            } catch (error) {
-                console.error('❌ Error processing webhook:', error);
-                logger.error('Webhook processing error', { 
-                    error: error.message,
-                    stack: error.stack
-                });
-                res.sendStatus(500);
-            }
         });
     
         // Test endpoint
