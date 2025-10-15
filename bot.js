@@ -31,35 +31,66 @@ requiredDirs.forEach(dir => {
 });
 
 // ============ WINSTON LOGGING SETUP ============
+// ========================= LOGGER CONFIG =========================
+const winston = require('winston');
+const path = require('path');
+const fs = require('fs');
+
+// Ensure the "logs" directory exists
+const logDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir);
+}
+
 const logger = winston.createLogger({
-    level: process.env.LOG_LEVEL || 'info',
-    format: winston.format.combine(
-        winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        winston.format.errors({ stack: true }),
-        winston.format.splat(),
-        winston.format.json()
-    ),
-    defaultMeta: { service: 'trading-bot' },
-    transports: [
-        new winston.transports.File({ filename: 'logs/error.log', level: 'error', maxsize: 10485760, maxFiles: 5 }),
-        new winston.transports.File({ filename: 'logs/combined.log', maxsize: 10485760, maxFiles: 10 }),
-        new winston.transports.File({ filename: 'logs/trades.log', level: 'info', maxsize: 10485760, maxFiles: 20 }),
-        new winston.transports.Console({
-            format: winston.format.combine(
-                winston.format.colorize(),
-                winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
-                    return `${timestamp} [${service}] ${level}: ${message} ${Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''}`;
-                })
-            )
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    winston.format.errors({ stack: true }),
+    winston.format.splat(),
+    winston.format.json()
+  ),
+  defaultMeta: { service: 'trading-bot' },
+  transports: [
+    new winston.transports.File({
+      filename: path.join(logDir, 'error.log'),
+      level: 'error',
+      maxsize: 10 * 1024 * 1024, // 10 MB
+      maxFiles: 5,
+    }),
+    new winston.transports.File({
+      filename: path.join(logDir, 'combined.log'),
+      maxsize: 10 * 1024 * 1024,
+      maxFiles: 10,
+    }),
+    new winston.transports.File({
+      filename: path.join(logDir, 'trades.log'),
+      level: 'info',
+      maxsize: 10 * 1024 * 1024,
+      maxFiles: 20,
+    }),
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
+          const metaString = Object.keys(meta).length
+            ? JSON.stringify(meta, null, 2)
+            : '';
+          return `${timestamp} [${service}] ${level}: ${message} ${metaString}`;
         })
-    ],
-    exceptionHandlers: [
-        new winston.transports.File({ filename: 'logs/exceptions.log' })
-    ],
-    rejectionHandlers: [
-        new winston.transports.File({ filename: 'logs/rejections.log' })
-    ]
+      ),
+    }),
+  ],
+  exceptionHandlers: [
+    new winston.transports.File({ filename: path.join(logDir, 'exceptions.log') }),
+  ],
+  rejectionHandlers: [
+    new winston.transports.File({ filename: path.join(logDir, 'rejections.log') }),
+  ],
 });
+
+// =================================================================
+// Export logger so other files can use it
 
 // ============ CONFIGURATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
