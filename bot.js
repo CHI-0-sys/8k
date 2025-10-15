@@ -2204,22 +2204,76 @@ async init() {
             }
         }, 10 * 60 * 1000);
 
-        setInterval(() => {
-            const mem = process.memoryUsage();
-            const heapPercent = (mem.heapUsed / mem.heapTotal * 100).toFixed(1);
-            
-            logger.info('Memory snapshot', {
-                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-                heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
-                heapPercent: heapPercent + '%',
-                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
-            });
-            
-            if (heapPercent > 85 && global.gc) {
-                logger.warn('Critical memory usage, triggering garbage collection');
-                global.gc();
+        // ============ IMPROVED MEMORY MONITORING ============
+setInterval(() => {
+    const mem = process.memoryUsage();
+    const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+    
+    // Only log if memory is high (reduce log spam)
+    if (heapPercent > 70) {
+        logger.warn('Memory usage high', {
+            heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+            heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
+            heapPercent: heapPercent.toFixed(1) + '%',
+            rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+        });
+    }
+
+    // Trigger GC at 80% instead of 85%
+    if (heapPercent > 80 && global.gc) {
+        logger.warn('Triggering garbage collection');
+        global.gc();
+    }
+}, 30 * 1000); // Check every 30 seconds instead of 60 
+
+
+    // ============ ADDITIONAL MEMORY OPTIMIZATIONS ============
+
+// 1. Aggressive trade history cleanup
+setInterval(() => {
+    for (const [userId, user] of this.engine.userStates.entries()) {
+        if (user.tradeHistory && user.tradeHistory.length > 50) {
+            const removed = user.tradeHistory.length - 50;
+            user.tradeHistory = user.tradeHistory.slice(-50);
+            logger.debug('Trade history trimmed', { userId, removed });
+        }
+    }
+}, 5 * 60 * 1000); // Every 5 minutes
+
+// 2. Clear Bitquery cache more frequently
+if (this.bitquery.cache) {
+    setInterval(() => {
+        const sizeBefore = this.bitquery.cache.size;
+        this.bitquery.cache.clear();
+        if (sizeBefore > 0) {
+            logger.debug('Bitquery cache cleared', { entries: sizeBefore });
+        }
+    }, 3 * 60 * 1000); // Every 3 minutes
+}
+
+// 3. Clear log files if they get too large
+setInterval(() => {
+    const logFiles = ['logs/combined.log', 'logs/trades.log'];
+    logFiles.forEach(file => {
+        try {
+            const stats = fs.statSync(file);
+            if (stats.size > 5 * 1024 * 1024) { // 5MB
+                fs.writeFileSync(file, '');
+                logger.info('Log file cleared', { file });
             }
-        }, 60 * 1000);
+        } catch (err) {
+            // File doesn't exist, ignore
+        }
+    });
+}, 10 * 60 * 1000); // Every 10 minutes
+
+// 4. Reduce logging in production
+if (process.env.NODE_ENV === 'production') {
+    logger.level = 'info';
+    logger.info('Production mode: Reduced logging verbosity');
+} 
+
+
 
         console.log('='.repeat(50));
         console.log('✅ BOT FULLY INITIALIZED AND OPERATIONAL');
@@ -2236,7 +2290,9 @@ async init() {
         console.error('❌ INITIALIZATION FAILED:', error.message);
         logger.error('Initialization failed', { error: error.message, stack: error.stack });
         throw error;
-    }
+    } 
+
+
 }
 
 
@@ -2808,132 +2864,99 @@ async init() {
     }
     
     // FIXED: Replace your setupWebhook() method with this
+    
+    // REPLACE your setupWebhook() method with this FIXED version:
 
-    async setupWebhook() {
-        if (!this.useWebhook || !WEBHOOK_URL) {
-            logger.info('Webhook not configured, skipping setup');
-            return;
-        }
-    
-        console.log('🔧 Configuring webhook endpoints...');
-    
-        // Main webhook endpoint
-        this.app.post('/webhook', (req, res) => {
-            const timestamp = new Date().toISOString();
-            console.log(`[${timestamp}] 📨 WEBHOOK POST RECEIVED`);
-            
-            // CRITICAL: Respond to Telegram IMMEDIATELY
-            res.sendStatus(200);
-            
-            // Then process asynchronously (don't await)
-            setImmediate(() => {
-                try {
-                    console.log('Body:', JSON.stringify(req.body, null, 2));
-                    
-                    if (!req.body || typeof req.body !== 'object') {
-                        console.log('⚠️ Invalid body received');
-                        logger.warn('Invalid webhook body');
-                        return;
-                    }
-        
-                    logger.info('Webhook received', { 
-                        updateId: req.body?.update_id,
-                        hasMessage: !!req.body?.message,
-                        from: req.body?.message?.from?.username,
-                        text: req.body?.message?.text
-                    });
-        
-                    // Process the update
-                    this.bot.processUpdate(req.body);
-                    console.log('✅ Update processed successfully');
-                    
-                } catch (error) {
-                    console.error('❌ Error processing webhook:', error);
-                    logger.error('Webhook processing error', { 
-                        error: error.message,
-                        stack: error.stack
-                    });
-                }
-            });
-        });
-    
-        // Test endpoint
-        this.app.get('/webhook/test', (req, res) => {
-            console.log('🧪 Webhook test endpoint called');
-            res.json({ 
-                status: 'webhook_active',
-                url: `${WEBHOOK_URL}/webhook`,
-                timestamp: new Date().toISOString(),
-                server_uptime: Math.floor(process.uptime())
-            });
-        });
-    
-        console.log('✅ Webhook endpoints registered');
-    
-        // Delete existing webhook
-        try {
-            console.log('🗑️ Deleting existing webhook...');
-            await this.bot.deleteWebHook();
-            logger.info('Existing webhook deleted');
-            await sleep(1000);
-        } catch (err) {
-            console.log('⚠️ No existing webhook to delete');
-            logger.warn('No existing webhook to delete', { error: err.message });
-        }
-    
-        // ============ REMOVED: External webhook verification ============
-        // Railway's routing needs time to stabilize, skip the self-test
-        
-        const webhookUrl = `${WEBHOOK_URL}/webhook`;
-        console.log(`📡 Setting Telegram webhook to: ${webhookUrl}`);
-    
-        try {
-            const setResult = await this.bot.setWebHook(webhookUrl, {
-                allowed_updates: ['message', 'callback_query'],
-                drop_pending_updates: true,
-                max_connections: 40
-            });
-            
-            console.log('✅ Webhook set:', setResult);
-            logger.info('Webhook set', { url: webhookUrl, result: setResult });
-            
-            await sleep(2000);
-    
-            // Verify with Telegram
-            const webhookInfo = await this.bot.getWebHookInfo();
-            console.log('📊 Webhook Info:', {
-                url: webhookInfo.url,
-                pending_update_count: webhookInfo.pending_update_count,
-                last_error_date: webhookInfo.last_error_date,
-                last_error_message: webhookInfo.last_error_message
-            });
-            
-            logger.info('Webhook verified with Telegram', {
-                url: webhookInfo.url,
-                pendingUpdates: webhookInfo.pending_update_count,
-                lastError: webhookInfo.last_error_message
-            });
-    
-            if (webhookInfo.last_error_date) {
-                const errorDate = new Date(webhookInfo.last_error_date * 1000);
-                console.error('⚠️ WEBHOOK HAS PREVIOUS ERROR:');
-                console.error('  Date:', errorDate.toISOString());
-                console.error('  Message:', webhookInfo.last_error_message);
-            }
-    
-            if (webhookInfo.url !== webhookUrl) {
-                throw new Error(`Webhook URL mismatch: Expected ${webhookUrl}, got ${webhookInfo.url}`);
-            }
-    
-            console.log('✅ Webhook successfully configured');
-            logger.info('Webhook setup complete', { url: webhookUrl });
-            
-        } catch (err) {
-            console.error('❌ Failed to set webhook:', err.message);
-            logger.error('Webhook setup failed', { error: err.message, stack: err.stack });
-            throw err;
-        }
+async setupWebhook() {
+    if (!this.useWebhook || !WEBHOOK_URL) {
+        logger.info('Webhook not configured, skipping setup');
+        return;
     }
+
+    console.log('🔧 Configuring webhook endpoints...');
+
+    // ============ CRITICAL FIX: IMMEDIATE 200 RESPONSE ============
+    this.app.post('/webhook', (req, res) => {
+        const timestamp = Date.now();
+        
+        // CRITICAL: Respond to Telegram IMMEDIATELY (within 1ms)
+        res.status(200).end();
+        
+        // Process update AFTER responding (async, non-blocking)
+        setImmediate(async () => {
+            try {
+                if (!req.body || typeof req.body !== 'object') {
+                    logger.warn('Invalid webhook body received');
+                    return;
+                }
+
+                logger.debug('Processing webhook update', { 
+                    updateId: req.body?.update_id,
+                    latency: Date.now() - timestamp 
+                });
+
+                // Process the update
+                await this.bot.processUpdate(req.body);
+                
+            } catch (error) {
+                logger.error('Webhook processing error', { 
+                    error: error.message,
+                    updateId: req.body?.update_id
+                });
+            }
+        });
+    });
+
+    // Health check
+    this.app.get('/webhook/test', (req, res) => {
+        res.json({ 
+            status: 'ok',
+            timestamp: new Date().toISOString()
+        });
+    });
+
+    console.log('✅ Webhook endpoints registered');
+
+    // Delete existing webhook
+    try {
+        await this.bot.deleteWebhook();
+        await sleep(1000);
+    } catch (err) {
+        logger.debug('No existing webhook to delete');
+    }
+
+    // Set new webhook
+    const webhookUrl = `${WEBHOOK_URL}/webhook`;
+    console.log(`📡 Setting webhook: ${webhookUrl}`);
+
+    try {
+        await this.bot.setWebHook(webhookUrl, {
+            allowed_updates: ['message'],
+            drop_pending_updates: true,
+            max_connections: 40
+        });
+
+        await sleep(2000);
+
+        // Verify
+        const info = await this.bot.getWebHookInfo();
+        console.log('✅ Webhook active:', {
+            url: info.url,
+            pending: info.pending_update_count
+        });
+
+        if (info.last_error_message) {
+            console.warn('⚠️ Previous error:', info.last_error_message);
+        }
+
+        logger.info('Webhook setup complete', { url: webhookUrl });
+
+    } catch (err) {
+        console.error('❌ Webhook setup failed:', err.message);
+        throw err;
+    }
+}
+
 
     startTrading() {
         logger.info('Starting trading cycles...');
