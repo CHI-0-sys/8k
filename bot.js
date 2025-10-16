@@ -14,7 +14,7 @@ const path = require('path');
 // Import our new modules
 const DatabaseManager = require('./modules/database');
 const TechnicalIndicators = require('./modules/indicators');
-// const BacktestEngine = require('./modules/backtest');
+const BacktestEngine = require('./modules/backtest');
 const DEXAggregator = require('./modules/dex-aggregator');
 const MEVProtection = require('./modules/mev-protection');
 const HealthMonitor = require('./modules/health-monitor');
@@ -89,6 +89,8 @@ const logger = winston.createLogger({
 // =================================================================
 // Export logger so other files can use it
 
+
+
 // ============ CONFIGURATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BITQUERY_API_KEY = process.env.BITQUERY_API_KEY;
@@ -107,7 +109,7 @@ const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS ||
     .split(',')
     .filter(url => url.trim());
     
-const PORT = process.env.PORT || 4002;
+const PORT = process.env.PORT;
 const USE_WEBHOOK = process.env.USE_WEBHOOK === 'true';
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
@@ -3182,4 +3184,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { TradingEngine, TradingBot };
+module.exports = { TradingEngine, TradingBot, logger};
