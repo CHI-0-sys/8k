@@ -2,7 +2,7 @@
   "name": "solana-trading-bot-enhanced",
   "version": "2.0.0",
   "description": "Enhanced Solana Trading Bot with Multi-DEX, Technical Analysis, Backtesting, and MEV Protection",
-  "main": "bot-minimal.js",
+  "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
     "start:full":"node bot.js",

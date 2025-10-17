@@ -1,5 +1,5 @@
 require('dotenv').config();
-const axios = require('axios');
+
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const winston = require('winston');
@@ -8,8 +8,6 @@ const { Connection, PublicKey, VersionedTransaction, LAMPORTS_PER_SOL, Keypair, 
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
 const AbortController = require('abort-controller');
-const fs = require('fs');
-const path = require('path');
 
 // Import our new modules
 const DatabaseManager = require('./modules/database');
@@ -20,76 +18,36 @@ const MEVProtection = require('./modules/mev-protection');
 const HealthMonitor = require('./modules/health-monitor');
 const AnomalyDetector = require('./modules/anomaly-detector');
 
-// ============ CREATE REQUIRED DIRECTORIES FIRST ============
-const requiredDirs = ['logs', 'data'];
-requiredDirs.forEach(dir => {
-    const dirPath = path.join(__dirname, dir);
-    if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-        console.log(`✅ Created directory: ${dir}/`);
-    }
-});
-
 // ============ WINSTON LOGGING SETUP ============
-// ========================= LOGGER CONFIG =========================
-
-// Ensure the "logs" directory exists
-const logDir = path.join(__dirname, 'logs');
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir);
-}
-
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    winston.format.errors({ stack: true }),
-    winston.format.splat(),
-    winston.format.json()
-  ),
-  defaultMeta: { service: 'trading-bot' },
-  transports: [
-    new winston.transports.File({
-      filename: path.join(logDir, 'error.log'),
-      level: 'error',
-      maxsize: 10 * 1024 * 1024, // 10 MB
-      maxFiles: 5,
-    }),
-    new winston.transports.File({
-      filename: path.join(logDir, 'combined.log'),
-      maxsize: 10 * 1024 * 1024,
-      maxFiles: 10,
-    }),
-    new winston.transports.File({
-      filename: path.join(logDir, 'trades.log'),
-      level: 'info',
-      maxsize: 10 * 1024 * 1024,
-      maxFiles: 20,
-    }),
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
-          const metaString = Object.keys(meta).length
-            ? JSON.stringify(meta, null, 2)
-            : '';
-          return `${timestamp} [${service}] ${level}: ${message} ${metaString}`;
+    level: process.env.LOG_LEVEL || 'info',
+    format: winston.format.combine(
+        winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+        winston.format.errors({ stack: true }),
+        winston.format.splat(),
+        winston.format.json()
+    ),
+    defaultMeta: { service: 'trading-bot' },
+    transports: [
+        new winston.transports.File({ filename: 'logs/error.log', level: 'error', maxsize: 10485760, maxFiles: 5 }),
+        new winston.transports.File({ filename: 'logs/combined.log', maxsize: 10485760, maxFiles: 10 }),
+        new winston.transports.File({ filename: 'logs/trades.log', level: 'info', maxsize: 10485760, maxFiles: 20 }),
+        new winston.transports.Console({
+            format: winston.format.combine(
+                winston.format.colorize(),
+                winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
+                    return `${timestamp} [${service}] ${level}: ${message} ${Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''}`;
+                })
+            )
         })
-      ),
-    }),
-  ],
-  exceptionHandlers: [
-    new winston.transports.File({ filename: path.join(logDir, 'exceptions.log') }),
-  ],
-  rejectionHandlers: [
-    new winston.transports.File({ filename: path.join(logDir, 'rejections.log') }),
-  ],
+    ],
+    exceptionHandlers: [
+        new winston.transports.File({ filename: 'logs/exceptions.log' })
+    ],
+    rejectionHandlers: [
+        new winston.transports.File({ filename: 'logs/rejections.log' })
+    ]
 });
-
-// =================================================================
-// Export logger so other files can use it
-
-
 
 // ============ CONFIGURATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -109,8 +67,8 @@ const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS ||
     .split(',')
     .filter(url => url.trim());
     
-const PORT = process.env.PORT;
-const USE_WEBHOOK = process.env.USE_WEBHOOK === 'true';
+// const PORT = process.env.PORT || 4002;
+const USE_WEBHOOK = process.env.USE_WEBHOOK === 'false';
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // Trading Parameters
@@ -1451,10 +1409,10 @@ async executeBuy(userId, token) {
         user.position = position;
         user.currentBalance -= usdcSpent;
 
-
+        // Add to portfolio
         this.portfolioManager.addPosition(token.address, position);
 
-    
+        // Save to database
         if (this.database) {
             await this.database.createPosition(userId, position);
         }
@@ -2021,6 +1979,7 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
     `.trim();
 }
 
+// End of TradingEngine class methods
 } 
 
 
@@ -2028,88 +1987,179 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 // Add this to the end of bot.js after TradingEngine class
 
 class TradingBot {
-    // In TradingBot constructor, replace the initialization section with:
+    constructor() {
+        this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
 
-constructor() {
-    this.app = express();
-    this.app.use(express.json());
-    this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+        // ============ PRODUCTION POLLING MODE SETUP ============
+        console.log('🤖 Bot Configuration:', {
+            mode: 'POLLING',
+            authorizedUsers: AUTHORIZED_USERS.length,
+            scanInterval: SCAN_INTERVAL_MINUTES + 'min',
+            environment: process.env.NODE_ENV || 'development'
+        });
 
-    const useWebhook = USE_WEBHOOK === true || USE_WEBHOOK === 'true';
-    
-    console.log('🤖 Bot Configuration:', {
-        useWebhook,
-        hasWebhookUrl: !!WEBHOOK_URL,
-        port: PORT,
-        authorizedUsers: AUTHORIZED_USERS.length
-    });
+        logger.info('🔵 Starting in POLLING MODE (Production)');
 
-    // CRITICAL FIX: Choose ONE mode, not both
-    if (useWebhook && WEBHOOK_URL) {
-        console.log('🌐 Starting in WEBHOOK mode');
-        logger.info('Starting in WEBHOOK mode');
-        this.bot = new TelegramBot(TELEGRAM_TOKEN);
-        this.useWebhook = true;
-    } else {
-        console.log('📡 Starting in POLLING mode');
-        logger.info('Starting in POLLING mode');
-        this.bot = new TelegramBot(TELEGRAM_TOKEN, { 
+        // Initialize Telegram Bot with optimized polling settings
+        this.bot = new TelegramBot(TELEGRAM_TOKEN, {
             polling: {
-                interval: 300,        // 300ms between polls
+                interval: 1000,              // Check every 1 second
                 autoStart: true,
                 params: {
-                    timeout: 30       // Long polling timeout
+                    timeout: 30,             // Long polling 30s
+                    allowed_updates: ['message']  // Only process messages
                 }
+            },
+            filepath: false                  // Disable file downloads for security
+        });
+
+        // Polling error handler with auto-recovery
+        this.bot.on('polling_error', (error) => {
+            if (error.code === 'EFATAL' || error.code === 'ETELEGRAM') {
+                logger.error('Fatal polling error, restarting...', { 
+                    code: error.code, 
+                    message: error.message 
+                });
+                this.restartPolling();
+            } else {
+                logger.warn('Polling error (recoverable)', { 
+                    code: error.code, 
+                    message: error.message 
+                });
             }
         });
-        this.useWebhook = false;
-        
-        this.bot.on('polling_error', (error) => {
-            logger.error('Polling error', { 
-                code: error.code,
-                message: error.message 
-            });
+
+        // General bot error handler
+        this.bot.on('error', (error) => {
+            logger.error('Bot error', { error: error.message });
         });
+
+        // Verify connection to Telegram
+        this.bot.getMe()
+            .then(info => {
+                console.log('✅ Connected to Telegram:', info.username);
+                logger.info('Bot connected to Telegram', { 
+                    username: info.username, 
+                    id: info.id,
+                    mode: 'POLLING'
+                });
+            })
+            .catch(err => {
+                console.error('❌ Failed to connect to Telegram:', err.message);
+                logger.error('Bot connection failed', { error: err.message });
+                process.exit(1);
+            });
+
+        // Initialize components
+        this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
+        this.wallet = this.loadWallet(PRIVATE_KEY);
+        this.database = new DatabaseManager('./data/trading.db');
+        this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+        this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+        
+        if (ENABLE_HEALTH_MONITORING) {
+            this.healthMonitor = new HealthMonitor(logger, this);
+        }
+
+        // Setup memory management
+        this.setupMemoryManagement();
     }
 
-    // Common error handler
-    this.bot.on('error', (error) => {
-        logger.error('Bot error', { error: error.message });
-    });
-
-    // Verify connection
-    this.bot.getMe()
-        .then(info => {
-            console.log('✅ Connected to Telegram:', info.username);
-            logger.info('Bot connected to Telegram', { 
-                username: info.username, 
-                id: info.id 
-            });
-        })
-        .catch(err => {
-            console.error('❌ Failed to connect to Telegram:', err.message);
-            logger.error('Bot connection failed', { error: err.message });
-        });
-
-    // Initialize components
-    this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
-    this.wallet = this.loadWallet(PRIVATE_KEY);
-    this.database = new DatabaseManager('./data/trading.db');
-    this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-    this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
-    
-    if (ENABLE_HEALTH_MONITORING) {
-        this.healthMonitor = new HealthMonitor(logger, this);
+async restartPolling() {
+    try {
+        logger.info('Attempting to restart polling...');
+        await this.bot.stopPolling();
+        await sleep(3000);  // Wait 3 seconds
+        await this.bot.startPolling();
+        logger.info('Polling restarted successfully');
+    } catch (error) {
+        logger.error('Failed to restart polling', { error: error.message });
+        // If restart fails, exit and let process manager (PM2/Railway) restart the whole bot
+        process.exit(1);
     }
 } 
 
+setupMemoryManagement() {
+    // Aggressive memory cleanup every 3 minutes
+    setInterval(() => {
+        const mem = process.memoryUsage();
+        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
 
-    
-// FIXED: Replace your TradingBot.init() method with this version
+        if (heapPercent > 70) {
+            logger.warn('High memory usage detected', {
+                heapPercent: heapPercent.toFixed(1) + '%',
+                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+            });
+
+            // Force cleanup
+            this.performMemoryCleanup();
+
+            // Force GC if available (run with --expose-gc flag)
+            if (heapPercent > 80 && global.gc) {
+                global.gc();
+                logger.info('Garbage collection triggered');
+            }
+        }
+    }, 3 * 60 * 1000);
+
+    // Regular cleanup every 5 minutes
+    setInterval(() => {
+        this.performMemoryCleanup();
+    }, 5 * 60 * 1000);
+
+    // Log file cleanup every 10 minutes
+    setInterval(() => {
+        const logFiles = [
+            path.join(logDir, 'combined.log'),
+            path.join(logDir, 'trades.log')
+        ];
+        
+        logFiles.forEach(file => {
+            try {
+                if (fs.existsSync(file)) {
+                    const stats = fs.statSync(file);
+                    if (stats.size > 10 * 1024 * 1024) { // 10MB
+                        fs.writeFileSync(file, '');
+                        logger.info('Log file cleared due to size', { file });
+                    }
+                }
+            } catch (err) {
+                // Ignore errors
+            }
+        });
+    }, 10 * 60 * 1000);
+}
+ 
+performMemoryCleanup() {
+    let cleaned = 0;
+
+    // Clear Bitquery cache
+    if (this.bitquery && this.bitquery.cache) {
+        const size = this.bitquery.cache.size;
+        this.bitquery.cache.clear();
+        cleaned += size;
+    }
+
+    // Trim trade history to last 50 trades
+    for (const [userId, user] of this.engine.userStates.entries()) {
+        if (user.tradeHistory && user.tradeHistory.length > 50) {
+            const removed = user.tradeHistory.length - 50;
+            user.tradeHistory = user.tradeHistory.slice(-50);
+            cleaned += removed;
+        }
+    }
+
+    if (cleaned > 0) {
+        logger.debug('Memory cleanup completed', { itemsCleaned: cleaned });
+    }
+}
 
 async init() {
-    logger.info('Trading bot initializing...');
-    
+    logger.info('='.repeat(50));
+    logger.info('Trading bot initializing... (POLLING MODE)');
+    logger.info('='.repeat(50));
+
     try {
         // Initialize database
         await this.database.init();
@@ -2122,84 +2172,6 @@ async init() {
         // Initialize trading engine
         await this.engine.init();
         logger.info('✅ Trading engine initialized');
-
-        // ============ CRITICAL FIX: START SERVER FIRST ============
-        console.log(`🚀 Starting HTTP server on port ${PORT}...`);
-        
-        await new Promise((resolve, reject) => {
-            const server = this.app.listen(PORT, '0.0.0.0', () => {
-                console.log(`✅ HTTP server listening on 0.0.0.0:${PORT}`);
-                logger.info(`HTTP server running on port ${PORT}`);
-                this.server = server;
-                resolve();
-            }).on('error', (err) => {
-                if (err.code === 'EADDRINUSE') {
-                    console.error(`❌ Port ${PORT} is already in use`);
-                    logger.error(`Port ${PORT} is already in use`);
-                    reject(new Error(`Port ${PORT} already in use`));
-                } else {
-                    console.error('❌ Server error:', err);
-                    logger.error('Server error:', err);
-                    reject(err);
-                }
-            });
-        });
-
-        // Add basic endpoints BEFORE webhook setup
-        this.app.get('/test-server', (req, res) => {
-            console.log('📡 Test endpoint hit');
-            res.json({ 
-                status: 'server_ok', 
-                timestamp: new Date().toISOString(),
-                mode: this.useWebhook ? 'webhook' : 'polling'
-            });
-        });
-
-        this.app.get('/health', (req, res) => {
-            console.log('🏥 Health check hit');
-            res.json({ 
-                status: 'healthy',
-                uptime: Math.floor(process.uptime()),
-                mode: this.useWebhook ? 'webhook' : 'polling',
-                timestamp: new Date().toISOString()
-            });
-        });
-
-        this.app.get('/', (req, res) => {
-            console.log('📍 Root endpoint hit');
-            res.json({
-                name: 'Solana Trading Bot',
-                version: '2.0.0',
-                status: 'running',
-                mode: this.useWebhook ? 'webhook' : 'polling',
-                webhook: this.useWebhook ? `${WEBHOOK_URL}/webhook` : null
-            });
-        });
-
-        // Wait a moment for server to be fully ready
-        await sleep(2000);
-
-        // Test that server is responding
-        try {
-            const testResponse = await fetchWithTimeout(`http://localhost:${PORT}/test-server`, {}, 5000);
-            if (!testResponse.ok) {
-                throw new Error('Server test failed');
-            }
-            console.log('✅ Server responding correctly');
-            logger.info('Server test passed');
-        } catch (error) {
-            console.error('❌ Server test failed:', error.message);
-            throw new Error('Server not responding to test requests');
-        }
-
-        // ============ NOW SETUP WEBHOOK ============
-        if (this.useWebhook && WEBHOOK_URL) {
-            console.log('🌐 Setting up webhook...');
-            await this.setupWebhook();
-            console.log('✅ Webhook configured');
-        } else {
-            console.log('📡 Using polling mode - no webhook needed');
-        }
 
         // Setup Telegram commands
         this.setupCommands();
@@ -2215,141 +2187,45 @@ async init() {
         this.startTrading();
         logger.info('✅ Trading cycles started');
 
-        // ============ MEMORY MANAGEMENT ============
-        if (this.bitquery.cache) {
-            setInterval(() => {
-                const sizeBefore = this.bitquery.cache.size;
-                this.bitquery.cache.clear();
-                logger.info('Cache cleared', { sizeBefore, sizeAfter: 0 });
-            }, 5 * 60 * 1000);
-        }
-
-        setInterval(() => {
-            for (const [userId, user] of this.engine.userStates.entries()) {
-                if (user.tradeHistory.length > 100) {
-                    const removed = user.tradeHistory.length - 100;
-                    user.tradeHistory = user.tradeHistory.slice(-100);
-                    logger.info('Trade history trimmed', { userId, removed });
-                }
-            }
-        }, 10 * 60 * 1000);
-
-        // ============ IMPROVED MEMORY MONITORING ============
-setInterval(() => {
-    const mem = process.memoryUsage();
-    const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-    
-    // Only log if memory is high (reduce log spam)
-    if (heapPercent > 70) {
-        logger.warn('Memory usage high', {
-            heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-            heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
-            heapPercent: heapPercent.toFixed(1) + '%',
-            rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
-        });
-    }
-
-    // Trigger GC at 80% instead of 85%
-    if (heapPercent > 80 && global.gc) {
-        logger.warn('Triggering garbage collection');
-        global.gc();
-    }
-}, 30 * 1000); // Check every 30 seconds instead of 60 
-
-
-    // ============ ADDITIONAL MEMORY OPTIMIZATIONS ============
-
-// 1. Aggressive trade history cleanup
-setInterval(() => {
-    for (const [userId, user] of this.engine.userStates.entries()) {
-        if (user.tradeHistory && user.tradeHistory.length > 50) {
-            const removed = user.tradeHistory.length - 50;
-            user.tradeHistory = user.tradeHistory.slice(-50);
-            logger.debug('Trade history trimmed', { userId, removed });
-        }
-    }
-}, 5 * 60 * 1000); // Every 5 minutes
-
-// 2. Clear Bitquery cache more frequently
-if (this.bitquery.cache) {
-    setInterval(() => {
-        const sizeBefore = this.bitquery.cache.size;
-        this.bitquery.cache.clear();
-        if (sizeBefore > 0) {
-            logger.debug('Bitquery cache cleared', { entries: sizeBefore });
-        }
-    }, 3 * 60 * 1000); // Every 3 minutes
-}
-
-// 3. Clear log files if they get too large
-setInterval(() => {
-    const logFiles = ['logs/combined.log', 'logs/trades.log'];
-    logFiles.forEach(file => {
-        try {
-            const stats = fs.statSync(file);
-            if (stats.size > 5 * 1024 * 1024) { // 5MB
-                fs.writeFileSync(file, '');
-                logger.info('Log file cleared', { file });
-            }
-        } catch (err) {
-            // File doesn't exist, ignore
-        }
-    });
-}, 10 * 60 * 1000); // Every 10 minutes
-
-// 4. Reduce logging in production
-if (process.env.NODE_ENV === 'production') {
-    logger.level = 'info';
-    logger.info('Production mode: Reduced logging verbosity');
-} 
-
-
-
         console.log('='.repeat(50));
-        console.log('✅ BOT FULLY INITIALIZED AND OPERATIONAL');
-        console.log(`Mode: ${this.useWebhook ? 'WEBHOOK' : 'POLLING'}`);
-        console.log(`Server: http://0.0.0.0:${PORT}`);
-        if (this.useWebhook) {
-            console.log(`Webhook: ${WEBHOOK_URL}/webhook`);
-        }
+        console.log('✅ BOT FULLY OPERATIONAL');
+        console.log('Mode: POLLING (Production)');
+        console.log(`Scan Interval: ${SCAN_INTERVAL_MINUTES}min`);
+        console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
         console.log('='.repeat(50));
-        
-        logger.info('✅ Trading bot fully initialized and operational');
+
+        logger.info('✅ Trading bot fully operational');
 
     } catch (error) {
-        console.error('❌ INITIALIZATION FAILED:', error.message);
+        console.error('❌ Initialization failed:', error.message);
         logger.error('Initialization failed', { error: error.message, stack: error.stack });
         throw error;
-    } 
-
-
+    }
 }
 
 
-
-
-
-    loadWallet(privateKey) {
-        if (!privateKey) {
-            throw new Error('PRIVATE_KEY not set in environment');
-        }
-        
-        try {
-            const decoded = bs58.decode(privateKey);
-            if (decoded.length === 64) {
-                logger.info('Wallet loaded (64-byte keypair)');
-                return Keypair.fromSecretKey(decoded);
-            } else if (decoded.length === 32) {
-                logger.info('Wallet loaded (32-byte seed)');
-                return Keypair.fromSeed(decoded);
-            } else {
-                throw new Error(`Invalid private key length: ${decoded.length}`);
-            }
-        } catch (err) {
-            logger.error('Failed to load wallet', { error: err.message });
-            throw new Error('Invalid PRIVATE_KEY format. Must be Base58 encoded.');
-        }
+loadWallet(privateKey) {
+    if (!privateKey) {
+        throw new Error('PRIVATE_KEY not set in environment');
     }
+    
+    try {
+        const decoded = bs58.decode(privateKey);
+        if (decoded.length === 64) {
+            logger.info('Wallet loaded (64-byte keypair)');
+            return Keypair.fromSecretKey(decoded);
+        } else if (decoded.length === 32) {
+            logger.info('Wallet loaded (32-byte seed)');
+            return Keypair.fromSeed(decoded);
+        } else {
+            throw new Error(`Invalid private key length: ${decoded.length}`);
+        }
+    } catch (err) {
+        logger.error('Failed to load wallet', { error: err.message });
+        throw new Error('Invalid PRIVATE_KEY format. Must be Base58 encoded.');
+    }
+}
+
 
     async sendMessage(chatId, text, options = {}) {
         try {
@@ -2366,100 +2242,76 @@ if (process.env.NODE_ENV === 'production') {
             });
         }
     }
-    
-    
+
     setupCommands() {
         logger.info('Setting up Telegram bot commands...');
-    
-        // Single message handler that works with both webhook and polling
+
+        // ============ SINGLE MESSAGE HANDLER FOR ALL COMMANDS ============
         this.bot.on('message', async (msg) => {
             try {
-                // Only process text messages
-                if (!msg.text) {
-                    return;
-                }
-    
+                // Only process text messages that start with /
+                if (!msg.text || !msg.text.startsWith('/')) return;
+
                 const userId = msg.from.id;
                 const chatId = msg.chat.id;
-                const command = msg.text.split(' ')[0].toLowerCase();
-    
-                logger.info('Message received', { 
-                    userId, 
-                    command,
-                    text: msg.text.substring(0, 50)
-                });
-    
-                // Skip non-commands
-                if (!command.startsWith('/')) {
-                    return;
-                }
-    
+                const text = msg.text.trim();
+                const [command, ...args] = text.split(' ');
+
+                logger.debug('Command received', { userId, command, args });
+
                 // Authorization check
                 if (!this.isAuthorized(userId)) {
                     await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
                     logger.warn('Unauthorized command attempt', { userId, command });
                     return;
                 }
-    
-                // Route commands
-                switch (command) {
+
+                // Route to appropriate handler
+                switch (command.toLowerCase()) {
                     case '/start':
                         await this.handleStart(userId, chatId);
                         break;
-    
                     case '/stop':
                         await this.handleStop(userId, chatId);
                         break;
-    
                     case '/balance':
                         await this.handleBalance(userId, chatId);
                         break;
-    
                     case '/status':
                         await this.handleStatus(userId, chatId);
                         break;
-    
                     case '/performance':
                         await this.handlePerformance(userId, chatId);
                         break;
-    
                     case '/history':
                         await this.handleHistory(userId, chatId);
                         break;
-    
                     case '/stats':
                         await this.handleStats(userId, chatId);
                         break;
-    
                     case '/profits':
                         await this.handleProfits(userId, chatId);
                         break;
-    
                     case '/health':
                         await this.handleHealth(userId, chatId);
                         break;
-    
                     case '/anomalies':
                         await this.handleAnomalies(userId, chatId);
                         break;
-    
                     case '/portfolio':
                         await this.handlePortfolio(userId, chatId);
                         break;
-    
                     case '/backtest':
-                        const days = msg.text.split(' ')[1] || '30';
-                        await this.handleBacktest(userId, chatId, parseInt(days));
+                        const days = parseInt(args[0]) || 30;
+                        await this.handleBacktest(userId, chatId, days);
                         break;
-    
                     case '/help':
                         await this.handleHelp(userId, chatId);
                         break;
-    
                     default:
                         logger.debug('Unknown command', { command });
                 }
-    
+
             } catch (error) {
                 logger.error('Message handler error', { 
                     error: error.message,
@@ -2477,11 +2329,9 @@ if (process.env.NODE_ENV === 'production') {
                 }
             }
         });
-    
-        logger.info('✅ Message handlers configured');
+
+        logger.info('✅ Message handler configured');
     }
-    
-    // ============ COMMAND HANDLERS ============
     
     async handleStart(userId, chatId) {
         const user = this.engine.getUserState(userId);
@@ -2884,114 +2734,61 @@ if (process.env.NODE_ENV === 'production') {
         logger.info('Help viewed', { userId });
     }
 
-      
-
-       
-                 
-                
     isAuthorized(userId) {
         return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
     }
+
+    async setupWebhook() {
+        // Setup webhook endpoint
+        this.app.post('/webhook', (req, res) => {
+            this.bot.processUpdate(req.body);
+            res.sendStatus(200);
+        });
     
-    // FIXED: Replace your setupWebhook() method with this
+        // Health check endpoint
+        this.app.get('/health', (req, res) => {
+            const stats = this.bitquery.getStats();
+            const rpcStatus = this.rpcConnection.getStatus();
+            const user = this.engine.getUserState(this.ownerId);
+            
+            res.json({ 
+                status: 'healthy', 
+                mode: 'webhook',
+                timestamp: new Date().toISOString(),
+                uptime: process.uptime(),
+                version: '2.0.0',
+                features: {
+                    paperTrading: ENABLE_PAPER_TRADING,
+                    multiDex: ENABLE_MULTI_DEX,
+                    technicalAnalysis: ENABLE_TECHNICAL_ANALYSIS,
+                    mevProtection: ENABLE_MEV_PROTECTION,
+                    healthMonitoring: ENABLE_HEALTH_MONITORING,
+                    anomalyDetection: ENABLE_ANOMALY_DETECTION
+                },
+                trading: {
+                    isActive: user?.isActive || false,
+                    hasPosition: user?.position !== null,
+                    currentBalance: user?.currentBalance || 0,
+                    dailyProfitPercent: user?.dailyProfitPercent || 0
+                },
+                apiStats: stats,
+                rpcStatus: rpcStatus
+            });
+        });
     
-    // REPLACE your setupWebhook() method with this FIXED version:
-
-async setupWebhook() {
-    if (!this.useWebhook || !WEBHOOK_URL) {
-        logger.info('Webhook not configured, skipping setup');
-        return;
-    }
-
-    console.log('🔧 Configuring webhook endpoints...');
-
-    // ============ CRITICAL FIX: IMMEDIATE 200 RESPONSE ============
-    this.app.post('/webhook', (req, res) => {
-        const timestamp = Date.now();
-        
-        // CRITICAL: Respond to Telegram IMMEDIATELY (within 1ms)
-        res.status(200).end();
-        
-        // Process update AFTER responding (async, non-blocking)
-        setImmediate(async () => {
-            try {
-                if (!req.body || typeof req.body !== 'object') {
-                    logger.warn('Invalid webhook body received');
-                    return;
-                }
-
-                logger.debug('Processing webhook update', { 
-                    updateId: req.body?.update_id,
-                    latency: Date.now() - timestamp 
-                });
-
-                // Process the update
-                await this.bot.processUpdate(req.body);
-                
-            } catch (error) {
-                logger.error('Webhook processing error', { 
-                    error: error.message,
-                    updateId: req.body?.update_id
-                });
-            }
-        });
-    });
-
-    // Health check
-    this.app.get('/webhook/test', (req, res) => {
-        res.json({ 
-            status: 'ok',
-            timestamp: new Date().toISOString()
-        });
-    });
-
-    console.log('✅ Webhook endpoints registered');
-
-    // Delete existing webhook
-    try {
-        await this.bot.deleteWebhook();
-        await sleep(1000);
-    } catch (err) {
-        logger.debug('No existing webhook to delete');
-    }
-
-    // Set new webhook
-    const webhookUrl = `${WEBHOOK_URL}/webhook`;
-    console.log(`📡 Setting webhook: ${webhookUrl}`);
-
-    try {
-        await this.bot.setWebHook(webhookUrl, {
-            allowed_updates: ['message'],
-            drop_pending_updates: true,
-            max_connections: 40
-        });
-
-        await sleep(2000);
-
-        // Verify
-        const info = await this.bot.getWebHookInfo();
-        console.log('✅ Webhook active:', {
-            url: info.url,
-            pending: info.pending_update_count
-        });
-
-        if (info.last_error_message) {
-            console.warn('⚠️ Previous error:', info.last_error_message);
+        // Set webhook with Telegram
+        try {
+            await this.bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+            logger.info(`Webhook set: ${WEBHOOK_URL}/webhook`);
+        } catch (err) {
+            logger.error('Webhook setup failed', { error: err.message });
+            throw err;
         }
-
-        logger.info('Webhook setup complete', { url: webhookUrl });
-
-    } catch (err) {
-        console.error('❌ Webhook setup failed:', err.message);
-        throw err;
     }
-}
-
-
     startTrading() {
         logger.info('Starting trading cycles...');
-        
-        // Position monitoring cycle (every 30 seconds)
+
+        // Position monitoring (every 30s)
         setInterval(async () => {
             if (!this.engine.hasActiveUsers()) return;
             
@@ -3000,15 +2797,14 @@ async setupWebhook() {
                     try {
                         await this.engine.monitorPosition(userId);
                     } catch (error) {
-                        logger.error('Position monitoring error', { 
-                            userId, 
-                            error: error.message 
-                        });
+                        logger.error('Monitor error', { error: error.message });
                     }
                 }
             }
         }, 30000);
-    
+        
+
+
         // Scanning cycle (configurable interval)
         const scanIntervalMs = SCAN_INTERVAL_MINUTES * 60 * 1000;
         setInterval(async () => {
@@ -3016,11 +2812,6 @@ async setupWebhook() {
                 await this.engine.tradingCycle();
             } catch (error) {
                 logger.error('Trading cycle error', { error: error.message });
-                
-                // Record error in health monitor
-                if (this.healthMonitor) {
-                    this.healthMonitor.recordError(error, { context: 'trading_cycle' });
-                }
             }
         }, scanIntervalMs);
 
@@ -3028,11 +2819,12 @@ async setupWebhook() {
         setInterval(async () => {
             try {
                 await this.engine.saveState();
-                logger.debug('State auto-saved');
             } catch (error) {
                 logger.error('State save failed', { error: error.message });
             }
-        }, 300000);
+        }, 5 * 60 * 1000);
+
+
 
         // Database cleanup (daily)
         setInterval(async () => {
@@ -3051,6 +2843,10 @@ async setupWebhook() {
         logger.info('Initiating graceful shutdown...');
         
         try {
+            // Stop polling first
+            await this.bot.stopPolling();
+            logger.info('Polling stopped');
+
             // Save current state
             await this.engine.saveState();
             logger.info('State saved');
@@ -3065,14 +2861,6 @@ async setupWebhook() {
             if (this.database) {
                 await this.database.close();
                 logger.info('Database closed');
-            }
-
-            // Delete webhook if using
-            if (USE_WEBHOOK) {
-                await this.bot.deleteWebHook().catch(err => 
-                    logger.error('Webhook delete failed', { error: err.message })
-                );
-                logger.info('Webhook deleted');
             }
 
             // Final stats
@@ -3092,12 +2880,13 @@ async setupWebhook() {
     }
 }
 
+
 // ============ STARTUP & ERROR HANDLING ============
 
 async function main() {
     try {
         logger.info('='.repeat(50));
-        logger.info('Enhanced Solana Trading Bot v2.0 - Starting...');
+        logger.info('Enhanced Solana Trading Bot v2.0 - POLLING MODE');
         logger.info('='.repeat(50));
 
         // Validate environment
@@ -3106,7 +2895,7 @@ async function main() {
         if (!PRIVATE_KEY) throw new Error('PRIVATE_KEY not set');
 
         logger.info('Configuration loaded');
-        logger.info(`Mode: ${USE_WEBHOOK ? 'WEBHOOK' : 'POLLING'}`);
+        logger.info(`Mode: POLLING (Production)`);
         logger.info(`Trading Mode: ${ENABLE_PAPER_TRADING ? 'PAPER' : 'LIVE'}`);
         logger.info(`RPC Primary: ${SOLANA_RPC_URL.substring(0, 50)}...`);
         logger.info(`RPC Fallbacks: ${RPC_FALLBACK_URLS.length}`);
@@ -3184,4 +2973,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { TradingEngine, TradingBot, logger};
+module.exports = { TradingEngine, TradingBot, logger };
