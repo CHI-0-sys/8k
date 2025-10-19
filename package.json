@@ -5,7 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "start:full":"node bot.js",
+    "start:full": "node bot.js",
     "dev": "nodemon bot.js",
     "backtest": "node scripts/run-backtest.js",
     "test": "jest",

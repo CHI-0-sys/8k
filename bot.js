@@ -1,4 +1,16 @@
-require('dotenv').config();
+require('dotenv').config(); 
+
+console.log('ENV CHECK:');
+console.log('TELEGRAM_TOKEN:', process.env.TELEGRAM_TOKEN ? 'SET' : 'MISSING');
+console.log('BITQUERY_API_KEY:', process.env.BITQUERY_API_KEY ? 'SET' : 'MISSING');
+console.log('PRIVATE_KEY:', process.env.PRIVATE_KEY ? 'SET' : 'MISSING');
+console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
+
+console.log('ENV CHECK:');
+console.log('TELEGRAM_TOKEN:', process.env.TELEGRAM_TOKEN ? 'SET' : 'MISSING');
+console.log('BITQUERY_API_KEY:', process.env.BITQUERY_API_KEY ? 'SET' : 'MISSING');
+console.log('PRIVATE_KEY:', process.env.PRIVATE_KEY ? 'SET' : 'MISSING');
+console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
 
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
@@ -9,6 +21,7 @@ const { Connection, PublicKey, VersionedTransaction, LAMPORTS_PER_SOL, Keypair, 
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
 const AbortController = require('abort-controller');
+const axios = require('axios');
 
 // Import our new modules
 const DatabaseManager = require('./modules/database');
