@@ -993,45 +993,129 @@ class TradingEngine {
           this.anomalyDetector = new AnomalyDetector(logger, database);
       }
   }
-
+  
   async init() {
-      this.logger.info('Trading engine initializing');
-      await this.loadState();
-      
-      if (this.anomalyDetector) {
-          for (const [userId, user] of this.userStates.entries()) {
-              if (user.isActive) {
-                  await this.anomalyDetector.updateBaseline(userId);
-              }
-          }
-      }
-      
-      this.logger.info('Trading engine initialized');
-  }
+    this.logger.info('Trading engine initializing');
+    await this.loadState();
+    
+    // Get real wallet balance and update user state
+    for (const [userId, user] of this.userStates.entries()) {
+        const balances = await this.getWalletBalance();
+        
+        // Only update if this is a new user or balance is the default
+        if (user.currentBalance === 20 || user.currentBalance === user.startingBalance) {
+            user.startingBalance = balances.usdc > 0 ? balances.usdc : balances.sol;
+            user.currentBalance = user.startingBalance;
+            user.dailyStartBalance = user.startingBalance;
+            user.tradingCapital = user.startingBalance;
+            
+            this.logger.info('User balance initialized from wallet', {
+                userId,
+                sol: balances.sol.toFixed(4),
+                usdc: balances.usdc.toFixed(2),
+                trading: user.currentBalance.toFixed(2)
+            });
+        }
+    }
+    
+    if (this.anomalyDetector) {
+        for (const [userId, user] of this.userStates.entries()) {
+            if (user.isActive) {
+                await this.anomalyDetector.updateBaseline(userId);
+            }
+        }
+    }
+    
+    this.logger.info('Trading engine initialized');
+} 
 
-  getUserState(userId) {
-      if (!this.userStates.has(userId)) {
-          this.userStates.set(userId, {
-              isActive: false,
-              startingBalance: 20,
-              currentBalance: 20,
-              dailyStartBalance: 20,
-              dailyProfit: 0,
-              dailyProfitPercent: 0,
-              currentDay: 1,
-              totalTrades: 0,
-              successfulTrades: 0,
-              position: null,
-              tradeHistory: [],
-              lastTradeAt: 0,
-              dailyResetAt: Date.now(),
-              totalProfitTaken: 0,
-              profitTakingHistory: [],
-              tradingCapital: 20
-          });
-      }
-      return this.userStates.get(userId);
-  }
+
+ 
+  async getWalletBalance() {
+    try {
+        const operation = async (conn) => {
+            const balance = await conn.getBalance(this.wallet.publicKey);
+            return balance / LAMPORTS_PER_SOL; // Convert lamports to SOL
+        };
+
+        const solBalance = await this.rpcConnection.executeWithFallback(operation, 'getWalletBalance');
+        
+        // Get USDC balance (if you want to trade with USDC)
+        const usdcMint = new PublicKey(USDC_MINT);
+        const usdcBalance = await this.getTokenBalance(usdcMint);
+        
+        this.logger.info('Wallet balances fetched', { 
+            sol: solBalance.toFixed(4),
+            usdc: usdcBalance.toFixed(2)
+        });
+        
+        return {
+            sol: solBalance,
+            usdc: usdcBalance,
+            // Use USDC for trading if available, otherwise SOL equivalent
+            trading: usdcBalance > 0 ? usdcBalance : solBalance * 0 // Set to 0 if no USDC
+        };
+        
+    } catch (error) {
+        this.logger.error('Failed to get wallet balance', { error: error.message });
+        return { sol: 0, usdc: 0, trading: 0 };
+    }
+}
+
+async getTokenBalance(tokenMint) {
+    try {
+        const operation = async (conn) => {
+            // Get token accounts for the wallet
+            const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+            const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
+                this.wallet.publicKey,
+                { mint: tokenMint }
+            );
+
+            if (tokenAccounts.value.length === 0) {
+                return 0;
+            }
+
+            // Get the balance from the first token account
+            const balance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.uiAmount;
+            return balance || 0;
+        };
+
+        return await this.rpcConnection.executeWithFallback(operation, 'getTokenBalance');
+        
+    } catch (error) {
+        this.logger.error('Failed to get token balance', { 
+            error: error.message,
+            mint: tokenMint.toString()
+        });
+        return 0;
+    }
+}
+
+getUserState(userId) {
+    if (!this.userStates.has(userId)) {
+        // Create with placeholder - will be updated in init()
+        this.userStates.set(userId, {
+            isActive: false,
+            startingBalance: 0, // Will be set from wallet
+            currentBalance: 0,
+            dailyStartBalance: 0,
+            dailyProfit: 0,
+            dailyProfitPercent: 0,
+            currentDay: 1,
+            totalTrades: 0,
+            successfulTrades: 0,
+            position: null,
+            tradeHistory: [],
+            lastTradeAt: 0,
+            dailyResetAt: Date.now(),
+            totalProfitTaken: 0,
+            profitTakingHistory: [],
+            tradingCapital: 0
+        });
+    }
+    return this.userStates.get(userId);
+}
 
   hasActiveUsers() {
       for (const [userId, user] of this.userStates.entries()) {
