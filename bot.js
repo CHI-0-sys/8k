@@ -1054,6 +1054,10 @@ class TradingEngine {
  
 async getWalletBalance() {
     try {
+        console.log('\n' + '='.repeat(60));
+        console.log('FETCHING WALLET BALANCE');
+        console.log('='.repeat(60));
+        
         // Get native SOL balance
         const operation = async (conn) => {
             const balance = await conn.getBalance(this.wallet.publicKey);
@@ -1062,38 +1066,52 @@ async getWalletBalance() {
 
         const solBalance = await this.rpcConnection.executeWithFallback(operation, 'getWalletBalance');
         
+        console.log('\nNative SOL Balance:', solBalance.toFixed(4));
+        
         this.logger.info('Native SOL balance fetched', { 
             sol: solBalance.toFixed(4),
             lamports: Math.floor(solBalance * LAMPORTS_PER_SOL)
         });
         
-        // Get all token accounts to see what tokens we have
+        // Get all token accounts
         const tokenBalances = await this.getAllTokenBalances();
         
-        // Find USDC balance
+        console.log('\nAll Token Balances:');
+        tokenBalances.forEach(t => {
+            if (t.balance > 0) {
+                console.log(`  ${t.symbol}: ${t.balance.toFixed(4)}`);
+            }
+        });
+        
+        // Find specific tokens
         const usdcBalance = tokenBalances.find(t => 
-            t.mint === USDC_MINT || 
+            t.mint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' ||
             t.symbol === 'USDC'
         )?.balance || 0;
         
-        // Find wrapped SOL balance
         const wsolBalance = tokenBalances.find(t => 
-            t.mint === SOL_MINT ||
-            t.symbol === 'SOL' ||
+            t.mint === 'So11111111111111111111111111111111111111112' ||
             t.symbol === 'WSOL'
         )?.balance || 0;
+        
+        console.log('\nDetected Balances:');
+        console.log('  Native SOL:', solBalance.toFixed(4));
+        console.log('  Wrapped SOL:', wsolBalance.toFixed(4));
+        console.log('  USDC:', usdcBalance.toFixed(4));
+        console.log('  Total SOL:', (solBalance + wsolBalance).toFixed(4));
+        
+        const totalSol = solBalance + wsolBalance;
+        const tradingBalance = usdcBalance > 0.01 ? usdcBalance : totalSol;
+        
+        console.log('\nTrading Balance:', tradingBalance.toFixed(4), usdcBalance > 0.01 ? 'USDC' : 'SOL');
+        console.log('='.repeat(60) + '\n');
         
         this.logger.info('Token balances fetched', { 
             usdc: usdcBalance.toFixed(2),
             wsol: wsolBalance.toFixed(4),
-            totalTokens: tokenBalances.length
+            totalTokens: tokenBalances.length,
+            trading: tradingBalance.toFixed(4)
         });
-        
-        // Total SOL = native SOL + wrapped SOL
-        const totalSol = solBalance + wsolBalance;
-        
-        // For trading, prefer USDC, otherwise use total SOL
-        const tradingBalance = usdcBalance > 0.1 ? usdcBalance : totalSol;
         
         return {
             sol: solBalance,
@@ -1101,10 +1119,11 @@ async getWalletBalance() {
             totalSol: totalSol,
             usdc: usdcBalance,
             trading: tradingBalance,
-            allTokens: tokenBalances
+            allTokens: tokenBalances.filter(t => t.balance > 0)
         };
         
     } catch (error) {
+        console.error('BALANCE FETCH ERROR:', error);
         this.logger.error('Failed to get wallet balance', { 
             error: error.message,
             stack: error.stack
@@ -1170,45 +1189,88 @@ async getAllTokenBalances() {
 }
 
 getTokenSymbol(mintAddress) {
-    // Map known token addresses to symbols
     const knownTokens = {
-        [USDC_MINT]: 'USDC',
-        [SOL_MINT]: 'WSOL',
         'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
-        'So11111111111111111111111111111111111111112': 'WSOL'
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+        'So11111111111111111111111111111111111111112': 'WSOL',
+        '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
+        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+        '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj': 'stSOL',
+        'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 'mSOL',
+        '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': 'ETH',
+        '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh': 'WBTC'
     };
     
-    return knownTokens[mintAddress] || 'UNKNOWN';
+    return knownTokens[mintAddress] || `UNKNOWN (${mintAddress.slice(0, 4)}...${mintAddress.slice(-4)})`;
 }
 
 
 
 
-async getTokenBalance(tokenMint) {
+async getAllTokenBalances() {
     try {
         const operation = async (conn) => {
+            // Get all token accounts owned by this wallet
             const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+            
+            console.log('\n=== FETCHING ALL TOKEN ACCOUNTS ===');
+            console.log('Wallet:', this.wallet.publicKey.toString());
+            
             const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
                 this.wallet.publicKey,
-                { mint: tokenMint }
+                { programId: TOKEN_PROGRAM_ID }
             );
 
-            if (tokenAccounts.value.length === 0) {
-                return 0;
-            }
+            console.log('Total token accounts found:', tokenAccounts.value.length);
 
-            const balance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.uiAmount;
-            return balance || 0;
+            const balances = [];
+            
+            for (const account of tokenAccounts.value) {
+                const parsedInfo = account.account.data.parsed.info;
+                const mintAddress = parsedInfo.mint;
+                const balance = parsedInfo.tokenAmount.uiAmount || 0;
+                const decimals = parsedInfo.tokenAmount.decimals;
+                
+                console.log('\nToken Account:');
+                console.log('  Mint:', mintAddress);
+                console.log('  Balance:', balance);
+                console.log('  Decimals:', decimals);
+                console.log('  Symbol:', this.getTokenSymbol(mintAddress));
+                
+                // Include ALL balances, even zero, for debugging
+                balances.push({
+                    mint: mintAddress,
+                    balance: balance,
+                    decimals: decimals,
+                    symbol: this.getTokenSymbol(mintAddress),
+                    hasBalance: balance > 0
+                });
+            }
+            
+            console.log('\n=== SUMMARY ===');
+            console.log('Non-zero balances:', balances.filter(b => b.balance > 0).length);
+            console.log('Zero balances:', balances.filter(b => b.balance === 0).length);
+            
+            return balances;
         };
 
-        return await this.rpcConnection.executeWithFallback(operation, 'getTokenBalance');
+        const balances = await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
+        
+        this.logger.info('All token accounts fetched', { 
+            count: balances.length,
+            nonZero: balances.filter(b => b.balance > 0).length,
+            tokens: balances.filter(b => b.balance > 0).map(b => `${b.symbol}: ${b.balance.toFixed(4)}`)
+        });
+        
+        return balances;
         
     } catch (error) {
-        this.logger.error('Failed to get token balance', { 
+        console.error('ERROR fetching token balances:', error);
+        this.logger.error('Failed to get all token balances', { 
             error: error.message,
-            mint: tokenMint.toString()
+            stack: error.stack
         });
-        return 0;
+        return [];
     }
 }
 
@@ -2525,115 +2587,284 @@ loadWallet(privateKey) {
 }
 
 
-  async sendMessage(chatId, text, options = {}) {
-      try {
-          if (!chatId) {
-              logger.error('Cannot send message: chatId is empty');
-              return;
-          }
-          return await this.bot.sendMessage(chatId, text, options);
-      } catch (error) {
-          logger.error('Failed to send message', { 
-              chatId, 
-              error: error.message,
-              text: text.substring(0, 100) 
-          });
-      }
-  }
-
+async sendMessage(chatId, text, options = {}) {
+    const maxRetries = 3;
+    const maxLength = 4096;
+    
+    // Truncate if too long
+    let messageText = text;
+    if (text.length > maxLength) {
+        logger.warn('Message too long, truncating', { 
+            originalLength: text.length,
+            chatId 
+        });
+        messageText = text.substring(0, maxLength - 100) + '\n\n... (message truncated)';
+    }
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await this.bot.sendMessage(chatId, messageText, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                ...options
+            });
+        } catch (error) {
+            logger.warn(`Send message attempt ${attempt}/${maxRetries} failed`, {
+                error: error.message,
+                chatId,
+                attempt
+            });
+            
+            // If HTML parsing failed, try without HTML
+            if (error.message.includes('parse') && options.parse_mode === 'HTML') {
+                logger.info('Retrying without HTML parse mode');
+                delete options.parse_mode;
+                messageText = this.stripHtmlTags(messageText);
+            }
+            
+            // If it's the last attempt, throw the error
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            
+            // Exponential backoff
+            await new Promise(resolve => 
+                setTimeout(resolve, 1000 * Math.pow(2, attempt - 1))
+            );
+        }
+    }
+}
+stripHtmlTags(text) {
+    return text
+        .replace(/<[^>]*>/g, '')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'");
+}
   setupCommands() {
-      logger.info('Setting up Telegram bot commands...');
+    logger.info('Setting up Telegram bot commands...');
+    
+    // ============ SINGLE MESSAGE HANDLER FOR ALL COMMANDS ============
+    this.bot.on('message', async (msg) => {
+        const startTime = Date.now();
+        let userId, chatId, command;
+        
+        try {
+            // Only process text messages that start with /
+            if (!msg.text || !msg.text.startsWith('/')) return;
+            
+            userId = msg.from.id;
+            chatId = msg.chat.id;
+            const text = msg.text.trim();
+            const [cmd, ...args] = text.split(' ');
+            command = cmd.toLowerCase();
+            
+            logger.info('Command received', { 
+                userId, 
+                chatId,
+                command, 
+                args,
+                username: msg.from.username 
+            });
+            
+            // Authorization check
+            if (!this.isAuthorized(userId)) {
+                await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
+                logger.warn('Unauthorized command attempt', { userId, command });
+                return;
+            }
+            
+            // Send typing indicator
+            await this.bot.sendChatAction(chatId, 'typing').catch(e => 
+                logger.debug('Failed to send typing indicator:', e.message)
+            );
+            
+            // Route to appropriate handler with individual error handling
+            let handlerPromise;
+            
+            switch (command) {
+                case '/start':
+                    handlerPromise = this.handleStart(userId, chatId);
+                    break;
+                    
+                case '/stop':
+                    handlerPromise = this.handleStop(userId, chatId);
+                    break;
+                    
+                case '/balance':
+                    handlerPromise = this.handleBalance(userId, chatId);
+                    break;
+                    
+                case '/status':
+                    handlerPromise = this.handleStatus(userId, chatId);
+                    break;
+                    
+                case '/performance':
+                    handlerPromise = this.handlePerformance(userId, chatId);
+                    break;
+                    
+                case '/history':
+                    handlerPromise = this.handleHistory(userId, chatId);
+                    break;
+                    
+                case '/stats':
+                    handlerPromise = this.handleStats(userId, chatId);
+                    break;
+                    
+                case '/profits':
+                    handlerPromise = this.handleProfits(userId, chatId);
+                    break;
+                    
+                case '/health':
+                    handlerPromise = this.handleHealth(userId, chatId);
+                    break;
+                    
+                case '/anomalies':
+                    handlerPromise = this.handleAnomalies(userId, chatId);
+                    break;
+                    
+                case '/portfolio':
+                    handlerPromise = this.handlePortfolio(userId, chatId);
+                    break;
+                    
+                case '/backtest':
+                    const days = parseInt(args[0]) || 30;
+                    handlerPromise = this.handleBacktest(userId, chatId, days);
+                    break;
+                    
+                case '/wallet':
+                    handlerPromise = this.handleWallet(userId, chatId);
+                    break;
+                    
+                case '/help':
+                    handlerPromise = this.handleHelp(userId, chatId);
+                    break;
+                    
+                default:
+                    await this.sendMessage(chatId, 
+                        `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
+                    );
+                    logger.debug('Unknown command', { command, userId });
+                    return;
+            }
+            
+            // Execute handler with timeout
+            await Promise.race([
+                handlerPromise,
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Command timeout (30s)')), 30000)
+                )
+            ]);
+            
+            const executionTime = Date.now() - startTime;
+            logger.info('Command executed successfully', { 
+                command, 
+                userId, 
+                executionTime: `${executionTime}ms` 
+            });
+            
+        } catch (error) {
+            const executionTime = Date.now() - startTime;
+            
+            // Detailed error logging
+            logger.error('Command handler error', { 
+                command: command || 'unknown',
+                userId: userId || 'unknown',
+                chatId: chatId || 'unknown',
+                error: error.message,
+                errorName: error.name,
+                stack: error.stack,
+                executionTime: `${executionTime}ms`,
+                text: msg.text 
+            });
+            
+            // User-friendly error message based on error type
+            let errorMessage = '❌ <b>Command Failed</b>\n\n';
+            
+            if (error.message.includes('timeout')) {
+                errorMessage += '⏱️ The command took too long to execute.\n';
+                errorMessage += 'Please try again in a moment.';
+            } else if (error.message.includes('Unauthorized')) {
+                errorMessage += '🔒 You are not authorized to use this bot.';
+            } else if (error.message.includes('ETELEGRAM')) {
+                errorMessage += '📱 Telegram API error.\n';
+                errorMessage += 'Please try again.';
+            } else if (error.message.includes('wallet') || error.message.includes('balance')) {
+                errorMessage += '💼 Wallet connection issue.\n';
+                errorMessage += 'Retrying may help.';
+            } else if (error.message.includes('database') || error.message.includes('DB')) {
+                errorMessage += '💾 Database error.\n';
+                errorMessage += 'Your data is safe, please try again.';
+            } else {
+                // Generic error for unknown issues
+                errorMessage += `⚠️ ${this.sanitizeErrorMessage(error.message)}\n\n`;
+                errorMessage += `Error Code: ${Date.now()}\n`;
+                errorMessage += 'Please try again or contact support.';
+            }
+            
+            try {
+                await this.sendMessage(chatId, errorMessage, { 
+                    parse_mode: 'HTML' 
+                });
+            } catch (sendErr) {
+                logger.error('Failed to send error message to user', { 
+                    error: sendErr.message,
+                    originalError: error.message,
+                    userId,
+                    chatId
+                });
+                
+                // Last resort: try plain text without HTML
+                try {
+                    await this.sendMessage(chatId, 
+                        '❌ An error occurred. Please try again or contact support.'
+                    );
+                } catch (finalErr) {
+                    logger.error('Complete message send failure', { 
+                        error: finalErr.message 
+                    });
+                }
+            }
+        }
+    });
+    
+    // Handle polling errors
+    this.bot.on('polling_error', (error) => {
+        logger.error('Telegram polling error', {
+            error: error.message,
+            code: error.code,
+            stack: error.stack
+        });
+    });
+    
+    // Handle webhook errors (if using webhooks)
+    this.bot.on('webhook_error', (error) => {
+        logger.error('Telegram webhook error', {
+            error: error.message,
+            stack: error.stack
+        });
+    });
+    
+    logger.info('✅ Message handler configured with enhanced error handling');
+}
 
-      // ============ SINGLE MESSAGE HANDLER FOR ALL COMMANDS ============
-      this.bot.on('message', async (msg) => {
-          try {
-              // Only process text messages that start with /
-              if (!msg.text || !msg.text.startsWith('/')) return;
+sanitizeErrorMessage(message) {
+    if (!message) return 'Unknown error';
+    
+    // Remove sensitive information
+    let sanitized = String(message)
+        .replace(/\b[A-Za-z0-9]{32,}\b/g, '[REDACTED]') // Remove tokens/keys
+        .replace(/\/[\w\/.-]+/g, '[PATH]') // Remove file paths
+        .replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g, '[IP]') // Remove IPs
+        .substring(0, 200); // Limit length
+    
+    return sanitized;
+}
 
-              const userId = msg.from.id;
-              const chatId = msg.chat.id;
-              const text = msg.text.trim();
-              const [command, ...args] = text.split(' ');
 
-              logger.debug('Command received', { userId, command, args });
 
-              // Authorization check
-              if (!this.isAuthorized(userId)) {
-                  await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
-                  logger.warn('Unauthorized command attempt', { userId, command });
-                  return;
-              }
-              
-              // Route to appropriate handler
-              switch (command.toLowerCase()) {
-                  case '/start':
-                      await this.handleStart(userId, chatId);
-                      break;
-                  case '/stop':
-                      await this.handleStop(userId, chatId);
-                      break;
-                  case '/balance':
-                      await this.handleBalance(userId, chatId);
-                      break;
-                  case '/status':
-                      await this.handleStatus(userId, chatId);
-                      break;
-                  case '/performance':
-                      await this.handlePerformance(userId, chatId);
-                      break;
-                  case '/history':
-                      await this.handleHistory(userId, chatId);
-                      break;
-                  case '/stats':
-                      await this.handleStats(userId, chatId);
-                      break;
-                  case '/profits':
-                      await this.handleProfits(userId, chatId);
-                      break;
-                  case '/health':
-                      await this.handleHealth(userId, chatId);
-                      break;
-                  case '/anomalies':
-                      await this.handleAnomalies(userId, chatId);
-                      break;
-                  case '/portfolio':
-                      await this.handlePortfolio(userId, chatId);
-                      break;
-                  case '/backtest':
-                      const days = parseInt(args[0]) || 30;
-                      await this.handleBacktest(userId, chatId, days);
-                      break;
-                   case '/wallet':
-                    await this.handleWallet(userId, chatId);
-                    break;   
-                  case '/help':
-                      await this.handleHelp(userId, chatId);
-                      break;
-                  default:
-                      logger.debug('Unknown command', { command });
-              }
-
-          } catch (error) {
-              logger.error('Message handler error', { 
-                  error: error.message,
-                  stack: error.stack,
-                  text: msg.text 
-              });
-              
-              try {
-                  await this.sendMessage(msg.chat.id, 
-                      `❌ Error processing command: ${error.message}`, 
-                      { parse_mode: 'HTML' }
-                  );
-              } catch (sendErr) {
-                  logger.error('Failed to send error message', { error: sendErr.message });
-              }
-          }
-      });
-
-      logger.info('✅ Message handler configured');
-  }
-  
   async handleStart(userId, chatId) {
     const user = this.engine.getUserState(userId);
     
