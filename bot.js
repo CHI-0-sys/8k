@@ -108,18 +108,16 @@ const logger = winston.createLogger({
 // ============ CONFIGURATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BITQUERY_API_KEY = process.env.BITQUERY_API_KEY;
-const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS?.split(',') || [];
 
 // RPC Configuration
-const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 
-                     (process.env.HELIUS_API_KEY 
-                         ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` 
-                         : 'https://api.mainnet-beta.solana.com');
+const SOLANA_RPC_URL = process.env.PRIMARY_RPC_URL || 
+                       process.env.SOLANA_RPC_URL || 
+                       'https://api.mainnet-beta.solana.com';
 
 const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS || 
-  'https://rpc.ankr.com/solana,https://solana-api.projectserum.com')
+  'https://api.mainnet-beta.solana.com,https://rpc.ankr.com/solana')
   .split(',')
   .filter(url => url.trim());
   
