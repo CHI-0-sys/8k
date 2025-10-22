@@ -3056,29 +3056,41 @@ Use /help for commands
         this.logger.info('User activated bot successfully', { userId });
 
     } catch (error) {
+        // Safe error logging with optional chaining
         this.logger.error('Critical error in handleStart:', {
-            error: error.message,
-            stack: error.stack,
+            error: error?.message || String(error) || 'Unknown error',
+            errorType: error?.constructor?.name || 'Unknown',
+            stack: error?.stack || 'No stack trace',
             userId,
             chatId
         });
 
-        // Send user-friendly error message
-        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${error.message}\n\nPlease try again or contact support.`;
+        // Send user-friendly error message with safe access
+        const errorMessage = error?.message || error?.toString() || 'An unexpected error occurred';
+        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
         
         try {
             await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
         } catch (sendError) {
-            this.logger.error('Failed to send error message:', sendError);
+            this.logger.error('Failed to send error message:', {
+                error: sendError?.message || String(sendError)
+            });
             // Try without HTML
             try {
                 await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
             } catch (finalError) {
-                this.logger.error('Complete send failure:', finalError);
+                this.logger.error('Complete send failure:', {
+                    error: finalError?.message || String(finalError)
+                });
             }
         }
         
-        throw error; // Re-throw so outer handler can log it
+        // Only re-throw if error exists and is an Error object
+        if (error instanceof Error) {
+            throw error;
+        } else if (error) {
+            throw new Error(String(error));
+        }
     }
 }
 
