@@ -3056,17 +3056,20 @@ Use /help for commands
         this.logger.info('User activated bot successfully', { userId });
 
     } catch (error) {
-        // Safe error logging with optional chaining
+        // CRITICAL: Use optional chaining everywhere
+        const errorMessage = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+        const errorStack = error?.stack || 'No stack trace';
+        const errorType = error?.constructor?.name || typeof error;
+        
         this.logger.error('Critical error in handleStart:', {
-            error: error?.message || String(error) || 'Unknown error',
-            errorType: error?.constructor?.name || 'Unknown',
-            stack: error?.stack || 'No stack trace',
-            userId,
-            chatId
+            error: errorMessage,
+            errorType: errorType,
+            stack: errorStack,
+            userId: userId || 'unknown',
+            chatId: chatId || 'unknown'
         });
-
-        // Send user-friendly error message with safe access
-        const errorMessage = error?.message || error?.toString() || 'An unexpected error occurred';
+    
+        // Send user-friendly error message
         const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
         
         try {
@@ -3085,12 +3088,7 @@ Use /help for commands
             }
         }
         
-        // Only re-throw if error exists and is an Error object
-        if (error instanceof Error) {
-            throw error;
-        } else if (error) {
-            throw new Error(String(error));
-        }
+        return;
     }
 }
 
