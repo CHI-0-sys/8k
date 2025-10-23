@@ -2040,7 +2040,102 @@ async monitorPosition(userId) {
       }
   });
 }
+// Add to TradingEngine.findTradingOpportunity() - around line 1150
+async findTradingOpportunity(userId) {
+    try {
+        console.log('\n' + '='.repeat(60));
+        console.log('🔍 SCANNING FOR OPPORTUNITIES');
+        console.log('='.repeat(60));
+        
+        this.logger.info('=== Token Scan Start ===');
+        const candidates = await this.bitquery.getGraduatingTokens();
 
+        if (!candidates.length) {
+            console.log('❌ No candidates found');
+            this.logger.info('No candidates found');
+            return null;
+        }
+
+        console.log(`✅ Found ${candidates.length} graduating tokens`);
+        console.log('\nTop Candidates:');
+        candidates.slice(0, 5).forEach((token, i) => {
+            console.log(`  ${i+1}. ${token.symbol} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liquidity`);
+        });
+        console.log('');
+
+        this.logger.info('Analyzing candidates', { count: Math.min(candidates.length, MAX_CANDIDATES_TO_ANALYZE) });
+
+        const tokensToAnalyze = candidates.slice(0, MAX_CANDIDATES_TO_ANALYZE);
+
+        for (const token of tokensToAnalyze) {
+            console.log(`\n🔍 Analyzing: ${token.symbol}`);
+            console.log(`   Bonding: ${token.bondingProgress.toFixed(1)}%`);
+            console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
+            
+            this.logger.debug('Checking token', { symbol: token.symbol, bonding: token.bondingProgress.toFixed(1) });
+
+            // Volume check
+            console.log(`   Checking volume...`);
+            const volume = await this.bitquery.getVolumeHistory(token.address);
+            console.log(`   Recent: $${volume.recent.toFixed(0)}, Previous: $${volume.previous.toFixed(0)}`);
+            console.log(`   Volume Spike: ${volume.spike ? '✅ YES' : '❌ NO'}`);
+            
+            if (!volume.spike) {
+                console.log(`   ❌ Rejected: No volume spike`);
+                this.logger.debug('No volume spike', { symbol: token.symbol });
+                continue;
+            }
+
+            // Whale check
+            console.log(`   Checking for whale dumps...`);
+            const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
+            console.log(`   Whale Dump: ${whaleDump ? '❌ YES' : '✅ NO'}`);
+            
+            if (whaleDump) {
+                console.log(`   ❌ Rejected: Whale dump detected`);
+                this.logger.debug('Whale dump detected', { symbol: token.symbol });
+                continue;
+            }
+
+            // Technical analysis
+            if (ENABLE_TECHNICAL_ANALYSIS && this.technicalIndicators) {
+                console.log(`   Running technical analysis...`);
+                const analysis = this.technicalIndicators.analyzeToken(token.address);
+                if (analysis && analysis.score < 60) {
+                    console.log(`   ❌ Rejected: Technical score too low (${analysis.score})`);
+                    this.logger.debug('Technical score too low', { symbol: token.symbol, score: analysis.score });
+                    continue;
+                }
+                console.log(`   ✅ Technical score: ${analysis?.score || 'N/A'}`);
+            }
+
+            console.log('\n🎯 ✅ TRADE SIGNAL FOUND!');
+            console.log(`   Token: ${token.symbol}`);
+            console.log(`   Bonding: ${token.bondingProgress.toFixed(1)}%`);
+            console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
+            console.log(`   Volume Spike: ${(volume.recent / volume.previous).toFixed(2)}x`);
+            console.log('='.repeat(60) + '\n');
+
+            this.logger.info('🎯 SIGNAL FOUND', { symbol: token.symbol, bonding: token.bondingProgress.toFixed(1) });
+
+            return {
+                ...token,
+                volumeRecent: volume.recent,
+                volumePrevious: volume.previous,
+                volumeSpike: volume.previous > 0 ? (volume.recent / volume.previous) : Infinity
+            };
+        }
+
+        console.log('❌ No tokens passed all filters');
+        console.log('='.repeat(60) + '\n');
+        this.logger.info('No tokens passed filters');
+        return null;
+    } catch (err) {
+        console.error('❌ Scanner error:', err.message);
+        this.logger.error('Scanner error', { error: err.message });
+        return null;
+    }
+}
 async getCurrentPrice(tokenAddress) {
   try {
       const quote = await this.getJupiterQuote(tokenAddress, USDC_MINT, 1000000000, 300);
@@ -2741,6 +2836,10 @@ stripHtmlTags(text) {
                 case '/help':
                     handlerPromise = this.handleHelp(userId, chatId);
                     break;
+
+                case '/recent':
+                    handlerPromise = this.handleRecentTrades(userId, chatId);
+                    break;   
                     
                 default:
                     await this.sendMessage(chatId, 
@@ -3215,6 +3314,35 @@ async handleWallet(userId, chatId) {
     }
 }
 
+async handleRecent(userId, chatId) {
+    try {
+        // Get recent trades from database
+        const recentTrades = await this.database.getRecentTrades(userId, 20);
+        
+        if (!recentTrades || recentTrades.length === 0) {
+            await this.sendMessage(chatId, '📭 No recent trades found');
+            return;
+        }
+        
+        let message = '📊 <b>RECENT TRADES</b>\n\n';
+        
+        recentTrades.forEach((trade, i) => {
+            const emoji = trade.profit > 0 ? '✅' : '❌';
+            const date = new Date(trade.exit_time).toLocaleString();
+            
+            message += `${emoji} <b>${trade.symbol}</b>\n`;
+            message += `   Entry: $${trade.entry_price.toFixed(8)}\n`;
+            message += `   Exit: $${trade.exit_price.toFixed(8)}\n`;
+            message += `   P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profit_percent.toFixed(2)}%)\n`;
+            message += `   Time: ${date}\n\n`;
+        });
+        
+        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+    } catch (error) {
+        logger.error('Recent trades error:', error);
+        await this.sendMessage(chatId, '❌ Failed to fetch recent trades');
+    }
+}
 
 
   async handleStop(userId, chatId) {
@@ -3605,6 +3733,8 @@ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) *
 <b>🎮 Trading Controls:</b>
 /start - Activate trading
 /stop - Stop trading
+/recent - Recent trades 
+
 
 <b>💰 Wallet & Balance:</b>
 /wallet - View wallet address & balances
