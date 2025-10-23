@@ -2866,14 +2866,15 @@ sanitizeErrorMessage(message) {
 
 
 async handleStart(userId, chatId) {
-    let errorOccurred = null;
+    // Use global logger as fallback if this.logger is undefined
+    const log = this.logger || logger || console;
     
     try {
         // Step 1: Send acknowledgment
         try {
             await this.sendMessage(chatId, '⏳ Starting bot...');
         } catch (e) {
-            this.logger.error('Failed to send init message:', e?.message || String(e));
+            log.error('Failed to send init message:', e?.message || String(e));
         }
 
         // Step 2: Validate dependencies
@@ -2920,7 +2921,7 @@ async handleStart(userId, chatId) {
             };
             
         } catch (err) {
-            this.logger.error('Wallet balance fetch failed:', err?.message || String(err));
+            log.error('Wallet balance fetch failed:', err?.message || String(err));
             balances = {
                 sol: 0, wsol: 0, usdc: 0, trading: 0, totalSol: 0, allTokens: []
             };
@@ -2928,7 +2929,7 @@ async handleStart(userId, chatId) {
 
         const tradingBalance = Number(balances.trading) || 0;
         
-        this.logger.info('Wallet balances for start', {
+        log.info('Wallet balances for start', {
             sol: balances.sol,
             wsol: balances.wsol,
             usdc: balances.usdc,
@@ -2944,7 +2945,7 @@ async handleStart(userId, chatId) {
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
             ]);
         } catch (err) {
-            this.logger.error('Database query failed:', err?.message || String(err));
+            log.error('Database query failed:', err?.message || String(err));
             dbUser = null;
         }
 
@@ -2957,12 +2958,12 @@ async handleStart(userId, chatId) {
             
             try {
                 await this.database.createUser(userId.toString(), tradingBalance);
-                this.logger.info('New user created', { userId, balance: tradingBalance });
+                log.info('New user created', { userId, balance: tradingBalance });
             } catch (err) {
-                this.logger.error('Failed to create user:', err?.message || String(err));
+                log.error('Failed to create user:', err?.message || String(err));
             }
         } else {
-            this.logger.info('Existing user activated', { 
+            log.info('Existing user activated', { 
                 userId,
                 trackedBalance: user.currentBalance || 0,
                 walletBalance: tradingBalance
@@ -2975,7 +2976,7 @@ async handleStart(userId, chatId) {
         try {
             await this.engine.saveState();
         } catch (err) {
-            this.logger.error('Failed to save state:', err?.message || String(err));
+            log.error('Failed to save state:', err?.message || String(err));
         }
 
         // Step 8: Get strategy
@@ -2986,7 +2987,7 @@ async handleStart(userId, chatId) {
                 throw new Error('Invalid strategy');
             }
         } catch (err) {
-            this.logger.error('Failed to get strategy:', err?.message || String(err));
+            log.error('Failed to get strategy:', err?.message || String(err));
             strategy = { scalpMin: 0.05, scalpMax: 0.15, extendedTarget: 0.30 };
         }
 
@@ -3050,31 +3051,48 @@ Use /help for commands
         `.trim();
 
         await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-        this.logger.info('User activated bot successfully', { userId });
+        log.info('User activated bot successfully', { userId });
 
     } catch (error) {
-    const safeError = error || new Error('Unknown error occurred');
-    const errorMessage = safeError.message || String(safeError);
-    const errorStack = safeError.stack || 'No stack trace';
-    
-    // Safety check for logger
-    if (this.logger && typeof this.logger.error === 'function') {
-        this.logger.error('Critical error in handleStart:', {
-            error: errorMessage,
-            stack: errorStack,
-            userId: userId || 'unknown',
-            chatId: chatId || 'unknown'
-        });
-    } else {
-        // Fallback to console if logger not available
-        console.error('Critical error in handleStart:', {
-            error: errorMessage,
-            stack: errorStack,
-            userId: userId || 'unknown',
-            chatId: chatId || 'unknown'
-        });
+        const safeError = error || new Error('Unknown error occurred');
+        const errorMessage = safeError.message || String(safeError);
+        const errorStack = safeError.stack || 'No stack trace';
+        
+        // Use the same log variable for consistency
+        const log = this.logger || logger || console;
+        
+        if (log && typeof log.error === 'function') {
+            log.error('Critical error in handleStart:', {
+                error: errorMessage,
+                stack: errorStack,
+                userId: userId || 'unknown',
+                chatId: chatId || 'unknown'
+            });
+        } else {
+            console.error('Critical error in handleStart:', {
+                error: errorMessage,
+                stack: errorStack,
+                userId: userId || 'unknown',
+                chatId: chatId || 'unknown'
+            });
+        }
+
+        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
+        
+        try {
+            await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
+        } catch (sendError) {
+            try {
+                await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
+            } catch (finalError) {
+                if (log && typeof log.error === 'function') {
+                    log.error('Complete send failure');
+                } else {
+                    console.error('Complete send failure');
+                }
+            }
+        }
     }
-}
 }
 
 async handleWallet(userId, chatId) {
