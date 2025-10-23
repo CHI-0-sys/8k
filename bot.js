@@ -3053,30 +3053,30 @@ Use /help for commands
         this.logger.info('User activated bot successfully', { userId });
 
     } catch (error) {
-        const safeError = error || new Error('Unknown error occurred');
-        const errorMessage = safeError.message || String(safeError);
-        const errorStack = safeError.stack || 'No stack trace';
-        
+    const safeError = error || new Error('Unknown error occurred');
+    const errorMessage = safeError.message || String(safeError);
+    const errorStack = safeError.stack || 'No stack trace';
+    
+    // Safety check for logger
+    if (this.logger && typeof this.logger.error === 'function') {
         this.logger.error('Critical error in handleStart:', {
             error: errorMessage,
             stack: errorStack,
             userId: userId || 'unknown',
             chatId: chatId || 'unknown'
         });
-
-        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
-        
-        try {
-            await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
-        } catch (sendError) {
-            try {
-                await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
-            } catch (finalError) {
-                this.logger.error('Complete send failure');
-            }
-        }
+    } else {
+        // Fallback to console if logger not available
+        console.error('Critical error in handleStart:', {
+            error: errorMessage,
+            stack: errorStack,
+            userId: userId || 'unknown',
+            chatId: chatId || 'unknown'
+        });
     }
 }
+}
+
 async handleWallet(userId, chatId) {
     try {
         // Get real-time wallet balance
