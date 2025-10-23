@@ -2866,69 +2866,105 @@ sanitizeErrorMessage(message) {
 
 
 async handleStart(userId, chatId) {
+    // Wrap EVERYTHING in try-catch
     try {
-        // Send immediate acknowledgment
-        await this.sendMessage(chatId, '⏳ Starting bot...').catch(e => 
-            this.logger.error('Failed to send init message:', e)
-        );
+        // Step 1: Send acknowledgment
+        try {
+            await this.sendMessage(chatId, '⏳ Starting bot...');
+        } catch (e) {
+            this.logger.error('Failed to send init message:', e?.message);
+        }
 
-        // Validate dependencies
+        // Step 2: Validate dependencies
         if (!this.engine) {
-            throw new Error('Trading engine not initialized');
+            await this.sendMessage(chatId, '❌ Trading engine not initialized');
+            return;
         }
         if (!this.wallet || !this.wallet.publicKey) {
-            throw new Error('Wallet not connected');
+            await this.sendMessage(chatId, '❌ Wallet not connected');
+            return;
         }
         if (!this.database) {
-            throw new Error('Database not initialized');
+            await this.sendMessage(chatId, '❌ Database not initialized');
+            return;
         }
 
-        // Get user state
-        const user = this.engine.getUserState(userId);
-        if (!user) {
-            throw new Error('Failed to get user state');
+        // Step 3: Get user state
+        let user;
+        try {
+            user = this.engine.getUserState(userId);
+            if (!user) {
+                throw new Error('User state is null');
+            }
+        } catch (error) {
+            await this.sendMessage(chatId, '❌ Failed to get user state');
+            return;
         }
         
-        // Get real-time wallet balance with timeout
+        // Step 4: Get wallet balance with full error handling
         let balances;
         try {
-            balances = await Promise.race([
-                this.engine.getWalletBalance(),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Wallet balance timeout')), 10000)
-                )
-            ]);
+            const balancePromise = this.engine.getWalletBalance();
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), 10000)
+            );
+            
+            balances = await Promise.race([balancePromise, timeoutPromise]);
+            
+            // Validate structure
+            if (!balances || typeof balances !== 'object') {
+                throw new Error('Invalid balance structure');
+            }
+            
+            // Ensure all properties exist with defaults
+            balances = {
+                sol: Number(balances.sol) || 0,
+                wsol: Number(balances.wsol) || 0,
+                usdc: Number(balances.usdc) || 0,
+                trading: Number(balances.trading) || 0,
+                totalSol: Number(balances.totalSol) || 0,
+                allTokens: Array.isArray(balances.allTokens) ? balances.allTokens : []
+            };
+            
         } catch (error) {
-            this.logger.error('Failed to get wallet balance:', error);
-            throw new Error('Unable to fetch wallet balance. Please try again.');
+            this.logger.error('Wallet balance fetch failed:', error?.message);
+            // Use zero balances as fallback
+            balances = {
+                sol: 0,
+                wsol: 0,
+                usdc: 0,
+                trading: 0,
+                totalSol: 0,
+                allTokens: []
+            };
         }
 
-        const tradingBalance = balances.trading || 0;
+        const tradingBalance = Number(balances.trading) || 0;
         
         this.logger.info('Wallet balances for start', {
             sol: balances.sol,
             wsol: balances.wsol,
             usdc: balances.usdc,
             trading: balances.trading,
-            allTokens: balances.allTokens?.length || 0
+            allTokens: balances.allTokens.length
         });
         
-        // Load user from database with timeout
-        let dbUser;
+        // Step 5: Load user from database
+        let dbUser = null;
         try {
-            dbUser = await Promise.race([
-                this.database.getUser(userId.toString()),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Database timeout')), 5000)
-                )
-            ]);
+            const dbPromise = this.database.getUser(userId.toString());
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), 5000)
+            );
+            dbUser = await Promise.race([dbPromise, timeoutPromise]);
         } catch (error) {
-            this.logger.error('Database query failed:', error);
-            dbUser = null; // Treat as new user
+            this.logger.error('Database query failed:', error?.message);
+            dbUser = null;
         }
 
+        // Step 6: Initialize or update user
         if (!dbUser) {
-            // New user - initialize with real wallet balance
+            // New user
             user.startingBalance = tradingBalance;
             user.currentBalance = tradingBalance;
             user.dailyStartBalance = tradingBalance;
@@ -2936,42 +2972,38 @@ async handleStart(userId, chatId) {
             
             try {
                 await this.database.createUser(userId.toString(), tradingBalance);
-                this.logger.info('New user created with wallet balance', { 
-                    userId, 
-                    balance: tradingBalance.toFixed(2)
-                });
+                this.logger.info('New user created', { userId, balance: tradingBalance });
             } catch (error) {
-                this.logger.error('Failed to create user in database:', error);
-                // Continue anyway - we have in-memory state
+                this.logger.error('Failed to create user:', error?.message);
             }
         } else {
+            // Existing user
             this.logger.info('Existing user activated', { 
                 userId,
-                trackedBalance: user.currentBalance?.toFixed(2) || '0.00',
-                walletBalance: tradingBalance.toFixed(2)
+                trackedBalance: user.currentBalance || 0,
+                walletBalance: tradingBalance
             });
         }
 
         user.isActive = true;
 
-        // Save state
+        // Step 7: Save state
         try {
             await this.engine.saveState();
         } catch (error) {
-            this.logger.error('Failed to save state:', error);
-            // Non-critical, continue
+            this.logger.error('Failed to save state:', error?.message);
         }
 
-        // Get strategy
+        // Step 8: Get strategy with fallback
         let strategy;
         try {
             strategy = this.engine.getActiveStrategy();
-            if (!strategy) {
-                throw new Error('No active strategy');
+            if (!strategy || typeof strategy !== 'object') {
+                throw new Error('Invalid strategy');
             }
         } catch (error) {
-            this.logger.error('Failed to get strategy:', error);
-            // Use default values
+            this.logger.error('Failed to get strategy:', error?.message);
+            // Use default strategy
             strategy = {
                 scalpMin: 0.05,
                 scalpMax: 0.15,
@@ -2979,9 +3011,10 @@ async handleStart(userId, chatId) {
             };
         }
 
+        // Step 9: Build message
         const modeText = ENABLE_PAPER_TRADING ? '📝 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
         
-        // Build balance display
+        // Build balance display safely
         const balanceLines = [];
         
         if (balances.sol > 0.001) {
@@ -2994,8 +3027,9 @@ async handleStart(userId, chatId) {
             balanceLines.push(`USDC: ${balances.usdc.toFixed(2)}`);
         }
         
-        // Show other tokens if any
-        const otherTokens = (balances.allTokens || []).filter(t => 
+        // Other tokens
+        const otherTokens = balances.allTokens.filter(t => 
+            t && t.symbol && 
             t.symbol !== 'USDC' && 
             t.symbol !== 'WSOL' && 
             t.symbol !== 'SOL'
@@ -3003,7 +3037,9 @@ async handleStart(userId, chatId) {
         
         if (otherTokens.length > 0) {
             otherTokens.slice(0, 5).forEach(token => {
-                balanceLines.push(`${token.symbol}: ${token.balance.toFixed(4)}`);
+                if (token && token.symbol && token.balance) {
+                    balanceLines.push(`${token.symbol}: ${Number(token.balance).toFixed(4)}`);
+                }
             });
             
             if (otherTokens.length > 5) {
@@ -3018,7 +3054,7 @@ async handleStart(userId, chatId) {
         const walletAddress = this.wallet.publicKey.toString();
         const shortAddress = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
 
-        // Build and send message
+        // Build final message
         const message = `
 🤖 <b>AUTO-TRADING ACTIVATED</b>
 ${modeText}
@@ -3051,44 +3087,35 @@ Scan Interval: ${SCAN_INTERVAL_MINUTES}min
 Use /help for commands
         `.trim();
 
+        // Step 10: Send final message
         await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
         
         this.logger.info('User activated bot successfully', { userId });
 
     } catch (error) {
-        // CRITICAL: Use optional chaining everywhere
-        const errorMessage = error?.message || error?.toString?.() || String(error) || 'Unknown error';
-        const errorStack = error?.stack || 'No stack trace';
-        const errorType = error?.constructor?.name || typeof error;
+        // Final catch-all error handler
+        const errorMessage = (error && error.message) ? error.message : String(error || 'Unknown error');
+        const errorStack = (error && error.stack) ? error.stack : 'No stack trace';
         
         this.logger.error('Critical error in handleStart:', {
             error: errorMessage,
-            errorType: errorType,
             stack: errorStack,
             userId: userId || 'unknown',
             chatId: chatId || 'unknown'
         });
-    
-        // Send user-friendly error message
+
+        // Send user-friendly error
         const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
         
         try {
             await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
         } catch (sendError) {
-            this.logger.error('Failed to send error message:', {
-                error: sendError?.message || String(sendError)
-            });
-            // Try without HTML
             try {
                 await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
             } catch (finalError) {
-                this.logger.error('Complete send failure:', {
-                    error: finalError?.message || String(finalError)
-                });
+                this.logger.error('Complete send failure');
             }
         }
-        
-        return;
     }
 }
 
