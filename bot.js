@@ -628,89 +628,205 @@ class BitqueryClient {
   }
 
   async getGraduatingTokens() {
-      if (this.cache && this.cache.has('graduating_tokens')) {
-          const cached = this.cache.get('graduating_tokens');
-          if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
-              this.logger.debug('Using cached graduating tokens');
-              return cached.data;
-          }
-      }
+    console.log('\n' + '='.repeat(60));
+    console.log('📡 BITQUERY API CALL - getGraduatingTokens()');
+    console.log('='.repeat(60));
+    
+    // Check cache first
+    if (this.cache && this.cache.has('graduating_tokens')) {
+        const cached = this.cache.get('graduating_tokens');
+        const cacheAge = (Date.now() - cached.timestamp) / 1000;
+        
+        if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
+            console.log('✅ Using cached data');
+            console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
+            console.log(`   Cached tokens: ${cached.data.length}`);
+            this.logger.debug('Using cached graduating tokens');
+            return cached.data;
+        } else {
+            console.log('❌ Cache expired');
+            console.log(`   Cache age: ${cacheAge.toFixed(0)}s (max: ${CACHE_DURATION_MINUTES * 60}s)`);
+        }
+    }
 
-      const query = `{
-          Solana {
-              DEXPools(
-                  limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
-                  limit: {count: 50}
-                  orderBy: {descending: Pool_Quote_PostAmountInUSD}
-                  where: {
-                      Pool: {
-                          Base: {PostAmount: {gt: "206900000", lt: "980000000"}}, 
-                          Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}, 
-                          Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
-                      }, 
-                      Transaction: {Result: {Success: true}}
-                  }
-              ) {
-                  Bonding_Curve_Progress_precentage: calculate(expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
-                  Pool {
-                      Market {
-                          BaseCurrency {
-                              MintAddress
-                              Name
-                              Symbol
-                          }
-                      }
-                      Quote {
-                          PostAmountInUSD
-                          PriceInUSD
-                      }
-                  }
-              }
-          }
-      }`;
+    console.log('\n🌐 Making fresh BitQuery API call...');
+    console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
+    console.log('   Endpoint:', this.baseURL);
 
-      this.estimatedPoints += 150;
-      const data = await this.query(query);
-      if (!data?.Solana?.DEXPools) {
-          return [];
-      }
+    const query = `{
+        Solana {
+            DEXPools(
+                limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
+                limit: {count: 50}
+                orderBy: {descending: Pool_Quote_PostAmountInUSD}
+                where: {
+                    Pool: {
+                        Base: {PostAmount: {gt: "206900000", lt: "980000000"}}, 
+                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}, 
+                        Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
+                    }, 
+                    Transaction: {Result: {Success: true}}
+                }
+            ) {
+                Bonding_Curve_Progress_precentage: calculate(expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
+                Pool {
+                    Market {
+                        BaseCurrency {
+                            MintAddress
+                            Name
+                            Symbol
+                        }
+                    }
+                    Quote {
+                        PostAmountInUSD
+                        PriceInUSD
+                    }
+                }
+            }
+        }
+    }`;
 
-      const allTokens = data.Solana.DEXPools.map(pool => {
-          const progress = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
-          return {
-              address: pool.Pool.Market.BaseCurrency.MintAddress,
-              symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
-              name: pool.Pool.Market.BaseCurrency.Name,
-              bondingProgress: progress,
-              liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
-              priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
-              lastUpdate: Date.now(),
-              isHot: progress >= 96
-          };
-      });
+    console.log('   Query parameters:');
+    console.log('   - Limit: 50 tokens');
+    console.log('   - Program: Pump.fun');
+    console.log('   - Bonding range: 20-98% (raw query)');
 
-      const filtered = allTokens.filter(t => 
-          t.bondingProgress >= MIN_BONDING_PROGRESS && 
-          t.bondingProgress <= MAX_BONDING_PROGRESS &&
-          t.liquidityUSD >= MIN_LIQUIDITY_USD
-      );
+    this.estimatedPoints += 150;
+    
+    try {
+        console.log('\n⏳ Sending request...');
+        const startTime = Date.now();
+        
+        const data = await this.query(query);
+        
+        const duration = Date.now() - startTime;
+        console.log(`✅ Response received in ${duration}ms`);
+        
+        if (!data) {
+            console.log('❌ NULL response from BitQuery');
+            console.log('   This usually means:');
+            console.log('   - API key invalid/expired');
+            console.log('   - Rate limit hit');
+            console.log('   - Query syntax error');
+            return [];
+        }
+        
+        if (!data.Solana) {
+            console.log('❌ No Solana data in response');
+            console.log('   Response structure:', JSON.stringify(data, null, 2));
+            return [];
+        }
+        
+        if (!data.Solana.DEXPools) {
+            console.log('❌ No DEXPools in Solana data');
+            console.log('   Solana data:', JSON.stringify(data.Solana, null, 2));
+            return [];
+        }
 
-      if (PRIORITIZE_HOT_TOKENS) {
-          filtered.sort((a, b) => {
-              if (a.isHot && !b.isHot) return -1;
-              if (!a.isHot && b.isHot) return 1;
-              return b.liquidityUSD - a.liquidityUSD;
-          });
-      }
+        const rawTokenCount = data.Solana.DEXPools.length;
+        console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
 
-      this.logger.info('Graduating tokens found', { count: filtered.length });
+        if (rawTokenCount === 0) {
+            console.log('⚠️  No tokens returned by BitQuery');
+            console.log('   Possible reasons:');
+            console.log('   - No tokens graduating right now');
+            console.log('   - Pump.fun is slow today');
+            console.log('   - Query filters too strict');
+            console.log('='.repeat(60) + '\n');
+            return [];
+        }
 
-      if (this.cache) {
-          this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
-      }
+        // Process tokens
+        const allTokens = data.Solana.DEXPools.map(pool => {
+            const progress = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
+            return {
+                address: pool.Pool.Market.BaseCurrency.MintAddress,
+                symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
+                name: pool.Pool.Market.BaseCurrency.Name,
+                bondingProgress: progress,
+                liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
+                priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
+                lastUpdate: Date.now(),
+                isHot: progress >= 96
+            };
+        });
 
-      return filtered;
-  }
+        console.log('\n📋 Raw tokens (before filtering):');
+        allTokens.slice(0, 10).forEach((token, i) => {
+            console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0).padStart(6)} liq`);
+        });
+        if (allTokens.length > 10) {
+            console.log(`   ... and ${allTokens.length - 10} more`);
+        }
+
+        // Apply filters
+        console.log('\n🔍 Applying filters:');
+        console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
+        console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
+        
+        const filtered = allTokens.filter(t => {
+            const passBoinding = t.bondingProgress >= MIN_BONDING_PROGRESS && t.bondingProgress <= MAX_BONDING_PROGRESS;
+            const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
+            
+            if (!passBoinding) {
+                console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
+            } else if (!passLiquidity) {
+                console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
+            } else {
+                console.log(`   ✅ ${t.symbol} - PASSED initial filters`);
+            }
+            
+            return passBoinding && passLiquidity;
+        });
+
+        console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
+
+        if (filtered.length === 0) {
+            console.log('\n⚠️  NO TOKENS PASSED FILTERS');
+            console.log('   Reasons:');
+            console.log(`   - All tokens outside ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding range`);
+            console.log(`   - All tokens below $${MIN_LIQUIDITY_USD} liquidity`);
+            console.log('\n💡 Consider adjusting filters if this persists');
+        }
+
+        // Sort if enabled
+        if (PRIORITIZE_HOT_TOKENS) {
+            filtered.sort((a, b) => {
+                if (a.isHot && !b.isHot) return -1;
+                if (!a.isHot && b.isHot) return 1;
+                return b.liquidityUSD - a.liquidityUSD;
+            });
+            console.log('   Sorted by: Hot tokens first, then liquidity');
+        }
+
+        this.logger.info('Graduating tokens found', { 
+            raw: rawTokenCount,
+            filtered: filtered.length 
+        });
+
+        // Cache results
+        if (this.cache) {
+            this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
+            console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
+        }
+
+        console.log('='.repeat(60) + '\n');
+        return filtered;
+        
+    } catch (error) {
+        console.log('\n❌ BitQuery API ERROR');
+        console.log('   Error:', error.message);
+        console.log('   Stack:', error.stack);
+        console.log('='.repeat(60) + '\n');
+        
+        this.logger.error('BitQuery API error', { 
+            error: error.message,
+            stack: error.stack 
+        });
+        
+        return [];
+    }
+}
 
   async getVolumeHistory(tokenAddress) {
       // Similar implementation as before but with logging
@@ -2315,6 +2431,297 @@ getDetailedReport() {
           nextReview: new Date(this.performanceTracker.metrics.lastAdjustment + (AUTO_ADJUST_INTERVAL * 24 * 60 * 60 * 1000)).toISOString()
       }
   };
+}
+
+async sendScanNotification(userId, scanData) {
+    const { tokensFound, tokensAnalyzed, signalFound, signal } = scanData;
+    
+    if (signalFound) {
+        // Only notify when signal found (reduce noise)
+        await this.bot.sendMessage(userId, `
+🎯 <b>TRADING SIGNAL DETECTED</b>
+
+<b>Token:</b> ${signal.symbol}
+<b>Contract:</b> <code>${signal.address.substring(0, 8)}...${signal.address.slice(-6)}</code>
+
+📊 <b>Market Metrics</b>
+├ Bonding Progress: ${signal.bondingProgress.toFixed(1)}%
+├ Liquidity: $${this.formatNumber(signal.liquidityUSD)}
+├ Volume Spike: ${signal.volumeSpike.toFixed(2)}x
+└ Price: $${signal.priceUSD.toExponential(2)}
+
+⏱️ <b>Analysis</b>
+└ Scanned ${tokensFound} tokens, analyzed ${tokensAnalyzed}
+
+<i>Executing trade in 5 seconds...</i>
+        `.trim(), { parse_mode: 'HTML' });
+    }
+}
+
+
+
+formatBuyMessage(pos, token, user) {
+    const solscanUrl = `https://solscan.io/tx/${pos.txSignature}`;
+    const birdseyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
+    
+    return `
+✅ <b>POSITION OPENED</b>
+
+<b>${pos.symbol}</b>
+<code>${pos.tokenAddress.substring(0, 8)}...${pos.tokenAddress.slice(-6)}</code>
+
+💰 <b>Trade Details</b>
+├ Entry Price: $${pos.entryPrice.toFixed(8)}
+├ Position Size: $${pos.investedUSDC.toFixed(2)}
+├ Tokens Acquired: ${this.formatNumber(pos.tokensOwned, 2)}
+└ Mode: ${pos.scalpMode ? 'Scalp (Quick Exit)' : 'Extended Hold'}
+
+🎯 <b>Targets</b>
+├ Take Profit: $${pos.targetPrice.toFixed(8)} (+${((pos.targetPrice/pos.entryPrice - 1) * 100).toFixed(1)}%)
+└ Stop Loss: $${pos.stopLossPrice.toFixed(8)} (${((pos.stopLossPrice/pos.entryPrice - 1) * 100).toFixed(1)}%)
+
+📊 <b>Market Context</b>
+├ Bonding: ${token.bondingProgress.toFixed(1)}%
+├ Liquidity: $${this.formatNumber(token.liquidityUSD)}
+└ Volume Spike: ${token.volumeSpike?.toFixed(2) || 'N/A'}x
+
+💼 <b>Portfolio</b>
+├ Available: $${user.currentBalance.toFixed(2)}
+├ In Position: $${pos.investedUSDC.toFixed(2)}
+└ Positions: ${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}
+
+🔗 <a href="${solscanUrl}">View TX</a> | <a href="${birdseyeUrl}">Chart</a>
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim();
+}
+
+async sendPositionUpdate(userId, position, currentPrice, priceChange) {
+    // Only send if change is significant (>3% move or approaching targets)
+    const isSignificant = Math.abs(priceChange) > 3 || 
+                         currentPrice >= position.targetPrice * 0.95 ||
+                         currentPrice <= position.stopLossPrice * 1.05;
+    
+    if (!isSignificant) return;
+    
+    const emoji = priceChange > 0 ? '📈' : '📉';
+    const unrealizedPnL = (position.tokensOwned * currentPrice) - position.investedUSDC;
+    const unrealizedPct = (unrealizedPnL / position.investedUSDC) * 100;
+    const holdTime = ((Date.now() - position.entryTime) / 60000).toFixed(0);
+    
+    const targetDistance = ((position.targetPrice / currentPrice - 1) * 100).toFixed(1);
+    const stopDistance = ((currentPrice / position.stopLossPrice - 1) * 100).toFixed(1);
+    
+    await this.bot.sendMessage(userId, `
+${emoji} <b>POSITION UPDATE</b>
+
+<b>${position.symbol}</b>
+└ ${priceChange > 0 ? '📈' : '📉'} ${priceChange > 0 ? '+' : ''}${priceChange.toFixed(2)}%
+
+💵 <b>Current Status</b>
+├ Entry: $${position.entryPrice.toFixed(8)}
+├ Current: $${currentPrice.toFixed(8)}
+├ Unrealized P&L: ${unrealizedPnL > 0 ? '+' : ''}$${unrealizedPnL.toFixed(2)} (${unrealizedPct > 0 ? '+' : ''}${unrealizedPct.toFixed(1)}%)
+└ Hold Time: ${holdTime}m
+
+🎯 <b>Distance to Targets</b>
+├ Target: ${targetDistance > 0 ? '↑' : '↓'} ${Math.abs(parseFloat(targetDistance))}%
+└ Stop: ${stopDistance > 0 ? '↑' : '↓'} ${Math.abs(parseFloat(stopDistance))}%
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim(), { 
+        parse_mode: 'HTML',
+        disable_web_page_preview: true 
+    });
+}
+
+formatSellMessage(trade, user) {
+    const emoji = trade.profit > 0 ? '✅' : '⚠️';
+    const color = trade.profit > 0 ? '🟢' : '🔴';
+    const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+    
+    const reasonEmojis = {
+        'scalp_profit': '⚡ Quick Profit',
+        'extended_profit': '🎯 Target Hit',
+        'stop_loss': '🛡️ Stop Loss'
+    };
+    
+    const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
+    
+    return `
+${emoji} <b>POSITION CLOSED</b> ${color}
+
+<b>${trade.symbol}</b>
+└ ${reason}
+
+💰 <b>Trade Summary</b>
+├ Entry: $${trade.entryPrice.toFixed(8)}
+├ Exit: $${trade.exitPrice.toFixed(8)}
+├ Change: ${((trade.exitPrice/trade.entryPrice - 1) * 100).toFixed(2)}%
+└ Hold Time: ${trade.holdTimeMinutes}m
+
+📊 <b>Financial Result</b>
+├ Invested: $${trade.investedUSDC.toFixed(2)}
+├ Received: $${trade.usdcReceived.toFixed(2)}
+├ Net P&L: ${trade.profit > 0 ? '+' : ''}$${trade.profit.toFixed(2)}
+└ Return: ${trade.profit > 0 ? '+' : ''}${trade.profitPercent.toFixed(2)}%
+
+💼 <b>Portfolio Update</b>
+├ Balance: $${user.currentBalance.toFixed(2)}
+├ Daily P&L: ${user.dailyProfitPercent > 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+├ Total Trades: ${user.totalTrades}
+└ Win Rate: ${((user.successfulTrades / user.totalTrades) * 100).toFixed(1)}%
+
+🔗 <a href="${solscanUrl}">View TX</a>
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim();
+}
+
+async sendDailySummary(userId) {
+    const user = this.getUserState(userId);
+    const todayTrades = user.tradeHistory.filter(t => 
+        t.exitTime > user.dailyResetAt
+    );
+    
+    if (todayTrades.length === 0) return; // No trades today
+    
+    const wins = todayTrades.filter(t => t.profit > 0).length;
+    const losses = todayTrades.length - wins;
+    const totalProfit = todayTrades.reduce((sum, t) => sum + t.profit, 0);
+    const bestTrade = todayTrades.reduce((best, t) => 
+        t.profitPercent > best.profitPercent ? t : best
+    );
+    const worstTrade = todayTrades.reduce((worst, t) => 
+        t.profitPercent < worst.profitPercent ? t : worst
+    );
+    
+    await this.bot.sendMessage(userId, `
+📊 <b>DAILY TRADING SUMMARY</b>
+
+<b>Performance</b>
+├ Total Trades: ${todayTrades.length}
+├ Wins: ${wins} | Losses: ${losses}
+├ Win Rate: ${((wins / todayTrades.length) * 100).toFixed(1)}%
+└ Net P&L: ${totalProfit > 0 ? '+' : ''}$${totalProfit.toFixed(2)} (${user.dailyProfitPercent > 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%)
+
+📈 <b>Best Trade</b>
+└ ${bestTrade.symbol}: ${bestTrade.profitPercent > 0 ? '+' : ''}${bestTrade.profitPercent.toFixed(2)}%
+
+📉 <b>Worst Trade</b>
+└ ${worstTrade.symbol}: ${worstTrade.profitPercent.toFixed(2)}%
+
+💰 <b>Account</b>
+├ Starting: $${user.dailyStartBalance.toFixed(2)}
+├ Current: $${user.currentBalance.toFixed(2)}
+├ Change: ${user.dailyProfitPercent > 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+└ Day ${user.currentDay} of 30
+
+${user.dailyProfitPercent >= DAILY_PROFIT_TARGET * 100 ? '🎯 <b>Daily Target Achieved!</b>' : ''}
+${user.dailyProfitPercent <= -DAILY_STOP_LOSS * 100 ? '🛑 <b>Daily Stop Loss Hit</b>' : ''}
+
+<i>${new Date().toLocaleDateString()} UTC</i>
+    `.trim(), { parse_mode: 'HTML' });
+}
+
+async sendScanSummary(userId, stats) {
+    // Only send if user hasn't been notified in 6+ hours
+    const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
+    if (this.lastNotification && this.lastNotification > sixHoursAgo) return;
+    
+    await this.bot.sendMessage(userId, `
+🔍 <b>SCANNING STATUS</b>
+
+<b>Activity (Last 6 Hours)</b>
+├ Scans Completed: ${stats.scansCompleted}
+├ Tokens Analyzed: ${stats.tokensAnalyzed}
+├ Signals Found: ${stats.signalsFound}
+└ Trades Executed: ${stats.tradesExecuted}
+
+📊 <b>Market Conditions</b>
+└ ${stats.signalsFound === 0 ? 'No qualifying opportunities detected' : 'Opportunities being monitored'}
+
+💡 <b>Bot Status</b>
+└ ✅ Active and scanning every ${SCAN_INTERVAL_MINUTES}m
+
+<i>You'll be notified when signals are detected</i>
+    `.trim(), { parse_mode: 'HTML' });
+    
+    this.lastNotification = Date.now();
+} 
+
+async sendCriticalError(userId, error, context) {
+    await this.bot.sendMessage(userId, `
+⚠️ <b>ALERT: ACTION REQUIRED</b>
+
+<b>Issue:</b> ${error.message}
+<b>Context:</b> ${context}
+
+<b>Impact:</b>
+└ Trading temporarily paused
+
+<b>Recommended Actions:</b>
+${this.getErrorRecommendations(error)}
+
+🔧 Use /status to check bot health
+⚠️ Use /stop to halt trading
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim(), { parse_mode: 'HTML' });
+} 
+
+
+getErrorRecommendations(error) {
+    if (error.message.includes('balance')) {
+        return '└ Check wallet balance and add funds';
+    } else if (error.message.includes('RPC') || error.message.includes('connection')) {
+        return '└ RPC connection issue - automatic retry in progress';
+    } else if (error.message.includes('slippage')) {
+        return '└ High slippage detected - waiting for better conditions';
+    } else {
+        return '└ Check /status and contact support if persists';
+    }
+} 
+
+formatNumber(num, decimals = 0) {
+    if (num >= 1000000) {
+        return (num / 1000000).toFixed(1) + 'M';
+    } else if (num >= 1000) {
+        return (num / 1000).toFixed(1) + 'K';
+    } else {
+        return num.toFixed(decimals);
+    }
+}
+
+initializeNotificationSettings(user) {
+    user.notifications = {
+        scanResults: false,        
+        positionUpdates: true,     
+        tradeExecutions: true,     
+        dailySummary: true,        
+        criticalErrors: true       
+    };
+}
+
+
+shouldSendNotification(type, userId) {
+    const lastSent = this.lastNotificationTime.get(`${userId}-${type}`) || 0;
+    const now = Date.now();
+    
+    const throttleLimits = {
+        positionUpdate: 5 * 60 * 1000,    
+        scanSummary: 6 * 60 * 60 * 1000,  
+        error: 15 * 60 * 1000             
+    };
+    
+    const limit = throttleLimits[type] || 0;
+    
+    if (now - lastSent < limit) {
+        return false;
+    }
+    
+    this.lastNotificationTime.set(`${userId}-${type}`, now);
+    return true;
 }
 
 formatBuyMessage(pos, token, user) {
