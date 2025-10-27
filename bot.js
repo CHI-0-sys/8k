@@ -735,6 +735,7 @@ async testBitQueryConnection() {
     console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
     console.log('   Endpoint:', this.baseURL);
 
+    // CORRECTED QUERY - matches your working query
     const query = `{
         Solana {
             DEXPools(
@@ -743,43 +744,52 @@ async testBitQueryConnection() {
                 orderBy: {descending: Pool_Quote_PostAmountInUSD}
                 where: {
                     Pool: {
-                        # WIDER RANGE to see ANY graduating tokens (20-100%)
-                        Base: {PostAmount: {gt: "206900000"}}, 
-                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}, 
+                        Base: {PostAmount: {gt: "206900000", lt: "980000000"}},
+                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}},
                         Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
-                    }, 
+                    },
                     Transaction: {Result: {Success: true}}
                 }
             ) {
-                # Calculate ACTUAL bonding progress (0-100%)
                 Bonding_Curve_Progress_precentage: calculate(
-                    expression: "((Pool_Base_Balance - 206900000) * 100) / 793100000"
+                    expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)"
                 )
                 Pool {
-                    Base {
-                        Balance
-                    }
                     Market {
                         BaseCurrency {
                             MintAddress
                             Name
                             Symbol
                         }
+                        MarketAddress
+                        QuoteCurrency {
+                            MintAddress
+                            Name
+                            Symbol
+                        }
+                    }
+                    Dex {
+                        ProtocolName
+                        ProtocolFamily
+                    }
+                    Base {
+                        Balance: PostAmount
                     }
                     Quote {
-                        PostAmountInUSD
+                        PostAmount
                         PriceInUSD
+                        PostAmountInUSD
                     }
                 }
             }
         }
     }`;
 
-
     console.log('   Query parameters:');
     console.log('   - Limit: 50 tokens');
     console.log('   - Program: Pump.fun');
-    console.log('   - Bonding range: 20-98% (raw query)');
+    console.log('   - Bonding formula: 100 - progress (inverted)');
+    console.log('   - Range: All graduating tokens');
 
     this.estimatedPoints += 150;
     
@@ -826,18 +836,24 @@ async testBitQueryConnection() {
             return [];
         }
 
-        // Process tokens
+        // Process tokens - NOTE: The percentage is INVERTED (100 = fully bonded)
         const allTokens = data.Solana.DEXPools.map(pool => {
-            const progress = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
+            const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
+            const bondingProgress = 100 - bondingRemaining; // Convert to progress (0-100)
+            
             return {
                 address: pool.Pool.Market.BaseCurrency.MintAddress,
                 symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
                 name: pool.Pool.Market.BaseCurrency.Name,
-                bondingProgress: progress,
+                bondingProgress: bondingProgress,  // Now correct: 0-100%
+                bondingRemaining: bondingRemaining, // 100-0% (what BitQuery returns)
                 liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
                 priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
+                baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
+                marketAddress: pool.Pool.Market.MarketAddress,
+                protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
                 lastUpdate: Date.now(),
-                isHot: progress >= 96
+                isHot: bondingProgress >= 96  // 96%+ bonding progress
             };
         });
 
@@ -849,16 +865,17 @@ async testBitQueryConnection() {
             console.log(`   ... and ${allTokens.length - 10} more`);
         }
 
-        // Apply filters
+        // Apply filters - now using CORRECT bonding progress
         console.log('\n🔍 Applying filters:');
         console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
         console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
         
         const filtered = allTokens.filter(t => {
-            const passBoinding = t.bondingProgress >= MIN_BONDING_PROGRESS && t.bondingProgress <= MAX_BONDING_PROGRESS;
+            const passBonding = t.bondingProgress >= MIN_BONDING_PROGRESS && 
+                               t.bondingProgress <= MAX_BONDING_PROGRESS;
             const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
             
-            if (!passBoinding) {
+            if (!passBonding) {
                 console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
             } else if (!passLiquidity) {
                 console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
@@ -866,7 +883,7 @@ async testBitQueryConnection() {
                 console.log(`   ✅ ${t.symbol} - PASSED initial filters`);
             }
             
-            return passBoinding && passLiquidity;
+            return passBonding && passLiquidity;
         });
 
         console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
