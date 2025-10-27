@@ -1,4 +1,4 @@
-process.on('unCaughtException', (err) => {
+process.on('uncaughtException', (err) => {
     console.error('UNCAUGHT EXCEPTION:', error);
     console.error('Stack:', error.stack);
     process.exit(1)
@@ -18,11 +18,7 @@ console.log('BITQUERY_API_KEY:', process.env.BITQUERY_API_KEY ? 'SET' : 'MISSING
 console.log('PRIVATE_KEY:', process.env.PRIVATE_KEY ? 'SET' : 'MISSING');
 console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
 
-console.log('ENV CHECK:');
-console.log('TELEGRAM_TOKEN:', process.env.TELEGRAM_TOKEN ? 'SET' : 'MISSING');
-console.log('BITQUERY_API_KEY:', process.env.BITQUERY_API_KEY ? 'SET' : 'MISSING');
-console.log('PRIVATE_KEY:', process.env.PRIVATE_KEY ? 'SET' : 'MISSING');
-console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
+
 
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
@@ -591,7 +587,38 @@ class BitqueryClient {
           this.cache = new Map();
           this.logger.info('Bitquery cache initialized');
       }
+
+      console.log('\n🔑 Testing BitQuery API Key...');
+      const testQuery = `{
+          Solana {
+              DEXPools(limit: {count: 1}) {
+                  Pool {
+                      Market {
+                          BaseCurrency {
+                              Symbol
+                          }
+                      }
+                  }
+              }
+          }
+      }`;
+      
+      try {
+          const testResult = await this.query(testQuery);
+          if (testResult?.Solana?.DEXPools) {
+              console.log('✅ API Key Valid - BitQuery Connected');
+          } else {
+              console.log('⚠️  API Key Valid but Query Failed');
+              console.log('   Response:', JSON.stringify(testResult, null, 2));
+          }
+      } catch (err) {
+          console.log('❌ API Key Test Failed:', err.message);
+      }
   }
+  
+  
+  
+    
 
   async query(graphql, variables = {}) {
       try {
@@ -661,15 +688,24 @@ class BitqueryClient {
                 orderBy: {descending: Pool_Quote_PostAmountInUSD}
                 where: {
                     Pool: {
-                        Base: {PostAmount: {gt: "206900000", lt: "980000000"}}, 
+                        # For 93-98% bonding:
+                        # Min = 206900000 + (0.93 * 793100000) = 944582300
+                        # Max = 206900000 + (0.98 * 793100000) = 984136800
+                        Base: {PostAmount: {gt: "944582300", lt: "984136800"}}, 
                         Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}, 
                         Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
                     }, 
                     Transaction: {Result: {Success: true}}
                 }
             ) {
-                Bonding_Curve_Progress_precentage: calculate(expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
+                # Calculate actual progress percentage
+                Bonding_Curve_Progress_precentage: calculate(
+                    expression: "((Pool_Base_Balance - 206900000) * 100) / 793100000"
+                )
                 Pool {
+                    Base {
+                        Balance  # Add this to verify calculation
+                    }
                     Market {
                         BaseCurrency {
                             MintAddress
@@ -685,6 +721,7 @@ class BitqueryClient {
             }
         }
     }`;
+
 
     console.log('   Query parameters:');
     console.log('   - Limit: 50 tokens');
