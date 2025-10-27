@@ -4375,98 +4375,304 @@ Can lose all capital. Trade responsibly.
       }
   }
   startTrading() {
-      logger.info('Starting trading cycles...');
+    logger.info('Starting trading cycles...');
 
-      // Position monitoring (every 30s)
-      setInterval(async () => {
-          if (!this.engine.hasActiveUsers()) return;
-          
-          for (const [userId, user] of this.engine.userStates.entries()) {
-              if (user.isActive && user.position) {
-                  try {
-                      await this.engine.monitorPosition(userId);
-                  } catch (error) {
-                      logger.error('Monitor error', { error: error.message });
-                  }
-              }
-          }
-      }, 30000);
-      
+    // ============ POSITION MONITORING (60s - Less Aggressive) ============
+    const monitorInterval = setInterval(async () => {
+        if (!this.engine.hasActiveUsers()) return;
+        
+        try {
+            for (const [userId, user] of this.engine.userStates.entries()) {
+                if (user.isActive && user.position) {
+                    await this.engine.monitorPosition(userId);
+                }
+            }
+        } catch (error) {
+            logger.error('Monitor cycle error', { 
+                error: error.message,
+                stack: error.stack 
+            });
+        }
+    }, 60000); // 60s instead of 30s - reduces CPU/memory load
 
+    // ============ TRADING CYCLE (Configurable) ============
+    const scanIntervalMs = Math.max(SCAN_INTERVAL_MINUTES * 60 * 1000, 5 * 60 * 1000);
+    const tradingInterval = setInterval(async () => {
+        try {
+            // Memory check before heavy operations
+            const mem = process.memoryUsage();
+            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+            
+            if (heapPercent > 85) {
+                logger.warn('Skipping trading cycle - high memory', {
+                    heapPercent: heapPercent.toFixed(1) + '%'
+                });
+                return;
+            }
+            
+            await this.engine.tradingCycle();
+        } catch (error) {
+            logger.error('Trading cycle error', { 
+                error: error.message,
+                stack: error.stack 
+            });
+        }
+    }, scanIntervalMs);
 
-      // Scanning cycle (configurable interval)
-      const scanIntervalMs = SCAN_INTERVAL_MINUTES * 60 * 1000;
-      setInterval(async () => {
-          try {
-              await this.engine.tradingCycle();
-          } catch (error) {
-              logger.error('Trading cycle error', { error: error.message });
-          }
-      }, scanIntervalMs);
+    // ============ STATE PERSISTENCE (10min - Less Frequent) ============
+    const stateInterval = setInterval(async () => {
+        try {
+            await this.engine.saveState();
+            logger.debug('State saved successfully');
+        } catch (error) {
+            logger.error('State save failed', { 
+                error: error.message 
+            });
+        }
+    }, 10 * 60 * 1000); // 10 minutes instead of 5
 
-      // Periodic state save (every 5 minutes)
-      setInterval(async () => {
-          try {
-              await this.engine.saveState();
-          } catch (error) {
-              logger.error('State save failed', { error: error.message });
-          }
-      }, 5 * 60 * 1000);
+    // ============ MEMORY CLEANUP (5min - Aggressive) ============
+    const cleanupInterval = setInterval(async () => {
+        try {
+            const before = process.memoryUsage();
+            const cleaned = await this.performMemoryCleanup();
+            
+            // Force GC if memory high
+            if (before.heapUsed / before.heapTotal > 0.75 && global.gc) {
+                global.gc();
+                logger.info('Forced garbage collection');
+            }
+            
+            const after = process.memoryUsage();
+            const freedMB = (before.heapUsed - after.heapUsed) / 1024 / 1024;
+            
+            logger.debug('Memory cleanup completed', {
+                itemsCleaned: cleaned,
+                freedMB: freedMB.toFixed(2),
+                heapUsed: Math.round(after.heapUsed / 1024 / 1024) + 'MB'
+            });
+        } catch (error) {
+            logger.error('Cleanup failed', { error: error.message });
+        }
+    }, 5 * 60 * 1000); // Every 5 minutes
 
+    // ============ DATABASE CLEANUP (Daily) ============
+    const dbCleanupInterval = setInterval(async () => {
+        try {
+            await this.database.cleanupOldData(90);
+            logger.info('Database cleanup completed');
+        } catch (error) {
+            logger.error('Database cleanup failed', { error: error.message });
+        }
+    }, 24 * 60 * 60 * 1000);
 
+    // ============ HEALTH CHECK (Every 3 minutes) ============
+    const healthInterval = setInterval(async () => {
+        try {
+            const mem = process.memoryUsage();
+            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+            const rss = mem.rss / 1024 / 1024;
+            
+            // Log health stats
+            if (heapPercent > 80 || rss > 100) {
+                logger.warn('Health check - high resource usage', {
+                    heapPercent: heapPercent.toFixed(1) + '%',
+                    heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                    rss: Math.round(rss) + 'MB'
+                });
+            }
+            
+            // Critical - pause trading
+            if (heapPercent > 90) {
+                logger.error('CRITICAL MEMORY - Pausing trading');
+                for (const [userId, user] of this.engine.userStates.entries()) {
+                    if (user.isActive && !user.position) {
+                        user.isActive = false;
+                        logger.info('Paused trading for user', { userId });
+                    }
+                }
+                
+                // Emergency cleanup
+                await this.performMemoryCleanup();
+                if (global.gc) {
+                    global.gc();
+                    global.gc(); // Call twice
+                }
+            }
+        } catch (error) {
+            logger.error('Health check failed', { error: error.message });
+        }
+    }, 3 * 60 * 1000); // Every 3 minutes
 
-      // Database cleanup (daily)
-      setInterval(async () => {
-          try {
-              await this.database.cleanupOldData(90);
-              logger.info('Database cleanup completed');
-          } catch (error) {
-              logger.error('Database cleanup failed', { error: error.message });
-          }
-      }, 24 * 60 * 60 * 1000);
+    // ============ STORE INTERVAL IDS FOR CLEANUP ============
+    this.intervals = {
+        monitor: monitorInterval,
+        trading: tradingInterval,
+        state: stateInterval,
+        cleanup: cleanupInterval,
+        dbCleanup: dbCleanupInterval,
+        health: healthInterval
+    };
 
-      logger.info(`Trading cycles active - Monitor: 30s, Scan: ${SCAN_INTERVAL_MINUTES}min`);
-  }
+    logger.info('Trading cycles active', {
+        monitor: '60s',
+        scan: `${SCAN_INTERVAL_MINUTES}min`,
+        stateSave: '10min',
+        cleanup: '5min',
+        health: '3min'
+    });
+}
 
-  async shutdown() {
-      logger.info('Initiating graceful shutdown...');
-      
-      try {
-          // Stop polling first
-          await this.bot.stopPolling();
-          logger.info('Polling stopped');
+async shutdown() {
+    logger.info('Initiating graceful shutdown...');
+    
+    try {
+        // ============ 1. STOP ALL INTERVALS FIRST ============
+        logger.info('Stopping all intervals...');
+        if (this.intervals) {
+            Object.keys(this.intervals).forEach(key => {
+                try {
+                    clearInterval(this.intervals[key]);
+                    logger.debug(`✓ Cleared interval: ${key}`);
+                } catch (err) {
+                    logger.warn(`Failed to clear interval: ${key}`, { error: err.message });
+                }
+            });
+        }
 
-          // Save current state
-          await this.engine.saveState();
-          logger.info('State saved');
+        // ============ 2. DEACTIVATE ALL USERS ============
+        logger.info('Deactivating users...');
+        for (const [userId, user] of this.engine.userStates.entries()) {
+            user.isActive = false;
+            logger.debug(`✓ Deactivated user: ${userId}`);
+        }
 
-          // Stop health monitoring
-          if (this.healthMonitor) {
-              this.healthMonitor.stop();
-              logger.info('Health monitor stopped');
-          }
+        // ============ 3. STOP TELEGRAM POLLING ============
+        logger.info('Stopping Telegram polling...');
+        try {
+            await this.bot.stopPolling();
+            logger.info('✓ Polling stopped');
+        } catch (pollErr) {
+            logger.warn('Polling stop failed (may already be stopped)', { 
+                error: pollErr.message 
+            });
+        }
 
-          // Close database
-          if (this.database) {
-              await this.database.close();
-              logger.info('Database closed');
-          }
+        // ============ 4. SAVE CURRENT STATE ============
+        logger.info('Saving state...');
+        try {
+            await this.engine.saveState();
+            logger.info('✓ State saved');
+        } catch (stateErr) {
+            logger.error('State save failed', { error: stateErr.message });
+        }
 
-          // Final stats
-          const stats = this.bitquery.getStats();
-          logger.info('Final API stats', {
-              queries: stats.queries,
-              estimatedPoints: stats.estimatedPoints
-          });
+        // ============ 5. STOP HEALTH MONITORING ============
+        if (this.healthMonitor) {
+            try {
+                this.healthMonitor.stop();
+                logger.info('✓ Health monitor stopped');
+            } catch (healthErr) {
+                logger.warn('Health monitor stop failed', { error: healthErr.message });
+            }
+        }
 
-          logger.info('✅ Shutdown complete');
-          process.exit(0);
+        // ============ 6. SAVE PERFORMANCE METRICS ============
+        if (this.engine && this.engine.performanceTracker) {
+            try {
+                const userId = this.ownerId || AUTHORIZED_USERS[0];
+                if (userId) {
+                    await this.engine.performanceTracker.saveMetrics(userId);
+                    logger.info('✓ Performance metrics saved');
+                }
+            } catch (perfErr) {
+                logger.warn('Performance save failed', { error: perfErr.message });
+            }
+        }
 
-      } catch (error) {
-          logger.error('Shutdown error', { error: error.message });
-          process.exit(1);
-      }
-  }
+        // ============ 7. CLOSE DATABASE ============
+        if (this.database) {
+            try {
+                await this.database.close();
+                logger.info('✓ Database closed');
+            } catch (dbErr) {
+                logger.error('Database close failed', { error: dbErr.message });
+            }
+        }
+
+        // ============ 8. CLEAR CACHES ============
+        logger.info('Clearing caches...');
+        if (this.bitquery && this.bitquery.cache) {
+            this.bitquery.cache.clear();
+            logger.debug('✓ BitQuery cache cleared');
+        }
+        if (this.engine && this.engine.anomalyDetector) {
+            // Clear any detector caches
+            logger.debug('✓ Anomaly detector cleared');
+        }
+
+        // ============ 9. FINAL STATS ============
+        const stats = this.bitquery.getStats();
+        const mem = process.memoryUsage();
+        
+        logger.info('Final statistics', {
+            api: {
+                queries: stats.queries,
+                estimatedPoints: stats.estimatedPoints,
+                avgPoints: stats.pointsPerQuery
+            },
+            memory: {
+                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
+                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+            },
+            uptime: process.uptime().toFixed(0) + 's'
+        });
+
+        // ============ 10. PERFORMANCE SUMMARY ============
+        if (this.engine && this.engine.performanceTracker) {
+            const perfStats = this.engine.performanceTracker.metrics;
+            logger.info('Trading summary', {
+                totalTrades: perfStats.totalTrades,
+                wins: perfStats.winningTrades,
+                losses: perfStats.losingTrades,
+                winRate: perfStats.totalTrades > 0 
+                    ? ((perfStats.winningTrades / perfStats.totalTrades) * 100).toFixed(1) + '%'
+                    : '0%',
+                profitFactor: (perfStats.totalProfit / (perfStats.totalLoss || 1)).toFixed(2)
+            });
+        }
+
+        // ============ 11. FINAL MEMORY CLEANUP ============
+        logger.info('Final memory cleanup...');
+        await this.performMemoryCleanup();
+        if (global.gc) {
+            global.gc();
+            logger.debug('✓ Garbage collection executed');
+        }
+
+        // ============ 12. FLUSH LOGS ============
+        // Give Winston time to write final logs
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        logger.info('='.repeat(50));
+        logger.info('✅ Graceful shutdown complete');
+        logger.info('='.repeat(50));
+        
+        process.exit(0);
+
+    } catch (error) {
+        logger.error('Shutdown error', { 
+            error: error.message,
+            stack: error.stack 
+        });
+        
+        // Force exit after critical error
+        setTimeout(() => {
+            process.exit(1);
+        }, 2000);
+    }
+}
 }
 
 
@@ -4518,7 +4724,26 @@ async function main() {
       logger.info('='.repeat(50));
       logger.info('✅ Bot fully operational and ready to trade!');
       logger.info('='.repeat(50));
+      
 
+      let shutdownInProgress = false;
+
+const handleShutdown = async (signal) => {
+    if (shutdownInProgress) {
+        logger.warn(`Shutdown already in progress, ignoring ${signal}`);
+        return;
+    }
+    
+    shutdownInProgress = true;
+    logger.info(`${signal} received - initiating shutdown`);
+    
+    try {
+        await bot.shutdown();
+    } catch (error) {
+        logger.error('Shutdown failed', { error: error.message });
+        process.exit(1);
+    }
+};
       // Handle shutdown signals
       process.on('SIGTERM', () => {
           logger.info('SIGTERM received');
