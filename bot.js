@@ -1,11 +1,12 @@
-process.on('uncaughtException', (err) => {
-    console.error('UNCAUGHT EXCEPTION:', error);
-    console.error('Stack:', error.stack);
-    process.exit(1)
-})
+process.on('uncaughtException', (err) => {  // ← Parameter is 'err'
+    console.error('UNCAUGHT EXCEPTION:', err);  // ← Use 'err' not 'error'
+    console.error('Stack:', err.stack);
+    process.exit(1);
+});
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason);
+    // Don't exit on rejection - just log it
 });
 
 
@@ -616,7 +617,61 @@ class BitqueryClient {
       }
   }
   
-  
+ // Add after BitqueryClient.init()
+async testBitQueryConnection() {
+    console.log('\n' + '='.repeat(60));
+    console.log('🧪 TESTING BITQUERY CONNECTION');
+    console.log('='.repeat(60));
+    
+    const simpleQuery = `{
+        Solana {
+            DEXPools(
+                limit: {count: 5}
+                where: {
+                    Pool: {
+                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
+                    }
+                }
+            ) {
+                Pool {
+                    Market {
+                        BaseCurrency {
+                            Symbol
+                        }
+                    }
+                    Quote {
+                        PostAmountInUSD
+                    }
+                }
+            }
+        }
+    }`;
+    
+    try {
+        console.log('Sending test query...');
+        const result = await this.query(simpleQuery);
+        
+        if (!result) {
+            console.log('❌ NULL RESULT - API key invalid or rate limited');
+            return false;
+        }
+        
+        if (result.Solana?.DEXPools) {
+            console.log(`✅ BitQuery Working! Found ${result.Solana.DEXPools.length} pools`);
+            result.Solana.DEXPools.forEach((pool, i) => {
+                console.log(`   ${i+1}. ${pool.Pool.Market.BaseCurrency.Symbol} - $${pool.Pool.Quote.PostAmountInUSD}`);
+            });
+            return true;
+        } else {
+            console.log('❌ Unexpected response structure:', JSON.stringify(result, null, 2));
+            return false;
+        }
+        
+    } catch (error) {
+        console.log('❌ Test failed:', error.message);
+        return false;
+    }
+} 
   
     
 
@@ -688,23 +743,21 @@ class BitqueryClient {
                 orderBy: {descending: Pool_Quote_PostAmountInUSD}
                 where: {
                     Pool: {
-                        # For 93-98% bonding:
-                        # Min = 206900000 + (0.93 * 793100000) = 944582300
-                        # Max = 206900000 + (0.98 * 793100000) = 984136800
-                        Base: {PostAmount: {gt: "944582300", lt: "984136800"}}, 
+                        # WIDER RANGE to see ANY graduating tokens (20-100%)
+                        Base: {PostAmount: {gt: "206900000"}}, 
                         Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}, 
                         Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
                     }, 
                     Transaction: {Result: {Success: true}}
                 }
             ) {
-                # Calculate actual progress percentage
+                # Calculate ACTUAL bonding progress (0-100%)
                 Bonding_Curve_Progress_precentage: calculate(
                     expression: "((Pool_Base_Balance - 206900000) * 100) / 793100000"
                 )
                 Pool {
                     Base {
-                        Balance  # Add this to verify calculation
+                        Balance
                     }
                     Market {
                         BaseCurrency {
