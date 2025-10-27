@@ -4,7 +4,7 @@
   "description": "Enhanced Solana Trading Bot with Multi-DEX, Technical Analysis, Backtesting, and MEV Protection",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
+    "start": "node --expose-gc --max-old-space-size=96 bot.js",
     "start:full": "node bot.js",
     "dev": "nodemon bot.js",
     "backtest": "node scripts/run-backtest.js",

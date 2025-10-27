@@ -2943,32 +2943,39 @@ class TradingBot {
 
       // Initialize Telegram Bot with optimized polling settings
       this.bot = new TelegramBot(TELEGRAM_TOKEN, {
-          polling: {
-              interval: 1000,              // Check every 1 second
-              autoStart: true,
-              params: {
-                  timeout: 30,             // Long polling 30s
-                  allowed_updates: ['message']  // Only process messages
-              }
-          },
-          filepath: false                  // Disable file downloads for security
-      });
+        polling: {
+            interval: 2000,              // Slower polling (2s instead of 1s)
+            autoStart: true,
+            params: {
+                timeout: 20,             // Shorter timeout (20s instead of 30s)
+                allowed_updates: ['message']
+            }
+        },
+        filepath: false
+    });
 
       // Polling error handler with auto-recovery
       this.bot.on('polling_error', (error) => {
-          if (error.code === 'EFATAL' || error.code === 'ETELEGRAM') {
-              logger.error('Fatal polling error, restarting...', { 
-                  code: error.code, 
-                  message: error.message 
-              });
-              this.restartPolling();
-          } else {
-              logger.warn('Polling error (recoverable)', { 
-                  code: error.code, 
-                  message: error.message 
-              });
-          }
-      });
+        // Don't restart on ECONNRESET - just log and continue
+        if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
+            logger.warn('Telegram connection reset (normal, will retry)', { 
+                error: error.message 
+            });
+            // Don't call restartPolling() - let it auto-retry
+            return;
+        }
+        
+        if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+            logger.error('Multiple bot instances detected - shutting down');
+            process.exit(1);
+        }
+        
+        // Other errors
+        logger.error('Polling error', { 
+            code: error.code, 
+            message: error.message 
+        });
+    });
 
       // General bot error handler
       this.bot.on('error', (error) => {
@@ -3020,82 +3027,115 @@ async restartPolling() {
   }
 } 
 
-setupMemoryManagement() {
-  // Aggressive memory cleanup every 3 minutes
-  setInterval(() => {
-      const mem = process.memoryUsage();
-      const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-
-      if (heapPercent > 70) {
-          logger.warn('High memory usage detected', {
-              heapPercent: heapPercent.toFixed(1) + '%',
-              heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-              rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
-          });
-
-          // Force cleanup
-          this.performMemoryCleanup();
-
-          // Force GC if available (run with --expose-gc flag)
-          if (heapPercent > 80 && global.gc) {
-              global.gc();
-              logger.info('Garbage collection triggered');
-          }
-      }
-  }, 3 * 60 * 1000);
-
-  // Regular cleanup every 5 minutes
-  setInterval(() => {
-      this.performMemoryCleanup();
-  }, 5 * 60 * 1000); 
-
-  setInterval(async () => {
-    try {
+async checkMemoryHealth() {
+    const mem = process.memoryUsage();
+    const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+    const rssPercent = (mem.rss / (128 * 1024 * 1024)) * 100; // Assume 128MB limit
+    
+    if (heapPercent > 85 || rssPercent > 85) {
+        logger.error('CRITICAL MEMORY - Pausing operations', {
+            heap: heapPercent.toFixed(1) + '%',
+            rss: rssPercent.toFixed(1) + '%'
+        });
+        
+        // Stop trading temporarily
         for (const [userId, user] of this.engine.userStates.entries()) {
-            if (!user.isActive) continue;
-            
-            // Don't sync if user has an active position
-            if (user.position) continue;
-            
-            const balances = await this.engine.getWalletBalance();
-            const difference = Math.abs(balances.trading - user.currentBalance);
-            
-            // Only log significant differences
-            if (difference > 0.1) {
-                logger.info('Hourly balance sync', {
-                    userId,
-                    tracked: user.currentBalance.toFixed(4),
-                    actual: balances.trading.toFixed(4),
-                    difference: difference.toFixed(4)
-                });
+            user.isActive = false;
+        }
+        
+        // Aggressive cleanup
+        await this.performMemoryCleanup();
+        
+        if (global.gc) {
+            global.gc();
+            global.gc(); // Call twice
+        }
+        
+        // Wait 30 seconds
+        await sleep(30000);
+        
+        // Check again
+        const newMem = process.memoryUsage();
+        const newHeapPercent = (newMem.heapUsed / newMem.heapTotal * 100);
+        
+        if (newHeapPercent < 70) {
+            logger.info('Memory recovered, resuming operations');
+        } else {
+            logger.error('Memory still critical - RESTARTING');
+            process.exit(1); // Let process manager restart
+        }
+    }
+}
+
+
+
+setupMemoryManagement() {
+    // Much more aggressive cleanup
+    setInterval(() => {
+        const mem = process.memoryUsage();
+        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+
+        // Cleanup at 70% instead of waiting for 80%
+        if (heapPercent > 70) {
+            logger.warn('High memory usage, cleaning up', {
+                heapPercent: heapPercent.toFixed(1) + '%',
+                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+            });
+
+            this.performMemoryCleanup();
+
+            // Force GC more aggressively
+            if (global.gc) {
+                global.gc();
+                logger.info('Garbage collection forced');
             }
         }
-    } catch (error) {
-        logger.error('Hourly balance sync failed', { error: error.message });
-    }
-}, 60 * 60 * 1000);
+    }, 2 * 60 * 1000); // Check every 2 minutes instead of 3
 
-  // Log file cleanup every 10 minutes
-  setInterval(() => {
-      const logFiles = [
-          path.join(logDir, 'combined.log'),
-          path.join(logDir, 'trades.log')
-      ];
-      
-      logFiles.forEach(file => {
-          try {
-              if (fs.existsSync(file)) {
-                  const stats = fs.statSync(file);
-                  if (stats.size > 10 * 1024 * 1024) { // 10MB
-                      fs.writeFileSync(file, '');
-                      logger.info('Log file cleared due to size', { file });
-                  }
-              }
-          } catch (err) {
-              // Ignore errors
-          }
-      });
-  }, 10 * 60 * 1000);
+    // CRITICAL: Clear Telegram bot's internal cache
+    setInterval(() => {
+        if (this.bot && this.bot._polling) {
+            // Clear old updates
+            this.bot._polling._lastUpdateId = 0;
+        }
+    }, 5 * 60 * 1000); // Every 10 minutes
+}
+
+performMemoryCleanup() {
+    let cleaned = 0;
+
+    // Clear ALL caches
+    if (this.bitquery && this.bitquery.cache) {
+        cleaned += this.bitquery.cache.size;
+        this.bitquery.cache.clear();
+    }
+
+    // Aggressively trim trade history
+    for (const [userId, user] of this.engine.userStates.entries()) {
+        if (user.tradeHistory && user.tradeHistory.length > 20) {
+            const removed = user.tradeHistory.length - 20;
+            user.tradeHistory = user.tradeHistory.slice(-20);
+            cleaned += removed;
+        }
+        
+        // Clear old profit taking history
+        if (user.profitTakingHistory && user.profitTakingHistory.length > 10) {
+            user.profitTakingHistory = user.profitTakingHistory.slice(-10);
+            cleaned += 10;
+        }
+    }
+
+    // Clear Telegram bot internal queue
+    if (this.bot && this.bot._polling) {
+        this.bot._polling._lastUpdate = null;
+    }
+
+    if (cleaned > 0) {
+        logger.info('Memory cleanup completed', { itemsCleaned: cleaned });
+    }
+
+    return cleaned;
 }
 
 performMemoryCleanup() {
