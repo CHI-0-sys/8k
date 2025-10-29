@@ -3618,31 +3618,123 @@ Status: ${this.engine.circuitBreaker.isTripped ? '❌ TRIPPED' : '✅ OK'}
 }
 
 async handleStart(userId, chatId) {
+    // Use global logger as fallback
+    const log = this.logger || logger || console;
+    
     try {
         await this.sendMessage(chatId, '⏳ Starting bot...');
 
-        // ... all your existing validation code ...
+        // Validate dependencies
+        if (!this.engine) throw new Error('Trading engine not initialized');
+        if (!this.wallet || !this.wallet.publicKey) throw new Error('Wallet not connected');
+        if (!this.database) throw new Error('Database not initialized');
 
         const user = this.engine.getUserState(userId);
+        if (!user) throw new Error('User state is null');
         
         // Get wallet balance
-        const balances = await this.engine.getWalletBalance();
-        const tradingBalance = balances.trading;
+        let balances;
+        try {
+            balances = await this.engine.getWalletBalance();
+            if (!balances || typeof balances !== 'object') {
+                throw new Error('Invalid balance structure');
+            }
+            
+            balances = {
+                sol: Number(balances.sol) || 0,
+                wsol: Number(balances.wsol) || 0,
+                usdc: Number(balances.usdc) || 0,
+                trading: Number(balances.trading) || 0,
+                totalSol: Number(balances.totalSol) || 0,
+                allTokens: Array.isArray(balances.allTokens) ? balances.allTokens : []
+            };
+            
+        } catch (err) {
+            log.error('Wallet balance fetch failed:', err?.message || String(err));
+            balances = {
+                sol: 0, wsol: 0, usdc: 0, trading: 0, totalSol: 0, allTokens: []
+            };
+        }
+
+        const tradingBalance = Number(balances.trading) || 0;
+        
+        // ===== CRITICAL: CHECK IF WALLET IS EMPTY =====
+        if (tradingBalance === 0 || tradingBalance < 0.01) {
+            const walletAddress = this.wallet.publicKey.toString();
+            const shortAddress = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-6)}`;
+            
+            await this.sendMessage(chatId, `
+⚠️ <b>EMPTY WALLET DETECTED</b>
+
+Your trading wallet has no funds!
+
+💼 <b>Wallet Address:</b>
+<code>${walletAddress}</code>
+
+📊 <b>Current Balance:</b>
+SOL: ${balances.sol.toFixed(4)}
+USDC: ${balances.usdc.toFixed(2)}
+
+❌ Cannot start trading with 0 balance.
+
+<b>To start trading:</b>
+1. Send SOL or USDC to the wallet above
+2. Wait for confirmation (1-2 minutes)
+3. Run /start again
+
+<b>Recommended:</b>
+• Minimum: 0.5 SOL or $50 USDC
+• For testing: 0.1 SOL or $10 USDC
+
+Use /wallet to check balance anytime.
+            `.trim(), { parse_mode: 'HTML' });
+            
+            log.warn('User attempted to start with empty wallet', { 
+                userId, 
+                balance: tradingBalance 
+            });
+            
+            return; // Exit without activating
+        }
+        
+        log.info('Wallet balances for start', {
+            sol: balances.sol,
+            wsol: balances.wsol,
+            usdc: balances.usdc,
+            trading: balances.trading,
+            allTokens: balances.allTokens.length
+        });
         
         // Check database
-        let dbUser = await this.database.getUser(userId.toString());
-        
+        let dbUser = null;
+        try {
+            dbUser = await this.database.getUser(userId.toString());
+        } catch (err) {
+            log.error('Database query failed:', err?.message || String(err));
+            dbUser = null;
+        }
+
+        // Initialize user
         if (!dbUser) {
-            // New user
             user.startingBalance = tradingBalance;
             user.currentBalance = tradingBalance;
             user.dailyStartBalance = tradingBalance;
             user.tradingCapital = tradingBalance;
             
-            await this.database.createUser(userId.toString(), tradingBalance);
-            console.log('✅ New user created:', userId);
+            try {
+                await this.database.createUser(userId.toString(), tradingBalance);
+                console.log('✅ New user created:', userId);
+                log.info('New user created', { userId, balance: tradingBalance });
+            } catch (err) {
+                log.error('Failed to create user:', err?.message || String(err));
+            }
         } else {
             console.log('✅ Existing user:', userId);
+            log.info('Existing user activated', { 
+                userId,
+                trackedBalance: user.currentBalance || 0,
+                walletBalance: tradingBalance
+            });
         }
 
         // ===== CRITICAL: ACTIVATE USER =====
@@ -3650,24 +3742,45 @@ async handleStart(userId, chatId) {
         console.log('✅ User activated:', userId);
         
         // ===== CRITICAL: SAVE TO DATABASE =====
-        await this.database.updateUser(userId.toString(), {
-            is_active: 1, // Set to 1 (true) in database
-            current_balance: user.currentBalance,
-            trading_capital: user.tradingCapital
-        });
-        console.log('✅ Database updated with active status');
+        try {
+            await this.database.updateUser(userId.toString(), {
+                is_active: 1,
+                current_balance: user.currentBalance,
+                trading_capital: user.tradingCapital
+            });
+            console.log('✅ Database updated with active status');
+        } catch (err) {
+            log.error('Failed to update database:', err?.message || String(err));
+        }
         
-        // Save state to memory
-        await this.engine.saveState();
-        console.log('✅ State saved');
+        // Save state
+        try {
+            await this.engine.saveState();
+            console.log('✅ State saved');
+        } catch (err) {
+            log.error('Failed to save state:', err?.message || String(err));
+        }
 
         // Get strategy
-        const strategy = this.engine.getActiveStrategy();
+        let strategy;
+        try {
+            strategy = this.engine.getActiveStrategy();
+            if (!strategy || typeof strategy !== 'object') {
+                throw new Error('Invalid strategy');
+            }
+        } catch (err) {
+            log.error('Failed to get strategy:', err?.message || String(err));
+            strategy = { scalpMin: 0.05, scalpMax: 0.15, extendedTarget: 0.30 };
+        }
+
+        // Build message
+        const walletAddress = this.wallet.publicKey.toString();
+        const shortAddress = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
+        const modeText = ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
         
-        // Build and send message
         const message = `
 🤖 <b>AUTO-TRADING ACTIVATED</b>
-${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
+${modeText}
 
 📊 <b>Strategy:</b>
 - Pump.fun ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding
@@ -3679,8 +3792,14 @@ ${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 Profit: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
 Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
 
+⚙️ <b>Features:</b>
+Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}
+MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}
+Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}
+
 💼 <b>Account:</b>
-Trading Balance: ${tradingBalance.toFixed(4)}
+Wallet: <code>${shortAddress}</code>
+Trading Balance: ${tradingBalance.toFixed(4)} ${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
 Day: ${user.currentDay || 1}
 Scan Interval: ${SCAN_INTERVAL_MINUTES}min
 
@@ -3689,36 +3808,94 @@ Use /help for commands
         `.trim();
 
         await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-        
         console.log('✅ Start message sent');
-        this.logger.info('User activated bot successfully', { userId });
+        log.info('User activated bot successfully', { userId });
 
     } catch (error) {
-        console.error('❌ handleStart error:', error.message);
-        this.logger.error('Critical error in handleStart', {
-            error: error.message,
-            stack: error.stack,
-            userId,
-            chatId
-        });
+        const safeError = error || new Error('Unknown error occurred');
+        const errorMessage = safeError.message || String(safeError);
+        const errorStack = safeError.stack || 'No stack trace';
+        
+        const log = this.logger || logger || console;
+        
+        if (log && typeof log.error === 'function') {
+            log.error('Critical error in handleStart:', {
+                error: errorMessage,
+                stack: errorStack,
+                userId: userId || 'unknown',
+                chatId: chatId || 'unknown'
+            });
+        } else {
+            console.error('Critical error in handleStart:', {
+                error: errorMessage,
+                stack: errorStack,
+                userId: userId || 'unknown',
+                chatId: chatId || 'unknown'
+            });
+        }
 
-        await this.sendMessage(chatId, 
-            `❌ <b>Failed to start bot</b>\n\n${error.message}\n\nPlease try again.`,
-            { parse_mode: 'HTML' }
-        );
+        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
+        
+        try {
+            await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
+        } catch (sendError) {
+            try {
+                await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
+            } catch (finalError) {
+                if (log && typeof log.error === 'function') {
+                    log.error('Complete send failure');
+                } else {
+                    console.error('Complete send failure');
+                }
+            }
+        }
     }
 }
 
 
 async handleWallet(userId, chatId) {
     try {
+        await this.sendMessage(chatId, '⏳ Fetching wallet info...');
+        
         // Get real-time wallet balance
         const balances = await this.engine.getWalletBalance();
         
         const walletAddress = this.wallet.publicKey.toString();
         const explorerUrl = `https://solscan.io/account/${walletAddress}`;
         
-        // Format balances nicely with 4-5 decimals
+        // Check if wallet is empty
+        if (balances.trading === 0 || balances.trading < 0.001) {
+            await this.sendMessage(chatId, `
+⚠️ <b>EMPTY WALLET</b>
+
+📍 <b>Address:</b>
+<code>${walletAddress}</code>
+
+📊 <b>Balances:</b>
+SOL: ${balances.sol.toFixed(4)}
+Wrapped SOL: ${balances.wsol.toFixed(4)}
+USDC: ${balances.usdc.toFixed(2)}
+
+❌ <b>No funds available for trading</b>
+
+<b>To fund your wallet:</b>
+1. Copy the address above
+2. Send SOL or USDC from exchange/wallet
+3. Recommended minimum: 0.5 SOL or $50 USDC
+4. Wait 1-2 minutes for confirmation
+5. Run /start to begin trading
+
+🔗 <a href="${explorerUrl}">View on Solscan</a>
+
+Use /wallet again after funding to verify.
+            `.trim(), { 
+                parse_mode: 'HTML',
+                disable_web_page_preview: true 
+            });
+            return;
+        }
+        
+        // Format balances
         const formatBalance = (amount, decimals = 4) => {
             if (amount === 0) return '0';
             if (amount < 0.0001) return amount.toExponential(2);
@@ -3728,79 +3905,47 @@ async handleWallet(userId, chatId) {
         // Build token list
         let tokenList = [];
         
-        // Native SOL
         if (balances.sol > 0) {
-            tokenList.push({
-                symbol: 'SOL',
-                balance: balances.sol,
-                formatted: formatBalance(balances.sol, 4),
-                emoji: '◎'
-            });
+            tokenList.push(`◎ <b>SOL:</b> ${formatBalance(balances.sol, 4)}`);
         }
         
-        // Wrapped SOL
         if (balances.wsol > 0) {
-            tokenList.push({
-                symbol: 'WSOL',
-                balance: balances.wsol,
-                formatted: formatBalance(balances.wsol, 4),
-                emoji: '🔄'
-            });
+            tokenList.push(`🔄 <b>WSOL:</b> ${formatBalance(balances.wsol, 4)}`);
         }
         
-        // USDC
         if (balances.usdc > 0) {
-            tokenList.push({
-                symbol: 'USDC',
-                balance: balances.usdc,
-                formatted: formatBalance(balances.usdc, 2),
-                emoji: '💵'
-            });
+            tokenList.push(`💵 <b>USDC:</b> ${formatBalance(balances.usdc, 2)}`);
         }
         
-        // Other tokens
         const otherTokens = balances.allTokens.filter(t => 
             t.symbol !== 'USDC' && 
             t.symbol !== 'WSOL' && 
             t.symbol !== 'SOL'
         );
         
-        otherTokens.forEach(token => {
-            tokenList.push({
-                symbol: token.symbol,
-                balance: token.balance,
-                formatted: formatBalance(token.balance, 4),
-                emoji: '🪙'
-            });
+        otherTokens.slice(0, 5).forEach(token => {
+            tokenList.push(`🪙 <b>${token.symbol}:</b> ${formatBalance(token.balance, 4)}`);
         });
         
-        // Build message
+        if (otherTokens.length > 5) {
+            tokenList.push(`... and ${otherTokens.length - 5} more tokens`);
+        }
+        
+        const tradingCurrency = balances.usdc > 0.01 ? 'USDC' : 'SOL';
+        const tradingAmount = balances.trading;
+        
         let message = `
-👛 <b>WALLET OVERVIEW</b>
+💛 <b>WALLET OVERVIEW</b>
 
 📍 <b>Address:</b>
 <code>${walletAddress}</code>
 
 💰 <b>Balances:</b>
-`;
-        
-        if (tokenList.length > 0) {
-            tokenList.forEach(token => {
-                message += `${token.emoji} <b>${token.symbol}:</b> ${token.formatted}\n`;
-            });
-            
-            // Show total in preferred currency
-            const tradingCurrency = balances.usdc > 0.01 ? 'USDC' : 'SOL';
-            const tradingAmount = balances.trading;
-            message += `\n💼 <b>Trading Balance:</b> ${formatBalance(tradingAmount, 4)} ${tradingCurrency}`;
-        } else {
-            message += `No tokens found in wallet`;
-        }
-        
-        message += `
+${tokenList.join('\n')}
 
-🔍 <b>Explorer:</b>
-<a href="${explorerUrl}">View on Solscan</a>
+💼 <b>Trading Balance:</b> ${formatBalance(tradingAmount, 4)} ${tradingCurrency}
+
+🔗 <a href="${explorerUrl}">View on Solscan</a>
 
 ℹ️ Use /balance for trading stats
 ℹ️ Use /status for bot status
@@ -3814,7 +3959,7 @@ async handleWallet(userId, chatId) {
         logger.info('Wallet info displayed', { 
             userId,
             address: walletAddress,
-            tokenCount: tokenList.length
+            trading: tradingAmount
         });
         
     } catch (error) {
@@ -3824,8 +3969,7 @@ async handleWallet(userId, chatId) {
         });
         
         await this.sendMessage(chatId, 
-            `❌ Failed to fetch wallet info: ${error.message}`,
-            { parse_mode: 'HTML' }
+            `❌ Failed to fetch wallet info: ${error.message}`
         );
     }
 }
