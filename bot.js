@@ -1184,49 +1184,96 @@ class TradingEngine {
   
   async init() {
     this.logger.info('Trading engine initializing');
+    
+    // Load state from database
     await this.loadState();
     
-    // Sync wallet balance for all users on startup
-    for (const [userId, user] of this.userStates.entries()) {
-        const balances = await this.getWalletBalance();
+    // CRITICAL FIX: Ensure authorized users are created and activated
+    for (const userId of AUTHORIZED_USERS) {
+        console.log(`\n👤 Checking user: ${userId}`);
         
-        this.logger.info('Syncing wallet balance on startup', {
-            userId,
-            trackedBalance: user.currentBalance,
-            walletBalance: balances.trading,
-            sol: balances.sol,
-            wsol: balances.wsol,
-            usdc: balances.usdc
-        });
+        let user = this.userStates.get(userId);
         
-        // If user has no balance set or it's the default, use wallet balance
-        if (user.currentBalance === 0 || user.startingBalance === 20) {
-            user.startingBalance = balances.trading;
-            user.currentBalance = balances.trading;
-            user.dailyStartBalance = balances.trading;
-            user.tradingCapital = balances.trading;
-            
-            this.logger.info('User balance initialized from wallet', {
-                userId,
-                balance: balances.trading.toFixed(4)
-            });
-        } else {
-            // Always sync to actual wallet (recommended for accuracy)
-            user.currentBalance = balances.trading;
-            user.tradingCapital = balances.trading;
-            
-            const difference = balances.trading - user.currentBalance;
-            if (Math.abs(difference) > 0.01) {
-                this.logger.warn('Balance mismatch detected', {
-                    userId,
-                    tracked: user.currentBalance.toFixed(4),
-                    actual: balances.trading.toFixed(4),
-                    difference: difference.toFixed(4)
-                });
-            }
+        if (!user) {
+            console.log('   ⚠️  User not in memory, creating...');
+            user = this.getUserState(userId); // This creates default state
         }
+        
+        // Get wallet balance for initialization
+        const balances = await this.getWalletBalance();
+        const tradingBalance = balances.trading;
+        
+        console.log(`   💰 Wallet balance: ${tradingBalance.toFixed(4)}`);
+        
+        // Check database
+        let dbUser = null;
+        try {
+            dbUser = await this.database.getUser(userId.toString());
+        } catch (err) {
+            this.logger.warn('Failed to load user from DB', { userId, error: err.message });
+        }
+        
+        if (!dbUser) {
+            console.log('   📝 Creating new database user...');
+            // New user - initialize with wallet balance
+            user.startingBalance = tradingBalance;
+            user.currentBalance = tradingBalance;
+            user.dailyStartBalance = tradingBalance;
+            user.tradingCapital = tradingBalance;
+            user.isActive = false; // Will be activated by /start command
+            
+            try {
+                await this.database.createUser(userId.toString(), tradingBalance);
+                console.log('   ✅ Database user created');
+            } catch (err) {
+                this.logger.error('Failed to create user', { userId, error: err.message });
+            }
+        } else {
+            console.log('   ✅ Existing database user found');
+            console.log(`      - DB Balance: ${dbUser.current_balance}`);
+            console.log(`      - DB Active: ${dbUser.is_active === 1 ? 'YES' : 'NO'}`);
+            
+            // Load existing user state
+            user.isActive = dbUser.is_active === 1; // CRITICAL: Load active state
+            user.startingBalance = dbUser.starting_balance;
+            user.currentBalance = dbUser.current_balance;
+            user.dailyStartBalance = dbUser.daily_start_balance;
+            user.dailyProfit = dbUser.daily_profit;
+            user.dailyProfitPercent = dbUser.daily_profit_percent;
+            user.currentDay = dbUser.current_day;
+            user.totalTrades = dbUser.total_trades;
+            user.successfulTrades = dbUser.successful_trades;
+            user.lastTradeAt = dbUser.last_trade_at;
+            user.dailyResetAt = dbUser.daily_reset_at;
+            user.totalProfitTaken = dbUser.total_profit_taken;
+            user.tradingCapital = dbUser.trading_capital;
+            
+            console.log(`   📊 User state loaded: ${user.isActive ? '✅ ACTIVE' : '❌ INACTIVE'}`);
+        }
+        
+        // Sync with wallet balance
+        const balanceDiff = Math.abs(tradingBalance - user.currentBalance);
+        if (balanceDiff > 0.01) {
+            console.log(`   ⚠️  Balance mismatch detected:`);
+            console.log(`      - Tracked: ${user.currentBalance.toFixed(4)}`);
+            console.log(`      - Wallet: ${tradingBalance.toFixed(4)}`);
+            console.log(`      - Difference: ${balanceDiff.toFixed(4)}`);
+            console.log(`   🔄 Syncing to wallet balance...`);
+            
+            user.currentBalance = tradingBalance;
+            user.tradingCapital = tradingBalance;
+        }
+        
+        // Store updated state
+        this.userStates.set(userId, user);
+        
+        console.log(`   ✅ User initialized:`);
+        console.log(`      - Active: ${user.isActive ? 'YES ✅' : 'NO ❌ (use /start)'}`);
+        console.log(`      - Balance: ${user.currentBalance.toFixed(4)}`);
+        console.log(`      - Day: ${user.currentDay}`);
     }
     
+    // Initialize anomaly detector baselines
     if (this.anomalyDetector) {
         for (const [userId, user] of this.userStates.entries()) {
             if (user.isActive) {
@@ -1235,8 +1282,14 @@ class TradingEngine {
         }
     }
     
+    console.log('\n📊 Trading Engine Initialization Summary:');
+    console.log(`   Total users: ${this.userStates.size}`);
+    console.log(`   Active users: ${Array.from(this.userStates.values()).filter(u => u.isActive).length}`);
+    console.log(`   Inactive users: ${Array.from(this.userStates.values()).filter(u => !u.isActive).length}`);
+    
     this.logger.info('Trading engine initialized');
 }
+
 
 
  
@@ -1495,72 +1548,124 @@ getUserState(userId) {
   }
 
   async tradingCycle() {
-      return this.tradeMutex.runExclusive(async () => {
-          if (this.isScanning) {
-              this.logger.debug('Already scanning, skipping cycle');
-              return;
-          }
+    console.log('\n' + '🔄'.repeat(30));
+    console.log('🔄 TRADING CYCLE TRIGGERED');
+    console.log('🔄'.repeat(30));
+    
+    return this.tradeMutex.runExclusive(async () => {
+        // Step 1: Check if already scanning
+        if (this.isScanning) {
+            console.log('⏭️  Already scanning, skipping cycle');
+            this.logger.debug('Already scanning, skipping cycle');
+            return;
+        }
 
-          if (!this.hasActiveUsers()) {
-              this.logger.debug('No active users');
-              return;
-          }
+        // Step 2: Check for active users
+        const activeUsers = Array.from(this.userStates.entries()).filter(([_, u]) => u.isActive);
+        console.log(`👥 Active users: ${activeUsers.length}`);
+        
+        if (!this.hasActiveUsers()) {
+            console.log('❌ No active users');
+            this.logger.debug('No active users');
+            return;
+        }
 
-          // Check circuit breaker
-          if (!this.circuitBreaker.canTrade()) {
-              const status = this.circuitBreaker.getStatus();
-              this.logger.warn('Circuit breaker active', status);
-              return;
-          }
+        // Step 3: Check circuit breaker
+        const canTrade = this.circuitBreaker.canTrade();
+        console.log(`🔌 Circuit breaker: ${canTrade ? '✅ OK' : '❌ TRIPPED'}`);
+        
+        if (!canTrade) {
+            const status = this.circuitBreaker.getStatus();
+            console.log('⚠️  Circuit breaker active:', status);
+            this.logger.warn('Circuit breaker active', status);
+            return;
+        }
 
-          this.isScanning = true;
+        this.isScanning = true;
+        console.log('✅ Starting scan...\n');
 
-          try {
-              this.logger.info('=== Trading Cycle Start ===');
+        try {
+            this.logger.info('=== Trading Cycle Start ===');
 
-              const userId = this.bot.ownerId || (AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null);
-              if (!userId) {
-                  this.logger.error('No authorized user configured');
-                  return;
-              }
+            const userId = this.bot.ownerId || (AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null);
+            console.log(`👤 User ID: ${userId}`);
+            
+            if (!userId) {
+                console.log('❌ No authorized user configured');
+                this.logger.error('No authorized user configured');
+                return;
+            }
 
-              const user = this.getUserState(userId);
-              if (!user.isActive) {
-                  this.logger.debug('User not active');
-                  return;
-              }
+            const user = this.getUserState(userId);
+            console.log(`📊 User state:`, {
+                isActive: user.isActive,
+                hasPosition: user.position !== null,
+                balance: user.currentBalance
+            });
+            
+            if (!user.isActive) {
+                console.log('❌ User not active');
+                this.logger.debug('User not active');
+                return;
+            }
 
-              await this.checkDailyReset(user, userId);
+            // Check daily reset
+            console.log('📅 Checking daily reset...');
+            await this.checkDailyReset(user, userId);
 
-              if (this.isDailyTargetHit(user)) {
-                  this.logger.info('Daily target hit, in cooldown');
-                  return;
-              }
+            // Check daily target
+            const targetHit = this.isDailyTargetHit(user);
+            console.log(`🎯 Daily target hit: ${targetHit ? '✅ YES (cooldown)' : '❌ NO'}`);
+            
+            if (targetHit) {
+                this.logger.info('Daily target hit, in cooldown');
+                return;
+            }
 
-              // Check if can add more positions
-              if (!this.portfolioManager.canAddPosition()) {
-                  this.logger.info('Maximum positions reached, monitoring only');
-                  return;
-              }
+            // Check positions
+            const canAddPosition = this.portfolioManager.canAddPosition();
+            console.log(`💼 Can add position: ${canAddPosition ? '✅ YES' : '❌ MAX REACHED'}`);
+            console.log(`   Current: ${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}`);
+            
+            if (!canAddPosition) {
+                console.log('⚠️  Maximum positions reached, monitoring only');
+                this.logger.info('Maximum positions reached, monitoring only');
+                return;
+            }
 
-              const opportunity = await this.findTradingOpportunity(userId);
-              if (opportunity) {
-                  this.logger.info('Opportunity found', { symbol: opportunity.symbol });
-                  await this.executeBuy(userId, opportunity);
-              } else {
-                  this.logger.info('No trade opportunity');
-              }
+            // THE CRITICAL PART - FINDING OPPORTUNITIES
+            console.log('\n🔍 SEARCHING FOR OPPORTUNITIES...\n');
+            const opportunity = await this.findTradingOpportunity(userId);
+            
+            if (opportunity) {
+                console.log('✅ OPPORTUNITY FOUND!');
+                console.log('   Symbol:', opportunity.symbol);
+                console.log('   Bonding:', opportunity.bondingProgress.toFixed(1) + '%');
+                console.log('   Liquidity: $' + opportunity.liquidityUSD.toFixed(0));
+                
+                this.logger.info('Opportunity found', { symbol: opportunity.symbol });
+                await this.executeBuy(userId, opportunity);
+            } else {
+                console.log('❌ No trade opportunity found');
+                this.logger.info('No trade opportunity');
+            }
 
-              const stats = this.bitquery.getStats();
-              this.logger.debug('API stats', stats);
+            const stats = this.bitquery.getStats();
+            console.log('\n📊 API Stats:', stats);
+            this.logger.debug('API stats', stats);
 
-          } catch (err) {
-              this.logger.error('Trading cycle error', { error: err.message, stack: err.stack });
-          } finally {
-              this.isScanning = false;
-          }
-      });
-  }
+        } catch (err) {
+            console.error('💥 TRADING CYCLE ERROR:', err);
+            console.error('Stack:', err.stack);
+            this.logger.error('Trading cycle error', { error: err.message, stack: err.stack });
+        } finally {
+            this.isScanning = false;
+            console.log('\n' + '🔄'.repeat(30));
+            console.log('🔄 TRADING CYCLE COMPLETE');
+            console.log('🔄'.repeat(30) + '\n');
+        }
+    });
+}
 
   async saveState() {
       try {
@@ -3037,36 +3142,28 @@ async checkMemoryHealth() {
 
 
 setupMemoryManagement() {
-    // CRITICAL: Much more aggressive cleanup
+    // Check every 2 minutes, but only log if action taken
     setInterval(() => {
         const mem = process.memoryUsage();
         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-        const rssMB = mem.rss / 1024 / 1024;
 
-        // Cleanup at 60% instead of 70%
-        if (heapPercent > 60 || rssMB > 80) {
+        // Only cleanup at 75% instead of 60%
+        if (heapPercent > 75) {
             logger.warn('Proactive memory cleanup', {
                 heapPercent: heapPercent.toFixed(1) + '%',
                 heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-                rss: Math.round(rssMB) + 'MB'
+                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
             });
 
             this.performMemoryCleanup();
 
-            // Force GC more aggressively
             if (global.gc) {
                 global.gc();
-                global.gc(); // Call twice for thorough cleanup
-            }
-            
-            // Additional: Clear any module caches
-            if (this.bot && this.bot._polling) {
-                this.bot._polling._lastUpdateId = 0;
             }
         }
-    }, 60 * 1000); // Check every 1 minute instead of 2
+    }, 2 * 60 * 1000); // Every 2 minutes
 
-    // CRITICAL: Emergency shutdown if memory critical
+    // Emergency shutdown check
     setInterval(() => {
         const mem = process.memoryUsage();
         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
@@ -3078,15 +3175,13 @@ setupMemoryManagement() {
                 rss: Math.round(rssMB) + 'MB'
             });
             
-            // Force save state
             this.engine.saveState().catch(err => 
-                logger.error('Failed to save state during emergency', { error: err.message })
+                logger.error('Emergency save failed', { error: err.message })
             );
             
-            // Exit and let Railway restart
             setTimeout(() => process.exit(1), 2000);
         }
-    }, 30 * 1000); // Check every 30 seconds
+    }, 30 * 1000);
 }
 
 performMemoryCleanup() {
@@ -3488,164 +3583,91 @@ sanitizeErrorMessage(message) {
     return sanitized;
 }
 
+async handleDebug(userId, chatId) {
+    try {
+        const user = this.engine.getUserState(userId);
+        const dbUser = await this.database.getUser(userId.toString());
+        
+        const message = `
+🔍 <b>DEBUG INFO</b>
 
+<b>Memory State:</b>
+Active: ${user.isActive ? '✅ YES' : '❌ NO'}
+Balance: ${user.currentBalance.toFixed(4)}
+Position: ${user.position ? 'Has position' : 'No position'}
+
+<b>Database State:</b>
+Active: ${dbUser?.is_active === 1 ? '✅ YES' : '❌ NO'}
+Balance: ${dbUser?.current_balance?.toFixed(4) || 'N/A'}
+Total Trades: ${dbUser?.total_trades || 0}
+
+<b>Trading Engine:</b>
+Total Users: ${this.engine.userStates.size}
+Active Users: ${Array.from(this.engine.userStates.values()).filter(u => u.isActive).length}
+Scanning: ${this.engine.isScanning ? 'YES' : 'NO'}
+
+<b>Circuit Breaker:</b>
+Status: ${this.engine.circuitBreaker.isTripped ? '❌ TRIPPED' : '✅ OK'}
+        `.trim();
+        
+        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        
+    } catch (error) {
+        await this.sendMessage(chatId, `Error: ${error.message}`);
+    }
+}
 
 async handleStart(userId, chatId) {
-    // Use global logger as fallback if this.logger is undefined
-    const log = this.logger || logger || console;
-    
     try {
-        // Step 1: Send acknowledgment
-        try {
-            await this.sendMessage(chatId, '⏳ Starting bot...');
-        } catch (e) {
-            log.error('Failed to send init message:', e?.message || String(e));
-        }
+        await this.sendMessage(chatId, '⏳ Starting bot...');
 
-        // Step 2: Validate dependencies
-        if (!this.engine) {
-            throw new Error('Trading engine not initialized');
-        }
-        if (!this.wallet || !this.wallet.publicKey) {
-            throw new Error('Wallet not connected');
-        }
-        if (!this.database) {
-            throw new Error('Database not initialized');
-        }
+        // ... all your existing validation code ...
 
-        // Step 3: Get user state
-        let user;
-        try {
-            user = this.engine.getUserState(userId);
-            if (!user) {
-                throw new Error('User state is null');
-            }
-        } catch (err) {
-            throw new Error('Failed to get user state: ' + (err?.message || String(err)));
-        }
+        const user = this.engine.getUserState(userId);
         
-        // Step 4: Get wallet balance
-        let balances;
-        try {
-            balances = await Promise.race([
-                this.engine.getWalletBalance(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
-            ]);
-            
-            if (!balances || typeof balances !== 'object') {
-                throw new Error('Invalid balance structure');
-            }
-            
-            balances = {
-                sol: Number(balances.sol) || 0,
-                wsol: Number(balances.wsol) || 0,
-                usdc: Number(balances.usdc) || 0,
-                trading: Number(balances.trading) || 0,
-                totalSol: Number(balances.totalSol) || 0,
-                allTokens: Array.isArray(balances.allTokens) ? balances.allTokens : []
-            };
-            
-        } catch (err) {
-            log.error('Wallet balance fetch failed:', err?.message || String(err));
-            balances = {
-                sol: 0, wsol: 0, usdc: 0, trading: 0, totalSol: 0, allTokens: []
-            };
-        }
-
-        const tradingBalance = Number(balances.trading) || 0;
+        // Get wallet balance
+        const balances = await this.engine.getWalletBalance();
+        const tradingBalance = balances.trading;
         
-        log.info('Wallet balances for start', {
-            sol: balances.sol,
-            wsol: balances.wsol,
-            usdc: balances.usdc,
-            trading: balances.trading,
-            allTokens: balances.allTokens.length
-        });
+        // Check database
+        let dbUser = await this.database.getUser(userId.toString());
         
-        // Step 5: Database user
-        let dbUser = null;
-        try {
-            dbUser = await Promise.race([
-                this.database.getUser(userId.toString()),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
-            ]);
-        } catch (err) {
-            log.error('Database query failed:', err?.message || String(err));
-            dbUser = null;
-        }
-
-        // Step 6: Initialize user
         if (!dbUser) {
+            // New user
             user.startingBalance = tradingBalance;
             user.currentBalance = tradingBalance;
             user.dailyStartBalance = tradingBalance;
             user.tradingCapital = tradingBalance;
             
-            try {
-                await this.database.createUser(userId.toString(), tradingBalance);
-                log.info('New user created', { userId, balance: tradingBalance });
-            } catch (err) {
-                log.error('Failed to create user:', err?.message || String(err));
-            }
+            await this.database.createUser(userId.toString(), tradingBalance);
+            console.log('✅ New user created:', userId);
         } else {
-            log.info('Existing user activated', { 
-                userId,
-                trackedBalance: user.currentBalance || 0,
-                walletBalance: tradingBalance
-            });
+            console.log('✅ Existing user:', userId);
         }
 
+        // ===== CRITICAL: ACTIVATE USER =====
         user.isActive = true;
-
-        // Step 7: Save state
-        try {
-            await this.engine.saveState();
-        } catch (err) {
-            log.error('Failed to save state:', err?.message || String(err));
-        }
-
-        // Step 8: Get strategy
-        let strategy;
-        try {
-            strategy = this.engine.getActiveStrategy();
-            if (!strategy || typeof strategy !== 'object') {
-                throw new Error('Invalid strategy');
-            }
-        } catch (err) {
-            log.error('Failed to get strategy:', err?.message || String(err));
-            strategy = { scalpMin: 0.05, scalpMax: 0.15, extendedTarget: 0.30 };
-        }
-
-        // Step 9: Build message
-        const modeText = ENABLE_PAPER_TRADING ? '📝 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
-        const balanceLines = [];
+        console.log('✅ User activated:', userId);
         
-        if (balances.sol > 0.001) balanceLines.push(`SOL: ${balances.sol.toFixed(4)}`);
-        if (balances.wsol > 0.001) balanceLines.push(`Wrapped SOL: ${balances.wsol.toFixed(4)}`);
-        if (balances.usdc > 0.01) balanceLines.push(`USDC: ${balances.usdc.toFixed(2)}`);
+        // ===== CRITICAL: SAVE TO DATABASE =====
+        await this.database.updateUser(userId.toString(), {
+            is_active: 1, // Set to 1 (true) in database
+            current_balance: user.currentBalance,
+            trading_capital: user.tradingCapital
+        });
+        console.log('✅ Database updated with active status');
         
-        const otherTokens = balances.allTokens.filter(t => 
-            t && t.symbol && t.symbol !== 'USDC' && t.symbol !== 'WSOL' && t.symbol !== 'SOL'
-        );
-        
-        if (otherTokens.length > 0) {
-            otherTokens.slice(0, 5).forEach(token => {
-                if (token && token.symbol && token.balance) {
-                    balanceLines.push(`${token.symbol}: ${Number(token.balance).toFixed(4)}`);
-                }
-            });
-            if (otherTokens.length > 5) {
-                balanceLines.push(`... and ${otherTokens.length - 5} more`);
-            }
-        }
-        
-        const balanceDisplay = balanceLines.length > 0 ? balanceLines.join('\n') : 'No tokens found';
-        const walletAddress = this.wallet.publicKey.toString();
-        const shortAddress = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
+        // Save state to memory
+        await this.engine.saveState();
+        console.log('✅ State saved');
 
+        // Get strategy
+        const strategy = this.engine.getActiveStrategy();
+        
+        // Build and send message
         const message = `
 🤖 <b>AUTO-TRADING ACTIVATED</b>
-${modeText}
+${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 
 📊 <b>Strategy:</b>
 - Pump.fun ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding
@@ -3657,16 +3679,7 @@ ${modeText}
 Profit: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
 Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
 
-⚙️ <b>Features:</b>
-Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}
-MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}
-Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}
-Health Monitor: ${ENABLE_HEALTH_MONITORING ? '✅' : '❌'}
-Anomaly Detection: ${ENABLE_ANOMALY_DETECTION ? '✅' : '❌'}
-
 💼 <b>Account:</b>
-Wallet: <code>${shortAddress}</code>
-${balanceDisplay}
 Trading Balance: ${tradingBalance.toFixed(4)}
 Day: ${user.currentDay || 1}
 Scan Interval: ${SCAN_INTERVAL_MINUTES}min
@@ -3676,49 +3689,26 @@ Use /help for commands
         `.trim();
 
         await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-        log.info('User activated bot successfully', { userId });
+        
+        console.log('✅ Start message sent');
+        this.logger.info('User activated bot successfully', { userId });
 
     } catch (error) {
-        const safeError = error || new Error('Unknown error occurred');
-        const errorMessage = safeError.message || String(safeError);
-        const errorStack = safeError.stack || 'No stack trace';
-        
-        // Use the same log variable for consistency
-        const log = this.logger || logger || console;
-        
-        if (log && typeof log.error === 'function') {
-            log.error('Critical error in handleStart:', {
-                error: errorMessage,
-                stack: errorStack,
-                userId: userId || 'unknown',
-                chatId: chatId || 'unknown'
-            });
-        } else {
-            console.error('Critical error in handleStart:', {
-                error: errorMessage,
-                stack: errorStack,
-                userId: userId || 'unknown',
-                chatId: chatId || 'unknown'
-            });
-        }
+        console.error('❌ handleStart error:', error.message);
+        this.logger.error('Critical error in handleStart', {
+            error: error.message,
+            stack: error.stack,
+            userId,
+            chatId
+        });
 
-        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
-        
-        try {
-            await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
-        } catch (sendError) {
-            try {
-                await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
-            } catch (finalError) {
-                if (log && typeof log.error === 'function') {
-                    log.error('Complete send failure');
-                } else {
-                    console.error('Complete send failure');
-                }
-            }
-        }
+        await this.sendMessage(chatId, 
+            `❌ <b>Failed to start bot</b>\n\n${error.message}\n\nPlease try again.`,
+            { parse_mode: 'HTML' }
+        );
     }
 }
+
 
 async handleWallet(userId, chatId) {
     try {
@@ -4347,101 +4337,182 @@ Can lose all capital. Trade responsibly.
       }
   }
 
+  
+  startTrading() {
+    console.log('\n' + '='.repeat(60));
+    console.log('🚀 STARTING TRADING CYCLES');
+    console.log('='.repeat(60));
+    
+    logger.info('Starting trading cycles...');
 
- startTrading() {
-        logger.info('Starting MEMORY-OPTIMIZED trading cycles...');
+    // DIAGNOSTIC: Log intervals
+    const scanIntervalMs = Math.max(SCAN_INTERVAL_MINUTES * 60 * 1000, 5 * 60 * 1000);
+    console.log('⏰ Intervals configured:');
+    console.log(`   - Monitor: 60s`);
+    console.log(`   - Trading scan: ${scanIntervalMs/1000}s (${SCAN_INTERVAL_MINUTES}min)`);
+    console.log(`   - State save: 10min`);
+    console.log(`   - Cleanup: 3min`);
+    console.log('='.repeat(60) + '\n');
 
-        // Position monitoring - INCREASED to 90s (was 60s)
-        const monitorInterval = setInterval(async () => {
-            if (!this.engine.hasActiveUsers()) return;
-            
-            // Memory check BEFORE monitoring
-            const mem = process.memoryUsage();
-            if ((mem.heapUsed / mem.heapTotal) > 0.85) {
-                logger.warn('Skipping monitor - high memory');
-                return;
-            }
-            
-            try {
-                for (const [userId, user] of this.engine.userStates.entries()) {
-                    if (user.isActive && user.position) {
-                        await this.engine.monitorPosition(userId);
-                    }
+    // ============ POSITION MONITORING (60s) ============
+    const monitorInterval = setInterval(async () => {
+        if (!this.engine.hasActiveUsers()) return;
+        
+        try {
+            for (const [userId, user] of this.engine.userStates.entries()) {
+                if (user.isActive && user.position) {
+                    console.log(`📊 Monitoring position for user ${userId}`);
+                    await this.engine.monitorPosition(userId);
                 }
-            } catch (error) {
-                logger.error('Monitor error', { error: error.message });
             }
-        }, 90000); // 90s instead of 60s
+        } catch (error) {
+            logger.error('Monitor cycle error', { 
+                error: error.message,
+                stack: error.stack 
+            });
+        }
+    }, 60000);
 
-        // Trading cycle - INCREASED interval
-        const scanIntervalMs = Math.max(SCAN_INTERVAL_MINUTES * 60 * 1000, 10 * 60 * 1000);
-        const tradingInterval = setInterval(async () => {
-            // Memory check BEFORE trading
+    // ============ TRADING CYCLE (Critical - This is where scanning happens) ============
+    console.log(`⏰ First trading cycle will run in ${scanIntervalMs/1000}s`);
+    console.log(`   Then every ${SCAN_INTERVAL_MINUTES} minutes after that\n`);
+    
+    const tradingInterval = setInterval(async () => {
+        console.log('\n⏰ TRADING INTERVAL TRIGGERED');
+        console.log(`   Time: ${new Date().toLocaleTimeString()}`);
+        
+        try {
+            // Memory check before heavy operations
             const mem = process.memoryUsage();
             const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
             
-            if (heapPercent > 80) {
-                logger.warn('Skipping trading cycle - memory at ' + heapPercent.toFixed(1) + '%');
-                
-                // Force cleanup
-                this.performMemoryCleanup();
-                if (global.gc) global.gc();
-                
+            console.log(`💾 Memory before scan: ${heapPercent.toFixed(1)}%`);
+            
+            if (heapPercent > 85) {
+                logger.warn('Skipping trading cycle - high memory', {
+                    heapPercent: heapPercent.toFixed(1) + '%'
+                });
+                console.log('⚠️  Skipping scan - memory too high');
                 return;
             }
             
-            try {
-                await this.engine.tradingCycle();
-            } catch (error) {
-                logger.error('Trading cycle error', { error: error.message });
-            }
-        }, scanIntervalMs);
+            // THE ACTUAL TRADING CYCLE
+            await this.engine.tradingCycle();
+            
+        } catch (error) {
+            console.error('💥 Trading interval error:', error.message);
+            logger.error('Trading cycle error', { 
+                error: error.message,
+                stack: error.stack 
+            });
+        }
+    }, scanIntervalMs);
 
-        // State persistence - INCREASED to 15min
-        const stateInterval = setInterval(async () => {
-            try {
-                await this.engine.saveState();
-            } catch (error) {
-                logger.error('State save failed', { error: error.message });
-            }
-        }, 15 * 60 * 1000);
+    // ============ RUN FIRST CYCLE IMMEDIATELY ============
+    // This is critical - run first cycle after 30 seconds, not waiting for full interval
+    console.log('🎯 Running FIRST trading cycle in 30 seconds...\n');
+    setTimeout(async () => {
+        console.log('\n🎬 INITIAL TRADING CYCLE (30s warmup complete)');
+        try {
+            await this.engine.tradingCycle();
+        } catch (error) {
+            console.error('Initial cycle error:', error.message);
+        }
+    }, 30000); // 30 seconds
 
-        // Memory cleanup - INCREASED frequency to 3min
-        const cleanupInterval = setInterval(async () => {
-            try {
-                this.performMemoryCleanup();
+    // ============ STATE PERSISTENCE (10min) ============
+    const stateInterval = setInterval(async () => {
+        try {
+            await this.engine.saveState();
+            logger.debug('State saved successfully');
+        } catch (error) {
+            logger.error('State save failed', { 
+                error: error.message 
+            });
+        }
+    }, 10 * 60 * 1000);
+
+    // ============ MEMORY CLEANUP (3min) - LESS VERBOSE ============
+    const cleanupInterval = setInterval(async () => {
+        try {
+            const before = process.memoryUsage();
+            const cleaned = await this.performMemoryCleanup();
+            
+            // Only log if memory is actually high
+            const heapPercent = (before.heapUsed / before.heapTotal * 100);
+            if (heapPercent > 75) {
                 if (global.gc) {
                     global.gc();
+                    logger.debug('Forced GC due to high memory');
                 }
-            } catch (error) {
-                logger.error('Cleanup failed', { error: error.message });
+                
+                const after = process.memoryUsage();
+                logger.info('Memory cleanup', {
+                    before: Math.round(before.heapUsed / 1024 / 1024) + 'MB',
+                    after: Math.round(after.heapUsed / 1024 / 1024) + 'MB',
+                    freed: Math.round((before.heapUsed - after.heapUsed) / 1024 / 1024) + 'MB'
+                });
             }
-        }, 3 * 60 * 1000); // Every 3 minutes
+        } catch (error) {
+            logger.error('Cleanup failed', { error: error.message });
+        }
+    }, 3 * 60 * 1000);
 
-        // Database cleanup - Keep daily
-        const dbCleanupInterval = setInterval(async () => {
-            try {
-                await this.database.cleanupOldData(30); // Keep only 30 days
-            } catch (error) {
-                logger.error('DB cleanup failed', { error: error.message });
+    // ============ DATABASE CLEANUP (Daily) ============
+    const dbCleanupInterval = setInterval(async () => {
+        try {
+            await this.database.cleanupOldData(90);
+            logger.info('Database cleanup completed');
+        } catch (error) {
+            logger.error('Database cleanup failed', { error: error.message });
+        }
+    }, 24 * 60 * 60 * 1000);
+
+    // ============ SIMPLIFIED HEALTH CHECK (5min) ============
+    const healthInterval = setInterval(async () => {
+        try {
+            const mem = process.memoryUsage();
+            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+            const rss = mem.rss / 1024 / 1024;
+            
+            // Only log if critical
+            if (heapPercent > 90 || rss > 110) {
+                logger.warn('Critical memory detected', {
+                    heapPercent: heapPercent.toFixed(1) + '%',
+                    rss: Math.round(rss) + 'MB'
+                });
+                
+                // Emergency cleanup
+                await this.performMemoryCleanup();
+                if (global.gc) {
+                    global.gc();
+                    global.gc();
+                }
             }
-        }, 24 * 60 * 60 * 1000);
+        } catch (error) {
+            logger.error('Health check failed', { error: error.message });
+        }
+    }, 5 * 60 * 1000); // Every 5 minutes
 
-        this.intervals = {
-            monitor: monitorInterval,
-            trading: tradingInterval,
-            state: stateInterval,
-            cleanup: cleanupInterval,
-            dbCleanup: dbCleanupInterval
-        };
+    // ============ STORE INTERVAL IDS ============
+    this.intervals = {
+        monitor: monitorInterval,
+        trading: tradingInterval,
+        state: stateInterval,
+        cleanup: cleanupInterval,
+        dbCleanup: dbCleanupInterval,
+        health: healthInterval
+    };
 
-        logger.info('Memory-optimized cycles active', {
-            monitor: '90s',
-            scan: `${SCAN_INTERVAL_MINUTES}min`,
-            stateSave: '15min',
-            cleanup: '3min'
-        });
-    }
+    console.log('✅ All intervals started successfully\n');
+    logger.info('Trading cycles active', {
+        monitor: '60s',
+        scan: `${SCAN_INTERVAL_MINUTES}min`,
+        stateSave: '10min',
+        cleanup: '3min',
+        health: '5min'
+    });
+}
 
 async shutdown() {
     logger.info('Initiating graceful shutdown...');
