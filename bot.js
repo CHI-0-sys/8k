@@ -563,10 +563,10 @@ class PortfolioManager {
 
 // ============ BITQUERY CLIENT (Enhanced) ============
 // ============ CORRECTED BITQUERY CLIENT ============
+// ============ BITQUERY CLIENT WITH PAYLOAD DEBUGGING ============
 class BitqueryClient {
     constructor(apiKey, logger, database) {
         this.apiKey = apiKey;
-        // CORRECTED: Use GraphQL endpoint, not EAP
         this.baseURL = "https://streaming.bitquery.io/graphql";
         this.headers = {
             'Content-Type': 'application/json',
@@ -587,7 +587,6 @@ class BitqueryClient {
 
         console.log('\n🔑 Testing BitQuery API Key...');
         
-        // Simple test query to verify connection
         const testQuery = `{
             Solana {
                 DEXPools(limit: {count: 1}) {
@@ -620,13 +619,57 @@ class BitqueryClient {
         try {
             this.queryCount++;
             
-            const response = await axios.post(this.baseURL, {
+            // ===== BUILD THE PAYLOAD =====
+            const payload = {
                 query: graphql,
                 variables: variables
-            }, {
+            };
+            
+            // ===== DEBUG: LOG THE PAYLOAD =====
+            console.log('\n📦 BitQuery Request Payload:');
+            console.log('━'.repeat(60));
+            console.log('URL:', this.baseURL);
+            console.log('\nHeaders:');
+            console.log('  Content-Type:', this.headers['Content-Type']);
+            console.log('  Authorization: Bearer', this.apiKey.substring(0, 15) + '...');
+            console.log('\nPayload:');
+            console.log(JSON.stringify(payload, null, 2));
+            console.log('━'.repeat(60));
+            
+            const response = await axios.post(this.baseURL, payload, {
                 headers: this.headers,
                 timeout: 15000
             });
+
+            // ===== DEBUG: LOG THE RESPONSE =====
+            console.log('\n📥 BitQuery Response:');
+            console.log('━'.repeat(60));
+            console.log('Status:', response.status, response.statusText);
+            console.log('Response Size:', JSON.stringify(response.data).length, 'bytes');
+            
+            if (response.data.errors) {
+                console.log('\n❌ ERRORS IN RESPONSE:');
+                console.log(JSON.stringify(response.data.errors, null, 2));
+                console.log('━'.repeat(60));
+            } else {
+                console.log('✅ No errors');
+            }
+            
+            if (response.data.data) {
+                console.log('\n📊 Data Preview:');
+                if (response.data.data.Solana?.DEXPools) {
+                    console.log(`   Found ${response.data.data.Solana.DEXPools.length} pools`);
+                    if (response.data.data.Solana.DEXPools.length > 0) {
+                        const sample = response.data.data.Solana.DEXPools[0];
+                        console.log('   Sample pool:', {
+                            symbol: sample.Pool?.Market?.BaseCurrency?.Symbol,
+                            bonding: sample.Bonding_Curve_Progress_precentage,
+                            liquidity: sample.Pool?.Quote?.PostAmountInUSD
+                        });
+                    }
+                }
+            }
+            console.log('━'.repeat(60));
 
             // Track in database
             if (this.database) {
@@ -640,6 +683,15 @@ class BitqueryClient {
 
             return response.data.data;
         } catch (error) {
+            console.log('\n💥 BitQuery Request FAILED:');
+            console.log('━'.repeat(60));
+            console.log('Error:', error.message);
+            if (error.response) {
+                console.log('Status:', error.response.status, error.response.statusText);
+                console.log('Response:', JSON.stringify(error.response.data, null, 2));
+            }
+            console.log('━'.repeat(60));
+            
             this.logger.error('Bitquery query failed', { error: error.message });
             
             if (this.database) {
@@ -676,8 +728,7 @@ class BitqueryClient {
         console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
         console.log('   Endpoint:', this.baseURL);
 
-        // CORRECTED QUERY - Uses standard GraphQL query (not subscription)
-        // Matches your working query structure
+        // THE EXACT QUERY
         const query = `{
             Solana {
                 DEXPools(
@@ -739,32 +790,25 @@ class BitqueryClient {
             console.log('\n⏳ Sending request...');
             const startTime = Date.now();
             
+            // THIS IS WHERE THE PAYLOAD IS SENT
             const data = await this.query(query);
             
             const duration = Date.now() - startTime;
             console.log(`✅ Response received in ${duration}ms`);
             
-            // Enhanced error checking
             if (!data) {
                 console.log('❌ NULL response from BitQuery');
-                console.log('   This usually means:');
-                console.log('   - API key invalid/expired');
-                console.log('   - Rate limit hit');
-                console.log('   - Query syntax error');
                 return [];
             }
             
             if (!data.Solana) {
                 console.log('❌ No Solana data in response');
-                console.log('   Response:', JSON.stringify(data, null, 2));
+                console.log('   Full response:', JSON.stringify(data, null, 2));
                 return [];
             }
             
             if (!data.Solana.DEXPools) {
                 console.log('❌ No DEXPools in Solana data');
-                console.log('   This might mean:');
-                console.log('   - No tokens in graduating range right now');
-                console.log('   - Query filters too restrictive');
                 console.log('   Solana data:', JSON.stringify(data.Solana, null, 2));
                 return [];
             }
@@ -784,25 +828,22 @@ class BitqueryClient {
 
             // Process tokens
             const allTokens = data.Solana.DEXPools.map(pool => {
-                // BitQuery returns remaining % (100 = fully bonded, 0 = just launched)
                 const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
-                
-                // Convert to progress: 0% = just launched, 100% = fully bonded
                 const bondingProgress = 100 - bondingRemaining;
                 
                 return {
                     address: pool.Pool.Market.BaseCurrency.MintAddress,
                     symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
                     name: pool.Pool.Market.BaseCurrency.Name || 'Unknown Token',
-                    bondingProgress: bondingProgress,  // 0-100% (0 = new, 100 = graduated)
-                    bondingRemaining: bondingRemaining, // 100-0% (what BitQuery returns)
+                    bondingProgress: bondingProgress,
+                    bondingRemaining: bondingRemaining,
                     liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
                     priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
                     baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
                     marketAddress: pool.Pool.Market.MarketAddress,
                     protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
                     lastUpdate: Date.now(),
-                    isHot: bondingProgress >= 96  // 96%+ = close to graduation
+                    isHot: bondingProgress >= 96
                 };
             });
 
@@ -839,13 +880,7 @@ class BitqueryClient {
 
             if (filtered.length === 0) {
                 console.log('\n⚠️  NO TOKENS PASSED FILTERS');
-                console.log('   Reasons:');
-                console.log(`   - All tokens outside ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding range`);
-                console.log(`   - All tokens below $${MIN_LIQUIDITY_USD} liquidity`);
-                console.log('\n💡 Suggestions:');
-                console.log(`   - Lower MIN_BONDING_PROGRESS (currently ${MIN_BONDING_PROGRESS}%)`);
-                console.log(`   - Raise MAX_BONDING_PROGRESS (currently ${MAX_BONDING_PROGRESS}%)`);
-                console.log(`   - Lower MIN_LIQUIDITY_USD (currently $${MIN_LIQUIDITY_USD})`);
+                console.log('   All tokens filtered out by bonding/liquidity requirements');
             }
 
             // Sort if enabled
@@ -896,7 +931,6 @@ class BitqueryClient {
         const tenMinAgo = new Date(now.getTime() - 10 * 60000);
         const twentyMinAgo = new Date(now.getTime() - 20 * 60000);
     
-        // CORRECTED: Use standard query, not subscription
         const query = `{
             Solana {
                 recent: DEXPools(
@@ -958,7 +992,6 @@ class BitqueryClient {
 
         const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60000);
 
-        // CORRECTED: Use standard query
         const query = `{
             Solana {
                 DEXPools(
@@ -1001,6 +1034,10 @@ class BitqueryClient {
             pointsPerQuery: this.queryCount > 0 ? (this.estimatedPoints / this.queryCount).toFixed(0) : 0
         };
     }
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = BitqueryClient;
 }
 
 // Export for use in bot.js
