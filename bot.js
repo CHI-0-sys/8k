@@ -567,477 +567,688 @@ class PortfolioManager {
 // This continues from the PortfolioManager class in the first artifact
 
 // ============ BITQUERY CLIENT (Enhanced) ============
+// class BitqueryClient {
+//   constructor(apiKey, logger, database) {
+//       this.apiKey = apiKey;
+//       this.baseURL = "https://streaming.bitquery.io/eap";
+//       this.headers = {
+//           'Content-Type': 'application/json',
+//           'Authorization': `Bearer ${apiKey}`
+//       };
+//       this.logger = logger;
+//       this.database = database;
+//       this.queryCount = 0;
+//       this.estimatedPoints = 0;
+//       this.cache = null;
+//   }
+
+//   async init() {
+//       if (SHARED_CACHE_ENABLED) {
+//           // Simplified cache - would use Redis in production
+//           this.cache = new Map();
+//           this.logger.info('Bitquery cache initialized');
+//       }
+
+//       console.log('\n🔑 Testing BitQuery API Key...');
+//       const testQuery = `{
+//           Solana {
+//               DEXPools(limit: {count: 1}) {
+//                   Pool {
+//                       Market {
+//                           BaseCurrency {
+//                               Symbol
+//                           }
+//                       }
+//                   }
+//               }
+//           }
+//       }`;
+      
+//       try {
+//           const testResult = await this.query(testQuery);
+//           if (testResult?.Solana?.DEXPools) {
+//               console.log('✅ API Key Valid - BitQuery Connected');
+//           } else {
+//               console.log('⚠️  API Key Valid but Query Failed');
+//               console.log('   Response:', JSON.stringify(testResult, null, 2));
+//           }
+//       } catch (err) {
+//           console.log('❌ API Key Test Failed:', err.message);
+//       }
+//   }
+  
+//  // Add after BitqueryClient.init()
+// async testBitQueryConnection() {
+//     console.log('\n' + '='.repeat(60));
+//     console.log('🧪 TESTING BITQUERY CONNECTION');
+//     console.log('='.repeat(60));
+    
+//     const simpleQuery = `{
+//         Solana {
+//             DEXPools(
+//                 limit: {count: 5}
+//                 where: {
+//                     Pool: {
+//                         Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
+//                     }
+//                 }
+//             ) {
+//                 Pool {
+//                     Market {
+//                         BaseCurrency {
+//                             Symbol
+//                         }
+//                     }
+//                     Quote {
+//                         PostAmountInUSD
+//                     }
+//                 }
+//             }
+//         }
+//     }`;
+    
+//     try {
+//         console.log('Sending test query...');
+//         const result = await this.query(simpleQuery);
+        
+//         if (!result) {
+//             console.log('❌ NULL RESULT - API key invalid or rate limited');
+//             return false;
+//         }
+        
+//         if (result.Solana?.DEXPools) {
+//             console.log(`✅ BitQuery Working! Found ${result.Solana.DEXPools.length} pools`);
+//             result.Solana.DEXPools.forEach((pool, i) => {
+//                 console.log(`   ${i+1}. ${pool.Pool.Market.BaseCurrency.Symbol} - $${pool.Pool.Quote.PostAmountInUSD}`);
+//             });
+//             return true;
+//         } else {
+//             console.log('❌ Unexpected response structure:', JSON.stringify(result, null, 2));
+//             return false;
+//         }
+        
+//     } catch (error) {
+//         console.log('❌ Test failed:', error.message);
+//         return false;
+//     }
+// } 
+  
+    
+
+//   async query(graphql, variables = {}) {
+//       try {
+//           this.queryCount++;
+          
+//           const response = await axios.post(this.baseURL, {
+//               query: graphql,
+//               variables: JSON.stringify(variables)
+//           }, {
+//               headers: this.headers,
+//               timeout: 15000
+//           });
+
+//           // Track in database
+//           if (this.database) {
+//               await this.database.trackAPIUsage('bitquery', 'graphql', 150, true);
+//           }
+
+//           if (response.data.errors) {
+//               this.logger.error('Bitquery errors', { errors: response.data.errors });
+//               return null;
+//           }
+
+//           return response.data.data;
+//       } catch (error) {
+//           this.logger.error('Bitquery query failed', { error: error.message });
+          
+//           if (this.database) {
+//               await this.database.trackAPIUsage('bitquery', 'graphql', 0, false, error.message);
+//           }
+          
+//           return null;
+//       }
+//   }
+
+//   async getGraduatingTokens() {
+//     console.log('\n' + '='.repeat(60));
+//     console.log('📡 BITQUERY API CALL - getGraduatingTokens()');
+//     console.log('='.repeat(60));
+    
+//     // Check cache first
+//     if (this.cache && this.cache.has('graduating_tokens')) {
+//         const cached = this.cache.get('graduating_tokens');
+//         const cacheAge = (Date.now() - cached.timestamp) / 1000;
+        
+//         if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
+//             console.log('✅ Using cached data');
+//             console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
+//             console.log(`   Cached tokens: ${cached.data.length}`);
+//             this.logger.debug('Using cached graduating tokens');
+//             return cached.data;
+//         } else {
+//             console.log('❌ Cache expired');
+//             console.log(`   Cache age: ${cacheAge.toFixed(0)}s (max: ${CACHE_DURATION_MINUTES * 60}s)`);
+//         }
+//     }
+
+//     console.log('\n🌐 Making fresh BitQuery API call...');
+//     console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
+//     console.log('   Endpoint:', this.baseURL);
+
+//     // CORRECTED QUERY - matches your working query
+//     const query = `{
+//         Solana {
+//             DEXPools(
+//                 limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
+//                 limit: {count: 50}
+//                 orderBy: {descending: Pool_Quote_PostAmountInUSD}
+//                 where: {
+//                     Pool: {
+//                         Base: {PostAmount: {gt: "206900000", lt: "980000000"}},
+//                         Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}},
+//                         Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
+//                     },
+//                     Transaction: {Result: {Success: true}}
+//                 }
+//             ) {
+//                 Bonding_Curve_Progress_precentage: calculate(
+//                     expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)"
+//                 )
+//                 Pool {
+//                     Market {
+//                         BaseCurrency {
+//                             MintAddress
+//                             Name
+//                             Symbol
+//                         }
+//                         MarketAddress
+//                         QuoteCurrency {
+//                             MintAddress
+//                             Name
+//                             Symbol
+//                         }
+//                     }
+//                     Dex {
+//                         ProtocolName
+//                         ProtocolFamily
+//                     }
+//                     Base {
+//                         Balance: PostAmount
+//                     }
+//                     Quote {
+//                         PostAmount
+//                         PriceInUSD
+//                         PostAmountInUSD
+//                     }
+//                 }
+//             }
+//         }
+//     }`;
+
+//     console.log('   Query parameters:');
+//     console.log('   - Limit: 50 tokens');
+//     console.log('   - Program: Pump.fun');
+//     console.log('   - Bonding formula: 100 - progress (inverted)');
+//     console.log('   - Range: All graduating tokens');
+
+//     this.estimatedPoints += 150;
+    
+//     try {
+//         console.log('\n⏳ Sending request...');
+//         const startTime = Date.now();
+        
+//         const data = await this.query(query);
+        
+//         const duration = Date.now() - startTime;
+//         console.log(`✅ Response received in ${duration}ms`);
+        
+//         if (!data) {
+//             console.log('❌ NULL response from BitQuery');
+//             console.log('   This usually means:');
+//             console.log('   - API key invalid/expired');
+//             console.log('   - Rate limit hit');
+//             console.log('   - Query syntax error');
+//             return [];
+//         }
+        
+//         if (!data.Solana) {
+//             console.log('❌ No Solana data in response');
+//             console.log('   Response structure:', JSON.stringify(data, null, 2));
+//             return [];
+//         }
+        
+//         if (!data.Solana.DEXPools) {
+//             console.log('❌ No DEXPools in Solana data');
+//             console.log('   Solana data:', JSON.stringify(data.Solana, null, 2));
+//             return [];
+//         }
+
+//         const rawTokenCount = data.Solana.DEXPools.length;
+//         console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
+
+//         if (rawTokenCount === 0) {
+//             console.log('⚠️  No tokens returned by BitQuery');
+//             console.log('   Possible reasons:');
+//             console.log('   - No tokens graduating right now');
+//             console.log('   - Pump.fun is slow today');
+//             console.log('   - Query filters too strict');
+//             console.log('='.repeat(60) + '\n');
+//             return [];
+//         }
+
+//         // Process tokens - NOTE: The percentage is INVERTED (100 = fully bonded)
+//         const allTokens = data.Solana.DEXPools.map(pool => {
+//             const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
+//             const bondingProgress = 100 - bondingRemaining; // Convert to progress (0-100)
+            
+//             return {
+//                 address: pool.Pool.Market.BaseCurrency.MintAddress,
+//                 symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
+//                 name: pool.Pool.Market.BaseCurrency.Name,
+//                 bondingProgress: bondingProgress,  // Now correct: 0-100%
+//                 bondingRemaining: bondingRemaining, // 100-0% (what BitQuery returns)
+//                 liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
+//                 priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
+//                 baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
+//                 marketAddress: pool.Pool.Market.MarketAddress,
+//                 protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
+//                 lastUpdate: Date.now(),
+//                 isHot: bondingProgress >= 96  // 96%+ bonding progress
+//             };
+//         });
+
+//         console.log('\n📋 Raw tokens (before filtering):');
+//         allTokens.slice(0, 10).forEach((token, i) => {
+//             console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0).padStart(6)} liq`);
+//         });
+//         if (allTokens.length > 10) {
+//             console.log(`   ... and ${allTokens.length - 10} more`);
+//         }
+
+//         // Apply filters - now using CORRECT bonding progress
+//         console.log('\n🔍 Applying filters:');
+//         console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
+//         console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
+        
+//         const filtered = allTokens.filter(t => {
+//             const passBonding = t.bondingProgress >= MIN_BONDING_PROGRESS && 
+//                                t.bondingProgress <= MAX_BONDING_PROGRESS;
+//             const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
+            
+//             if (!passBonding) {
+//                 console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
+//             } else if (!passLiquidity) {
+//                 console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
+//             } else {
+//                 console.log(`   ✅ ${t.symbol} - PASSED initial filters`);
+//             }
+            
+//             return passBonding && passLiquidity;
+//         });
+
+//         console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
+
+//         if (filtered.length === 0) {
+//             console.log('\n⚠️  NO TOKENS PASSED FILTERS');
+//             console.log('   Reasons:');
+//             console.log(`   - All tokens outside ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding range`);
+//             console.log(`   - All tokens below $${MIN_LIQUIDITY_USD} liquidity`);
+//             console.log('\n💡 Consider adjusting filters if this persists');
+//         }
+
+//         // Sort if enabled
+//         if (PRIORITIZE_HOT_TOKENS) {
+//             filtered.sort((a, b) => {
+//                 if (a.isHot && !b.isHot) return -1;
+//                 if (!a.isHot && b.isHot) return 1;
+//                 return b.liquidityUSD - a.liquidityUSD;
+//             });
+//             console.log('   Sorted by: Hot tokens first, then liquidity');
+//         }
+
+//         this.logger.info('Graduating tokens found', { 
+//             raw: rawTokenCount,
+//             filtered: filtered.length 
+//         });
+
+//         // Cache results
+//         if (this.cache) {
+//             this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
+//             console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
+//         }
+
+//         console.log('='.repeat(60) + '\n');
+//         return filtered;
+        
+//     } catch (error) {
+//         console.log('\n❌ BitQuery API ERROR');
+//         console.log('   Error:', error.message);
+//         console.log('   Stack:', error.stack);
+//         console.log('='.repeat(60) + '\n');
+        
+//         this.logger.error('BitQuery API error', { 
+//             error: error.message,
+//             stack: error.stack 
+//         });
+        
+//         return [];
+//     }
+// }
+
+//   async getVolumeHistory(tokenAddress) {
+//       // Similar implementation as before but with logging
+//       if (!ENABLE_VOLUME_CHECK) {
+//           return { recent: 0, previous: 0, spike: true };
+//       }
+
+//       const now = new Date();
+//       const tenMinAgo = new Date(now.getTime() - 10 * 60000);
+//       const twentyMinAgo = new Date(now.getTime() - 20 * 60000);
+  
+//       const query = `{
+//           Solana {
+//               recent: DEXPools(
+//                   where: {
+//                       Pool: {
+//                           Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
+//                           Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
+//                       }
+//                       Block: {Time: {since: "${tenMinAgo.toISOString()}"}}
+//                       Transaction: {Result: {Success: true}}
+//                   }
+//               ) {
+//                   Pool { Quote { PostAmountInUSD } }
+//               }
+//               previous: DEXPools(
+//                   where: {
+//                       Pool: {
+//                           Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
+//                           Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
+//                       }
+//                       Block: {Time: {since: "${twentyMinAgo.toISOString()}", till: "${tenMinAgo.toISOString()}"}}
+//                       Transaction: {Result: {Success: true}}
+//                   }
+//               ) {
+//                   Pool { Quote { PostAmountInUSD } }
+//               }
+//           }
+//       }`;
+  
+//       this.estimatedPoints += 80;
+//       const data = await this.query(query);
+//       if (!data?.Solana) return { recent: 0, previous: 0, spike: false };
+  
+//       const recentVol = (data.Solana.recent || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
+//       const prevVol = (data.Solana.previous || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
+  
+//       const ABS_SPIKE_THRESHOLD = 100;
+//       let hasSpike = false;
+//       if (prevVol > 0) {
+//           hasSpike = (recentVol / prevVol) >= VOLUME_SPIKE_MULTIPLIER;
+//       } else {
+//           hasSpike = recentVol >= ABS_SPIKE_THRESHOLD;
+//       }
+
+//       this.logger.debug('Volume check', { token: tokenAddress.substring(0, 8), recentVol, prevVol, hasSpike });
+
+//       return { recent: recentVol, previous: prevVol, spike: hasSpike };
+//   }
+
+//   async detectWhaleDumps(tokenAddress) {
+//       if (!ENABLE_WHALE_CHECK) {
+//           return false;
+//       }
+
+//       const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60000);
+
+//       const query = `{
+//           Solana {
+//               DEXPools(
+//                   where: {
+//                       Pool: {
+//                           Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
+//                           Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
+//                       }
+//                       Block: {Time: {since: "${timeAgo.toISOString()}"}}
+//                       Transaction: {Result: {Success: true}}
+//                   }
+//               ) {
+//                   Pool { Quote { PostAmountInUSD } }
+//               }
+//           }
+//       }`;
+
+//       this.estimatedPoints += 40;
+//       const data = await this.query(query);
+//       if (!data?.Solana?.DEXPools) return false;
+
+//       const largeSells = data.Solana.DEXPools.filter(
+//           p => (p.Pool?.Quote?.PostAmountInUSD || 0) > LARGE_SELL_THRESHOLD
+//       );
+
+//       const hasWhale = largeSells.length > 0;
+//       this.logger.debug('Whale check', { token: tokenAddress.substring(0, 8), hasWhale, largeSells: largeSells.length });
+
+//       return hasWhale;
+//   }
+
+//   getStats() {
+//       return {
+//           queries: this.queryCount,
+//           estimatedPoints: this.estimatedPoints,
+//           pointsPerQuery: this.queryCount > 0 ? (this.estimatedPoints / this.queryCount).toFixed(0) : 0
+//       };
+//   }
+// }
+
 class BitqueryClient {
-  constructor(apiKey, logger, database) {
-      this.apiKey = apiKey;
-      this.baseURL = "https://streaming.bitquery.io/eap";
-      this.headers = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-      };
-      this.logger = logger;
-      this.database = database;
-      this.queryCount = 0;
-      this.estimatedPoints = 0;
-      this.cache = null;
-  }
-
-  async init() {
-      if (SHARED_CACHE_ENABLED) {
-          // Simplified cache - would use Redis in production
-          this.cache = new Map();
-          this.logger.info('Bitquery cache initialized');
+    constructor(apiKey, logger, database) {
+        this.apiKey = apiKey;
+        this.baseURL = "https://streaming.bitquery.io/graphql";  // ✅ FIXED URL
+        this.headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        };
+        this.logger = logger;
+        this.database = database;
+        this.queryCount = 0;
+        this.estimatedPoints = 0;
+        this.cache = null;
+    }
+  
+    async getGraduatingTokens() {
+      console.log('\n' + '='.repeat(60));
+      console.log('📡 BITQUERY API CALL - getGraduatingTokens()');
+      console.log('='.repeat(60));
+      
+      // Check cache first
+      if (this.cache && this.cache.has('graduating_tokens')) {
+          const cached = this.cache.get('graduating_tokens');
+          const cacheAge = (Date.now() - cached.timestamp) / 1000;
+          
+          if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
+              console.log('✅ Using cached data');
+              console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
+              console.log(`   Cached tokens: ${cached.data.length}`);
+              this.logger.debug('Using cached graduating tokens');
+              return cached.data;
+          }
       }
-
-      console.log('\n🔑 Testing BitQuery API Key...');
-      const testQuery = `{
+  
+      console.log('\n🌐 Making fresh BitQuery API call...');
+      console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
+      console.log('   Endpoint:', this.baseURL);
+  
+      // ✅ CORRECTED QUERY - Matches your working subscription
+      const query = `query GetGraduatingTokens {
           Solana {
-              DEXPools(limit: {count: 1}) {
+              DEXPools(
+                  limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
+                  limit: {count: 50}
+                  orderBy: {descending: Pool_Quote_PostAmountInUSD}
+                  where: {
+                      Pool: {
+                          Base: {
+                              PostAmount: {
+                                  gt: "206900000"
+                                  lt: "980000000"
+                              }
+                          }
+                          Dex: {
+                              ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}
+                          }
+                          Market: {
+                              QuoteCurrency: {
+                                  MintAddress: {
+                                      in: ["11111111111111111111111111111111", "So11111111111111111111111111111111111111112"]
+                                  }
+                              }
+                          }
+                      }
+                      Transaction: {Result: {Success: true}}
+                  }
+              ) {
+                  Bonding_Curve_Progress_percentage: calculate(
+                      expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)"
+                  )
                   Pool {
                       Market {
                           BaseCurrency {
+                              MintAddress
+                              Name
+                              Symbol
+                          }
+                          MarketAddress
+                          QuoteCurrency {
+                              MintAddress
+                              Name
                               Symbol
                           }
                       }
+                      Dex {
+                          ProtocolName
+                          ProtocolFamily
+                      }
+                      Base {
+                          Balance: PostAmount
+                      }
+                      Quote {
+                          PostAmount
+                          PriceInUSD
+                          PostAmountInUSD
+                      }
                   }
               }
           }
       }`;
+  
+      this.estimatedPoints += 150;
       
       try {
-          const testResult = await this.query(testQuery);
-          if (testResult?.Solana?.DEXPools) {
-              console.log('✅ API Key Valid - BitQuery Connected');
-          } else {
-              console.log('⚠️  API Key Valid but Query Failed');
-              console.log('   Response:', JSON.stringify(testResult, null, 2));
-          }
-      } catch (err) {
-          console.log('❌ API Key Test Failed:', err.message);
-      }
-  }
-  
- // Add after BitqueryClient.init()
-async testBitQueryConnection() {
-    console.log('\n' + '='.repeat(60));
-    console.log('🧪 TESTING BITQUERY CONNECTION');
-    console.log('='.repeat(60));
-    
-    const simpleQuery = `{
-        Solana {
-            DEXPools(
-                limit: {count: 5}
-                where: {
-                    Pool: {
-                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
-                    }
-                }
-            ) {
-                Pool {
-                    Market {
-                        BaseCurrency {
-                            Symbol
-                        }
-                    }
-                    Quote {
-                        PostAmountInUSD
-                    }
-                }
-            }
-        }
-    }`;
-    
-    try {
-        console.log('Sending test query...');
-        const result = await this.query(simpleQuery);
-        
-        if (!result) {
-            console.log('❌ NULL RESULT - API key invalid or rate limited');
-            return false;
-        }
-        
-        if (result.Solana?.DEXPools) {
-            console.log(`✅ BitQuery Working! Found ${result.Solana.DEXPools.length} pools`);
-            result.Solana.DEXPools.forEach((pool, i) => {
-                console.log(`   ${i+1}. ${pool.Pool.Market.BaseCurrency.Symbol} - $${pool.Pool.Quote.PostAmountInUSD}`);
-            });
-            return true;
-        } else {
-            console.log('❌ Unexpected response structure:', JSON.stringify(result, null, 2));
-            return false;
-        }
-        
-    } catch (error) {
-        console.log('❌ Test failed:', error.message);
-        return false;
-    }
-} 
-  
-    
-
-  async query(graphql, variables = {}) {
-      try {
-          this.queryCount++;
+          console.log('\n⏳ Sending request...');
+          const startTime = Date.now();
           
-          const response = await axios.post(this.baseURL, {
-              query: graphql,
-              variables: JSON.stringify(variables)
-          }, {
-              headers: this.headers,
-              timeout: 15000
+          const data = await this.query(query);
+          
+          const duration = Date.now() - startTime;
+          console.log(`✅ Response received in ${duration}ms`);
+          
+          if (!data || !data.Solana || !data.Solana.DEXPools) {
+              console.log('❌ No valid data returned');
+              return [];
+          }
+  
+          const rawTokenCount = data.Solana.DEXPools.length;
+          console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
+  
+          if (rawTokenCount === 0) {
+              console.log('⚠️  No tokens found');
+              return [];
+          }
+  
+          // ✅ FIXED: Correct bonding calculation
+          const allTokens = data.Solana.DEXPools.map(pool => {
+              // BitQuery returns: 100 = fully bonded, 0 = not bonded
+              // We want: 100 = fully bonded, 0 = not bonded (same!)
+              const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_percentage || 0);
+              const bondingProgress = 100 - bondingRemaining; // Now correct!
+              
+              // Validate: should be 0-100
+              const validProgress = Math.max(0, Math.min(100, bondingProgress));
+              
+              return {
+                  address: pool.Pool.Market.BaseCurrency.MintAddress,
+                  symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
+                  name: pool.Pool.Market.BaseCurrency.Name,
+                  bondingProgress: validProgress,
+                  bondingRemaining: bondingRemaining,
+                  liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
+                  priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
+                  baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
+                  marketAddress: pool.Pool.Market.MarketAddress,
+                  protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
+                  lastUpdate: Date.now(),
+                  isHot: validProgress >= 96
+              };
           });
-
-          // Track in database
-          if (this.database) {
-              await this.database.trackAPIUsage('bitquery', 'graphql', 150, true);
+  
+          console.log('\n📋 Raw tokens (before filtering):');
+          allTokens.slice(0, 10).forEach((token, i) => {
+              console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0).padStart(6)} liq`);
+          });
+  
+          // ✅ Apply filters
+          console.log('\n🔍 Applying filters:');
+          console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
+          console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
+          
+          const filtered = allTokens.filter(t => {
+              const passBonding = t.bondingProgress >= MIN_BONDING_PROGRESS && 
+                                 t.bondingProgress <= MAX_BONDING_PROGRESS;
+              const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
+              
+              if (!passBonding) {
+                  console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
+              } else if (!passLiquidity) {
+                  console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
+              } else {
+                  console.log(`   ✅ ${t.symbol} - PASSED all filters`);
+              }
+              
+              return passBonding && passLiquidity;
+          });
+  
+          console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
+  
+          if (PRIORITIZE_HOT_TOKENS) {
+              filtered.sort((a, b) => {
+                  if (a.isHot && !b.isHot) return -1;
+                  if (!a.isHot && b.isHot) return 1;
+                  return b.liquidityUSD - a.liquidityUSD;
+              });
           }
-
-          if (response.data.errors) {
-              this.logger.error('Bitquery errors', { errors: response.data.errors });
-              return null;
+  
+          // Cache results
+          if (this.cache) {
+              this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
+              console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
           }
-
-          return response.data.data;
+  
+          console.log('='.repeat(60) + '\n');
+          return filtered;
+          
       } catch (error) {
-          this.logger.error('Bitquery query failed', { error: error.message });
+          console.log('\n❌ BitQuery API ERROR');
+          console.log('   Error:', error.message);
+          console.log('='.repeat(60) + '\n');
           
-          if (this.database) {
-              await this.database.trackAPIUsage('bitquery', 'graphql', 0, false, error.message);
-          }
+          this.logger.error('BitQuery API error', { 
+              error: error.message,
+              stack: error.stack 
+          });
           
-          return null;
+          return [];
       }
-  }
-
-  async getGraduatingTokens() {
-    console.log('\n' + '='.repeat(60));
-    console.log('📡 BITQUERY API CALL - getGraduatingTokens()');
-    console.log('='.repeat(60));
-    
-    // Check cache first
-    if (this.cache && this.cache.has('graduating_tokens')) {
-        const cached = this.cache.get('graduating_tokens');
-        const cacheAge = (Date.now() - cached.timestamp) / 1000;
-        
-        if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
-            console.log('✅ Using cached data');
-            console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
-            console.log(`   Cached tokens: ${cached.data.length}`);
-            this.logger.debug('Using cached graduating tokens');
-            return cached.data;
-        } else {
-            console.log('❌ Cache expired');
-            console.log(`   Cache age: ${cacheAge.toFixed(0)}s (max: ${CACHE_DURATION_MINUTES * 60}s)`);
-        }
-    }
-
-    console.log('\n🌐 Making fresh BitQuery API call...');
-    console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
-    console.log('   Endpoint:', this.baseURL);
-
-    // CORRECTED QUERY - matches your working query
-    const query = `{
-        Solana {
-            DEXPools(
-                limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
-                limit: {count: 50}
-                orderBy: {descending: Pool_Quote_PostAmountInUSD}
-                where: {
-                    Pool: {
-                        Base: {PostAmount: {gt: "206900000", lt: "980000000"}},
-                        Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}},
-                        Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "${SOL_MINT}"]}}}
-                    },
-                    Transaction: {Result: {Success: true}}
-                }
-            ) {
-                Bonding_Curve_Progress_precentage: calculate(
-                    expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)"
-                )
-                Pool {
-                    Market {
-                        BaseCurrency {
-                            MintAddress
-                            Name
-                            Symbol
-                        }
-                        MarketAddress
-                        QuoteCurrency {
-                            MintAddress
-                            Name
-                            Symbol
-                        }
-                    }
-                    Dex {
-                        ProtocolName
-                        ProtocolFamily
-                    }
-                    Base {
-                        Balance: PostAmount
-                    }
-                    Quote {
-                        PostAmount
-                        PriceInUSD
-                        PostAmountInUSD
-                    }
-                }
-            }
-        }
-    }`;
-
-    console.log('   Query parameters:');
-    console.log('   - Limit: 50 tokens');
-    console.log('   - Program: Pump.fun');
-    console.log('   - Bonding formula: 100 - progress (inverted)');
-    console.log('   - Range: All graduating tokens');
-
-    this.estimatedPoints += 150;
-    
-    try {
-        console.log('\n⏳ Sending request...');
-        const startTime = Date.now();
-        
-        const data = await this.query(query);
-        
-        const duration = Date.now() - startTime;
-        console.log(`✅ Response received in ${duration}ms`);
-        
-        if (!data) {
-            console.log('❌ NULL response from BitQuery');
-            console.log('   This usually means:');
-            console.log('   - API key invalid/expired');
-            console.log('   - Rate limit hit');
-            console.log('   - Query syntax error');
-            return [];
-        }
-        
-        if (!data.Solana) {
-            console.log('❌ No Solana data in response');
-            console.log('   Response structure:', JSON.stringify(data, null, 2));
-            return [];
-        }
-        
-        if (!data.Solana.DEXPools) {
-            console.log('❌ No DEXPools in Solana data');
-            console.log('   Solana data:', JSON.stringify(data.Solana, null, 2));
-            return [];
-        }
-
-        const rawTokenCount = data.Solana.DEXPools.length;
-        console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
-
-        if (rawTokenCount === 0) {
-            console.log('⚠️  No tokens returned by BitQuery');
-            console.log('   Possible reasons:');
-            console.log('   - No tokens graduating right now');
-            console.log('   - Pump.fun is slow today');
-            console.log('   - Query filters too strict');
-            console.log('='.repeat(60) + '\n');
-            return [];
-        }
-
-        // Process tokens - NOTE: The percentage is INVERTED (100 = fully bonded)
-        const allTokens = data.Solana.DEXPools.map(pool => {
-            const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
-            const bondingProgress = 100 - bondingRemaining; // Convert to progress (0-100)
-            
-            return {
-                address: pool.Pool.Market.BaseCurrency.MintAddress,
-                symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
-                name: pool.Pool.Market.BaseCurrency.Name,
-                bondingProgress: bondingProgress,  // Now correct: 0-100%
-                bondingRemaining: bondingRemaining, // 100-0% (what BitQuery returns)
-                liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
-                priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
-                baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
-                marketAddress: pool.Pool.Market.MarketAddress,
-                protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
-                lastUpdate: Date.now(),
-                isHot: bondingProgress >= 96  // 96%+ bonding progress
-            };
-        });
-
-        console.log('\n📋 Raw tokens (before filtering):');
-        allTokens.slice(0, 10).forEach((token, i) => {
-            console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0).padStart(6)} liq`);
-        });
-        if (allTokens.length > 10) {
-            console.log(`   ... and ${allTokens.length - 10} more`);
-        }
-
-        // Apply filters - now using CORRECT bonding progress
-        console.log('\n🔍 Applying filters:');
-        console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
-        console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
-        
-        const filtered = allTokens.filter(t => {
-            const passBonding = t.bondingProgress >= MIN_BONDING_PROGRESS && 
-                               t.bondingProgress <= MAX_BONDING_PROGRESS;
-            const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
-            
-            if (!passBonding) {
-                console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
-            } else if (!passLiquidity) {
-                console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
-            } else {
-                console.log(`   ✅ ${t.symbol} - PASSED initial filters`);
-            }
-            
-            return passBonding && passLiquidity;
-        });
-
-        console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
-
-        if (filtered.length === 0) {
-            console.log('\n⚠️  NO TOKENS PASSED FILTERS');
-            console.log('   Reasons:');
-            console.log(`   - All tokens outside ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding range`);
-            console.log(`   - All tokens below $${MIN_LIQUIDITY_USD} liquidity`);
-            console.log('\n💡 Consider adjusting filters if this persists');
-        }
-
-        // Sort if enabled
-        if (PRIORITIZE_HOT_TOKENS) {
-            filtered.sort((a, b) => {
-                if (a.isHot && !b.isHot) return -1;
-                if (!a.isHot && b.isHot) return 1;
-                return b.liquidityUSD - a.liquidityUSD;
-            });
-            console.log('   Sorted by: Hot tokens first, then liquidity');
-        }
-
-        this.logger.info('Graduating tokens found', { 
-            raw: rawTokenCount,
-            filtered: filtered.length 
-        });
-
-        // Cache results
-        if (this.cache) {
-            this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
-            console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
-        }
-
-        console.log('='.repeat(60) + '\n');
-        return filtered;
-        
-    } catch (error) {
-        console.log('\n❌ BitQuery API ERROR');
-        console.log('   Error:', error.message);
-        console.log('   Stack:', error.stack);
-        console.log('='.repeat(60) + '\n');
-        
-        this.logger.error('BitQuery API error', { 
-            error: error.message,
-            stack: error.stack 
-        });
-        
-        return [];
-    }
-}
-
-  async getVolumeHistory(tokenAddress) {
-      // Similar implementation as before but with logging
-      if (!ENABLE_VOLUME_CHECK) {
-          return { recent: 0, previous: 0, spike: true };
-      }
-
-      const now = new Date();
-      const tenMinAgo = new Date(now.getTime() - 10 * 60000);
-      const twentyMinAgo = new Date(now.getTime() - 20 * 60000);
-  
-      const query = `{
-          Solana {
-              recent: DEXPools(
-                  where: {
-                      Pool: {
-                          Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                          Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
-                      }
-                      Block: {Time: {since: "${tenMinAgo.toISOString()}"}}
-                      Transaction: {Result: {Success: true}}
-                  }
-              ) {
-                  Pool { Quote { PostAmountInUSD } }
-              }
-              previous: DEXPools(
-                  where: {
-                      Pool: {
-                          Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                          Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
-                      }
-                      Block: {Time: {since: "${twentyMinAgo.toISOString()}", till: "${tenMinAgo.toISOString()}"}}
-                      Transaction: {Result: {Success: true}}
-                  }
-              ) {
-                  Pool { Quote { PostAmountInUSD } }
-              }
-          }
-      }`;
-  
-      this.estimatedPoints += 80;
-      const data = await this.query(query);
-      if (!data?.Solana) return { recent: 0, previous: 0, spike: false };
-  
-      const recentVol = (data.Solana.recent || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
-      const prevVol = (data.Solana.previous || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
-  
-      const ABS_SPIKE_THRESHOLD = 100;
-      let hasSpike = false;
-      if (prevVol > 0) {
-          hasSpike = (recentVol / prevVol) >= VOLUME_SPIKE_MULTIPLIER;
-      } else {
-          hasSpike = recentVol >= ABS_SPIKE_THRESHOLD;
-      }
-
-      this.logger.debug('Volume check', { token: tokenAddress.substring(0, 8), recentVol, prevVol, hasSpike });
-
-      return { recent: recentVol, previous: prevVol, spike: hasSpike };
-  }
-
-  async detectWhaleDumps(tokenAddress) {
-      if (!ENABLE_WHALE_CHECK) {
-          return false;
-      }
-
-      const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60000);
-
-      const query = `{
-          Solana {
-              DEXPools(
-                  where: {
-                      Pool: {
-                          Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                          Dex: {ProgramAddress: {is: "${PUMP_FUN_PROGRAM}"}}
-                      }
-                      Block: {Time: {since: "${timeAgo.toISOString()}"}}
-                      Transaction: {Result: {Success: true}}
-                  }
-              ) {
-                  Pool { Quote { PostAmountInUSD } }
-              }
-          }
-      }`;
-
-      this.estimatedPoints += 40;
-      const data = await this.query(query);
-      if (!data?.Solana?.DEXPools) return false;
-
-      const largeSells = data.Solana.DEXPools.filter(
-          p => (p.Pool?.Quote?.PostAmountInUSD || 0) > LARGE_SELL_THRESHOLD
-      );
-
-      const hasWhale = largeSells.length > 0;
-      this.logger.debug('Whale check', { token: tokenAddress.substring(0, 8), hasWhale, largeSells: largeSells.length });
-
-      return hasWhale;
-  }
-
-  getStats() {
-      return {
-          queries: this.queryCount,
-          estimatedPoints: this.estimatedPoints,
-          pointsPerQuery: this.queryCount > 0 ? (this.estimatedPoints / this.queryCount).toFixed(0) : 0
-      };
   }
 }
 
