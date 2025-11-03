@@ -3498,6 +3498,10 @@ stripHtmlTags(text) {
                 case '/recent':
                     handlerPromise = this.handleRecentTrades(userId, chatId);
                     break;   
+
+                case '/scan':
+                    handlerPromise = this.handleScan(userId, chatId);
+                    break;    
                     
                 default:
                     await this.sendMessage(chatId, 
@@ -3889,6 +3893,32 @@ Use /help for commands
     }
 }
 
+async handleScan(userId, chatId) {
+    try {
+        await this.sendMessage(chatId, '🔍 Manual scan initiated...');
+        
+        const user = this.engine.getUserState(userId);
+        if (!user.isActive) {
+            await this.sendMessage(chatId, 
+                '❌ Bot is not active. Use /start first.'
+            );
+            return;
+        }
+        
+        console.log('\n🔍 MANUAL SCAN TRIGGERED by user', userId);
+        await this.engine.tradingCycle();
+        
+        await this.sendMessage(chatId, 
+            '✅ Scan complete. Check logs for results.'
+        );
+        
+    } catch (error) {
+        logger.error('Manual scan failed', { error: error.message });
+        await this.sendMessage(chatId, 
+            `❌ Scan failed: ${error.message}`
+        );
+    }
+}
 
 async handleWallet(userId, chatId) {
     try {
@@ -4431,7 +4461,7 @@ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) *
 /start - Activate trading
 /stop - Stop trading
 /recent - Recent trades 
-
+/scan - force start trading
 
 <b>💰 Wallet & Balance:</b>
 /wallet - View wallet address & balances
@@ -4518,7 +4548,6 @@ Can lose all capital. Trade responsibly.
       }
   }
 
-  
   startTrading() {
     console.log('\n' + '='.repeat(60));
     console.log('🚀 STARTING TRADING CYCLES');
@@ -4526,8 +4555,8 @@ Can lose all capital. Trade responsibly.
     
     logger.info('Starting trading cycles...');
 
-    // DIAGNOSTIC: Log intervals
     const scanIntervalMs = Math.max(SCAN_INTERVAL_MINUTES * 60 * 1000, 5 * 60 * 1000);
+    
     console.log('⏰ Intervals configured:');
     console.log(`   - Monitor: 60s`);
     console.log(`   - Trading scan: ${scanIntervalMs/1000}s (${SCAN_INTERVAL_MINUTES}min)`);
@@ -4535,14 +4564,13 @@ Can lose all capital. Trade responsibly.
     console.log(`   - Cleanup: 3min`);
     console.log('='.repeat(60) + '\n');
 
-    // ============ POSITION MONITORING (60s) ============
+    // ============ 1. POSITION MONITORING (60s) ============
     const monitorInterval = setInterval(async () => {
         if (!this.engine.hasActiveUsers()) return;
         
         try {
             for (const [userId, user] of this.engine.userStates.entries()) {
                 if (user.isActive && user.position) {
-                    console.log(`📊 Monitoring position for user ${userId}`);
                     await this.engine.monitorPosition(userId);
                 }
             }
@@ -4554,30 +4582,24 @@ Can lose all capital. Trade responsibly.
         }
     }, 60000);
 
-    // ============ TRADING CYCLE (Critical - This is where scanning happens) ============
-    console.log(`⏰ First trading cycle will run in ${scanIntervalMs/1000}s`);
-    console.log(`   Then every ${SCAN_INTERVAL_MINUTES} minutes after that\n`);
-    
+    // ============ 2. TRADING CYCLE (Main scan loop) ============
     const tradingInterval = setInterval(async () => {
         console.log('\n⏰ TRADING INTERVAL TRIGGERED');
         console.log(`   Time: ${new Date().toLocaleTimeString()}`);
         
         try {
-            // Memory check before heavy operations
             const mem = process.memoryUsage();
             const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
             
-            console.log(`💾 Memory before scan: ${heapPercent.toFixed(1)}%`);
+            console.log(`💾 Memory: ${heapPercent.toFixed(1)}%`);
             
             if (heapPercent > 85) {
-                logger.warn('Skipping trading cycle - high memory', {
+                logger.warn('Skipping scan - high memory', {
                     heapPercent: heapPercent.toFixed(1) + '%'
                 });
-                console.log('⚠️  Skipping scan - memory too high');
                 return;
             }
             
-            // THE ACTUAL TRADING CYCLE
             await this.engine.tradingCycle();
             
         } catch (error) {
@@ -4589,57 +4611,41 @@ Can lose all capital. Trade responsibly.
         }
     }, scanIntervalMs);
 
-    // ============ RUN FIRST CYCLE IMMEDIATELY ============
-    // This is critical - run first cycle after 30 seconds, not waiting for full interval
-    console.log('🎯 Running FIRST trading cycle in 30 seconds...\n');
-    setTimeout(async () => {
-        console.log('\n🎬 INITIAL TRADING CYCLE (30s warmup complete)');
-        try {
-            await this.engine.tradingCycle();
-        } catch (error) {
-            console.error('Initial cycle error:', error.message);
-        }
-    }, 30000); // 30 seconds
-
-    // ============ STATE PERSISTENCE (10min) ============
+    // ============ 3. STATE PERSISTENCE (10min) ============
     const stateInterval = setInterval(async () => {
         try {
             await this.engine.saveState();
-            logger.debug('State saved successfully');
         } catch (error) {
-            logger.error('State save failed', { 
-                error: error.message 
-            });
+            logger.error('State save failed', { error: error.message });
         }
     }, 10 * 60 * 1000);
 
-    // ============ MEMORY CLEANUP (3min) - LESS VERBOSE ============
+    // ============ 4. MEMORY CLEANUP (5min - REDUCED LOGGING) ============
     const cleanupInterval = setInterval(async () => {
         try {
             const before = process.memoryUsage();
-            const cleaned = await this.performMemoryCleanup();
-            
-            // Only log if memory is actually high
             const heapPercent = (before.heapUsed / before.heapTotal * 100);
-            if (heapPercent > 75) {
+            
+            // Only cleanup if memory actually high
+            if (heapPercent > 80) {
+                await this.performMemoryCleanup();
+                
                 if (global.gc) {
                     global.gc();
-                    logger.debug('Forced GC due to high memory');
                 }
                 
                 const after = process.memoryUsage();
                 logger.info('Memory cleanup', {
                     before: Math.round(before.heapUsed / 1024 / 1024) + 'MB',
-                    after: Math.round(after.heapUsed / 1024 / 1024) + 'MB',
-                    freed: Math.round((before.heapUsed - after.heapUsed) / 1024 / 1024) + 'MB'
+                    after: Math.round(after.heapUsed / 1024 / 1024) + 'MB'
                 });
             }
         } catch (error) {
             logger.error('Cleanup failed', { error: error.message });
         }
-    }, 3 * 60 * 1000);
+    }, 5 * 60 * 1000);
 
-    // ============ DATABASE CLEANUP (Daily) ============
+    // ============ 5. DATABASE CLEANUP (Daily) ============
     const dbCleanupInterval = setInterval(async () => {
         try {
             await this.database.cleanupOldData(90);
@@ -4649,7 +4655,7 @@ Can lose all capital. Trade responsibly.
         }
     }, 24 * 60 * 60 * 1000);
 
-    // ============ SIMPLIFIED HEALTH CHECK (5min) ============
+    // ============ 6. SIMPLIFIED HEALTH CHECK (10min) ============
     const healthInterval = setInterval(async () => {
         try {
             const mem = process.memoryUsage();
@@ -4658,12 +4664,11 @@ Can lose all capital. Trade responsibly.
             
             // Only log if critical
             if (heapPercent > 90 || rss > 110) {
-                logger.warn('Critical memory detected', {
+                logger.warn('Critical memory', {
                     heapPercent: heapPercent.toFixed(1) + '%',
                     rss: Math.round(rss) + 'MB'
                 });
                 
-                // Emergency cleanup
                 await this.performMemoryCleanup();
                 if (global.gc) {
                     global.gc();
@@ -4673,9 +4678,9 @@ Can lose all capital. Trade responsibly.
         } catch (error) {
             logger.error('Health check failed', { error: error.message });
         }
-    }, 5 * 60 * 1000); // Every 5 minutes
+    }, 10 * 60 * 1000);
 
-    // ============ STORE INTERVAL IDS ============
+    // Store intervals
     this.intervals = {
         monitor: monitorInterval,
         trading: tradingInterval,
@@ -4685,15 +4690,97 @@ Can lose all capital. Trade responsibly.
         health: healthInterval
     };
 
+    // ============ CRITICAL: RUN FIRST SCAN IMMEDIATELY ============
+    console.log('🚀 Running FIRST trading cycle in 10 seconds...\n');
+    
+    setTimeout(async () => {
+        console.log('\n' + '🎬'.repeat(30));
+        console.log('🎬 INITIAL TRADING CYCLE (10s warmup complete)');
+        console.log('🎬'.repeat(30));
+        
+        try {
+            // Check active users
+            const activeCount = Array.from(this.engine.userStates.values())
+                .filter(u => u.isActive).length;
+            
+            console.log(`👥 Active users found: ${activeCount}`);
+            
+            if (activeCount === 0) {
+                console.log('\n⚠️  NO ACTIVE USERS!');
+                console.log('   The bot is running, but no user has activated it.');
+                console.log('   Please run /start in Telegram to activate trading.\n');
+                logger.warn('Initial scan skipped - no active users');
+                return;
+            }
+            
+            console.log('✅ Active users confirmed, starting scan...\n');
+            await this.engine.tradingCycle();
+            
+        } catch (error) {
+            console.error('💥 Initial cycle error:', error.message);
+            console.error('Stack:', error.stack);
+            logger.error('Initial cycle failed', { 
+                error: error.message,
+                stack: error.stack 
+            });
+        }
+    }, 10000); // 10 seconds instead of 30
+
     console.log('✅ All intervals started successfully\n');
     logger.info('Trading cycles active', {
         monitor: '60s',
         scan: `${SCAN_INTERVAL_MINUTES}min`,
         stateSave: '10min',
-        cleanup: '3min',
-        health: '5min'
+        cleanup: '5min',
+        health: '10min'
     });
 }
+
+// ============ REDUCE MEMORY CLEANUP SPAM ============
+// Replace setupMemoryManagement() with this QUIETER version
+
+setupMemoryManagement() {
+    // Only check every 5 minutes, not every 2 minutes
+    setInterval(() => {
+        const mem = process.memoryUsage();
+        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+
+        // Only cleanup at 85% instead of 75%
+        if (heapPercent > 85) {
+            this.performMemoryCleanup();
+
+            if (global.gc) {
+                global.gc();
+            }
+            
+            // Only log if we actually cleaned something
+            logger.info('Memory cleanup triggered', {
+                heapPercent: heapPercent.toFixed(1) + '%'
+            });
+        }
+    }, 5 * 60 * 1000); // Every 5 minutes
+
+    // Emergency shutdown check (keep this)
+    setInterval(() => {
+        const mem = process.memoryUsage();
+        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+        const rssMB = mem.rss / 1024 / 1024;
+        
+        if (heapPercent > 95 || rssMB > 120) {
+            logger.error('EMERGENCY MEMORY SHUTDOWN', {
+                heapPercent: heapPercent.toFixed(1) + '%',
+                rss: Math.round(rssMB) + 'MB'
+            });
+            
+            this.engine.saveState().catch(err => 
+                logger.error('Emergency save failed', { error: err.message })
+            );
+            
+            setTimeout(() => process.exit(1), 2000);
+        }
+    }, 30 * 1000);
+}
+
 
 async shutdown() {
     logger.info('Initiating graceful shutdown...');
