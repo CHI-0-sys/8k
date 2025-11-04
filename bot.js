@@ -65,35 +65,20 @@ const AnomalyDetector = require('./modules/anomaly-detector');
 
 // ============ WINSTON LOGGING SETUP ============
 const logger = winston.createLogger({
-    level: 'info', // Change from 'debug' to 'info'
+    level: 'info', // Only info and above
     format: winston.format.combine(
-        winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        winston.format.errors({ stack: true }),
-        winston.format.json()
+        winston.format.timestamp({ format: 'HH:mm:ss' }), // Shorter timestamp
+        winston.format.simple() // Simple format = less memory
     ),
     defaultMeta: { service: 'trading-bot' },
     transports: [
-        // Reduce log file sizes
-        new winston.transports.File({ 
-            filename: path.join(logDir, 'error.log'),
-            level: 'error',
-            maxsize: 2 * 1024 * 1024, // 2MB instead of 5MB
-            maxFiles: 2 // 2 files instead of 3
-        }),
-        new winston.transports.File({ 
-            filename: path.join(logDir, 'combined.log'),
-            maxsize: 3 * 1024 * 1024, // 3MB instead of 5MB
-            maxFiles: 2 // 2 files instead of 5
-        }),
-        // REMOVE trades.log to save memory
+        // Only console in production - no file logging
         new winston.transports.Console({
-            format: winston.format.combine(
-                winston.format.colorize(),
-                winston.format.simple() // Simpler format = less memory
-            )
+            format: winston.format.simple()
         })
     ]
 });
+
 
 
 
@@ -3224,44 +3209,20 @@ setupMemoryManagement() {
 performMemoryCleanup() {
     let cleaned = 0;
 
-    // 1. Clear ALL caches aggressively
+    // Only clear cache
     if (this.bitquery && this.bitquery.cache) {
         cleaned += this.bitquery.cache.size;
         this.bitquery.cache.clear();
     }
 
-    // 2. Trim trade history to last 10 trades only (was 50)
+    // Trim trade history to last 5 trades only
     for (const [userId, user] of this.engine.userStates.entries()) {
-        if (user.tradeHistory && user.tradeHistory.length > 10) {
-            const removed = user.tradeHistory.length - 10;
-            user.tradeHistory = user.tradeHistory.slice(-10);
+        if (user.tradeHistory && user.tradeHistory.length > 5) {
+            const removed = user.tradeHistory.length - 5;
+            user.tradeHistory = user.tradeHistory.slice(-5);
             cleaned += removed;
         }
-        
-        // Clear profit taking history completely
-        if (user.profitTakingHistory && user.profitTakingHistory.length > 0) {
-            user.profitTakingHistory = [];
-            cleaned += 5;
-        }
     }
-
-    // 3. Clear Telegram bot internal queues
-    if (this.bot && this.bot._polling) {
-        this.bot._polling._lastUpdate = null;
-        this.bot._polling._lastUpdateId = 0;
-    }
-
-    // 4. Clear Winston log transports buffers
-    if (logger && logger.transports) {
-        logger.transports.forEach(transport => {
-            if (transport.clear) transport.clear();
-        });
-    }
-
-    logger.info('Aggressive memory cleanup', { 
-        itemsCleaned: cleaned,
-        timestamp: new Date().toISOString()
-    });
 
     return cleaned;
 }
@@ -4561,10 +4522,9 @@ Can lose all capital. Trade responsibly.
     console.log(`   - Monitor: 60s`);
     console.log(`   - Trading scan: ${scanIntervalMs/1000}s (${SCAN_INTERVAL_MINUTES}min)`);
     console.log(`   - State save: 10min`);
-    console.log(`   - Cleanup: 3min`);
     console.log('='.repeat(60) + '\n');
 
-    // ============ 1. POSITION MONITORING (60s) ============
+    // ============ 1. POSITION MONITORING ============
     const monitorInterval = setInterval(async () => {
         if (!this.engine.hasActiveUsers()) return;
         
@@ -4575,30 +4535,18 @@ Can lose all capital. Trade responsibly.
                 }
             }
         } catch (error) {
-            logger.error('Monitor cycle error', { 
-                error: error.message,
-                stack: error.stack 
-            });
+            logger.error('Monitor cycle error', { error: error.message });
         }
     }, 60000);
 
-    // ============ 2. TRADING CYCLE (Main scan loop) ============
+    // ============ 2. TRADING CYCLE - NO MEMORY BLOCKING ============
     const tradingInterval = setInterval(async () => {
         console.log('\n⏰ TRADING INTERVAL TRIGGERED');
         console.log(`   Time: ${new Date().toLocaleTimeString()}`);
         
         try {
-            const mem = process.memoryUsage();
-            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-            
-            console.log(`💾 Memory: ${heapPercent.toFixed(1)}%`);
-            
-            if (heapPercent > 85) {
-                logger.warn('Skipping scan - high memory', {
-                    heapPercent: heapPercent.toFixed(1) + '%'
-                });
-                return;
-            }
+            // REMOVED: Memory check that was blocking scans
+            // The bot will handle memory naturally through GC
             
             await this.engine.tradingCycle();
             
@@ -4611,7 +4559,7 @@ Can lose all capital. Trade responsibly.
         }
     }, scanIntervalMs);
 
-    // ============ 3. STATE PERSISTENCE (10min) ============
+    // ============ 3. STATE PERSISTENCE ============
     const stateInterval = setInterval(async () => {
         try {
             await this.engine.saveState();
@@ -4620,32 +4568,7 @@ Can lose all capital. Trade responsibly.
         }
     }, 10 * 60 * 1000);
 
-    // ============ 4. MEMORY CLEANUP (5min - REDUCED LOGGING) ============
-    const cleanupInterval = setInterval(async () => {
-        try {
-            const before = process.memoryUsage();
-            const heapPercent = (before.heapUsed / before.heapTotal * 100);
-            
-            // Only cleanup if memory actually high
-            if (heapPercent > 80) {
-                await this.performMemoryCleanup();
-                
-                if (global.gc) {
-                    global.gc();
-                }
-                
-                const after = process.memoryUsage();
-                logger.info('Memory cleanup', {
-                    before: Math.round(before.heapUsed / 1024 / 1024) + 'MB',
-                    after: Math.round(after.heapUsed / 1024 / 1024) + 'MB'
-                });
-            }
-        } catch (error) {
-            logger.error('Cleanup failed', { error: error.message });
-        }
-    }, 5 * 60 * 1000);
-
-    // ============ 5. DATABASE CLEANUP (Daily) ============
+    // ============ 4. DATABASE CLEANUP ============
     const dbCleanupInterval = setInterval(async () => {
         try {
             await this.database.cleanupOldData(90);
@@ -4655,42 +4578,15 @@ Can lose all capital. Trade responsibly.
         }
     }, 24 * 60 * 60 * 1000);
 
-    // ============ 6. SIMPLIFIED HEALTH CHECK (10min) ============
-    const healthInterval = setInterval(async () => {
-        try {
-            const mem = process.memoryUsage();
-            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-            const rss = mem.rss / 1024 / 1024;
-            
-            // Only log if critical
-            if (heapPercent > 90 || rss > 110) {
-                logger.warn('Critical memory', {
-                    heapPercent: heapPercent.toFixed(1) + '%',
-                    rss: Math.round(rss) + 'MB'
-                });
-                
-                await this.performMemoryCleanup();
-                if (global.gc) {
-                    global.gc();
-                    global.gc();
-                }
-            }
-        } catch (error) {
-            logger.error('Health check failed', { error: error.message });
-        }
-    }, 10 * 60 * 1000);
-
     // Store intervals
     this.intervals = {
         monitor: monitorInterval,
         trading: tradingInterval,
         state: stateInterval,
-        cleanup: cleanupInterval,
-        dbCleanup: dbCleanupInterval,
-        health: healthInterval
+        dbCleanup: dbCleanupInterval
     };
 
-    // ============ CRITICAL: RUN FIRST SCAN IMMEDIATELY ============
+    // ============ RUN FIRST SCAN IMMEDIATELY ============
     console.log('🚀 Running FIRST trading cycle in 10 seconds...\n');
     
     setTimeout(async () => {
@@ -4699,7 +4595,6 @@ Can lose all capital. Trade responsibly.
         console.log('🎬'.repeat(30));
         
         try {
-            // Check active users
             const activeCount = Array.from(this.engine.userStates.values())
                 .filter(u => u.isActive).length;
             
@@ -4707,13 +4602,19 @@ Can lose all capital. Trade responsibly.
             
             if (activeCount === 0) {
                 console.log('\n⚠️  NO ACTIVE USERS!');
-                console.log('   The bot is running, but no user has activated it.');
                 console.log('   Please run /start in Telegram to activate trading.\n');
                 logger.warn('Initial scan skipped - no active users');
                 return;
             }
             
             console.log('✅ Active users confirmed, starting scan...\n');
+            
+            // Force GC before first scan
+            if (global.gc) {
+                global.gc();
+                console.log('🗑️  Garbage collection completed\n');
+            }
+            
             await this.engine.tradingCycle();
             
         } catch (error) {
@@ -4724,61 +4625,43 @@ Can lose all capital. Trade responsibly.
                 stack: error.stack 
             });
         }
-    }, 10000); // 10 seconds instead of 30
+    }, 10000);
 
     console.log('✅ All intervals started successfully\n');
     logger.info('Trading cycles active', {
         monitor: '60s',
         scan: `${SCAN_INTERVAL_MINUTES}min`,
-        stateSave: '10min',
-        cleanup: '5min',
-        health: '10min'
+        stateSave: '10min'
     });
 }
+
 
 // ============ REDUCE MEMORY CLEANUP SPAM ============
 // Replace setupMemoryManagement() with this QUIETER version
 
 setupMemoryManagement() {
-    // Only check every 5 minutes, not every 2 minutes
-    setInterval(() => {
-        const mem = process.memoryUsage();
-        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-
-        // Only cleanup at 85% instead of 75%
-        if (heapPercent > 85) {
-            this.performMemoryCleanup();
-
-            if (global.gc) {
-                global.gc();
-            }
-            
-            // Only log if we actually cleaned something
-            logger.info('Memory cleanup triggered', {
-                heapPercent: heapPercent.toFixed(1) + '%'
-            });
-        }
-    }, 5 * 60 * 1000); // Every 5 minutes
-
-    // Emergency shutdown check (keep this)
+    // Only emergency check - no proactive cleanup
     setInterval(() => {
         const mem = process.memoryUsage();
         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
         const rssMB = mem.rss / 1024 / 1024;
         
+        // Only act if CRITICAL (>95% or >120MB RSS)
         if (heapPercent > 95 || rssMB > 120) {
-            logger.error('EMERGENCY MEMORY SHUTDOWN', {
+            logger.error('CRITICAL MEMORY - Emergency shutdown', {
                 heapPercent: heapPercent.toFixed(1) + '%',
                 rss: Math.round(rssMB) + 'MB'
             });
             
+            // Try to save state
             this.engine.saveState().catch(err => 
                 logger.error('Emergency save failed', { error: err.message })
             );
             
+            // Force restart (Railway will restart the bot)
             setTimeout(() => process.exit(1), 2000);
         }
-    }, 30 * 1000);
+    }, 60 * 1000); // Check every 60 seconds
 }
 
 
