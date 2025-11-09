@@ -3022,90 +3022,93 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 // Add this to the end of bot.js after TradingEngine class
 
 class TradingBot {
-  constructor() {
-      this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
-
-      // ============ PRODUCTION POLLING MODE SETUP ============
-      console.log('🤖 Bot Configuration:', {
-          mode: 'POLLING',
-          authorizedUsers: AUTHORIZED_USERS.length,
-          scanInterval: SCAN_INTERVAL_MINUTES + 'min',
-          environment: process.env.NODE_ENV || 'development'
-      });
-
-      logger.info('🔵 Starting in POLLING MODE (Production)');
-
-      // Initialize Telegram Bot with optimized polling settings
-      this.bot = new TelegramBot(TELEGRAM_TOKEN, {
-        polling: {
-            interval: 2000,              // Slower polling (2s instead of 1s)
-            autoStart: true,
-            params: {
-                timeout: 20,             // Shorter timeout (20s instead of 30s)
-                allowed_updates: ['message']
-            }
-        },
-        filepath: false
-    });
-
-      // Polling error handler with auto-recovery
-      this.bot.on('polling_error', (error) => {
-        // Don't restart on ECONNRESET - just log and continue
-        if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
-            logger.warn('Telegram connection reset (normal, will retry)', { 
-                error: error.message 
-            });
-            // Don't call restartPolling() - let it auto-retry
-            return;
-        }
-        
-        if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-            logger.error('Multiple bot instances detected - shutting down');
-            process.exit(1);
-        }
-        
-        // Other errors
-        logger.error('Polling error', { 
-            code: error.code, 
-            message: error.message 
+    constructor() {
+        this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+    
+        console.log('🤖 Bot Configuration:', {
+            mode: 'POLLING',
+            authorizedUsers: AUTHORIZED_USERS.length,
+            scanInterval: SCAN_INTERVAL_MINUTES + 'min',
+            environment: process.env.NODE_ENV || 'production'
         });
-    });
-
-      // General bot error handler
-      this.bot.on('error', (error) => {
-          logger.error('Bot error', { error: error.message });
-      });
-
-      // Verify connection to Telegram
-      this.bot.getMe()
-          .then(info => {
-              console.log('✅ Connected to Telegram:', info.username);
-              logger.info('Bot connected to Telegram', { 
-                  username: info.username, 
-                  id: info.id,
-                  mode: 'POLLING'
-              });
-          })
-          .catch(err => {
-              console.error('❌ Failed to connect to Telegram:', err.message);
-              logger.error('Bot connection failed', { error: err.message });
-              process.exit(1);
-          });
-
-      // Initialize components
-      this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
-      this.wallet = this.loadWallet(PRIVATE_KEY);
-      this.database = new DatabaseManager('./data/trading.db');
-      this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-      this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
-      
-      if (ENABLE_HEALTH_MONITORING) {
-          this.healthMonitor = new HealthMonitor(logger, this);
-      }
-
-      // Setup memory management
-      this.setupMemoryManagement();
-  }
+    
+        logger.info('🔵 Starting in POLLING MODE (Production - Railway Optimized)');
+    
+        // ============ RAILWAY-OPTIMIZED POLLING ============
+        this.bot = new TelegramBot(TELEGRAM_TOKEN, {
+            polling: {
+                interval: 3000,              // 3s instead of 2s (less aggressive)
+                autoStart: true,
+                params: {
+                    timeout: 15,             // 15s instead of 20s (faster recovery)
+                    allowed_updates: ['message'], // Only messages, no callbacks
+                    limit: 10                // Process max 10 updates at once
+                }
+            },
+            filepath: false,                 // Never download files
+            request: {
+                agentOptions: {
+                    keepAlive: true,         // Reuse connections
+                    keepAliveMsecs: 10000
+                }
+            }
+        });
+    
+        // ============ ENHANCED ERROR HANDLING FOR RAILWAY ============
+        this.bot.on('polling_error', (error) => {
+            // Railway network resets are normal - don't crash
+            if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
+                logger.warn('Telegram connection reset (normal on Railway)', { 
+                    error: error.message 
+                });
+                return; // Let it auto-retry
+            }
+            
+            // Multiple bot instances = critical error
+            if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+                logger.error('⛔ Multiple bot instances detected - SHUTTING DOWN');
+                console.error('⛔ CRITICAL: Another instance is running!');
+                process.exit(1);
+            }
+            
+            // ETIMEDOUT and ECONNREFUSED are common on Railway - just log
+            if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+                logger.debug('Telegram connection timeout (will retry)', {
+                    code: error.code
+                });
+                return;
+            }
+            
+            // Other errors
+            logger.error('Telegram polling error', { 
+                code: error.code, 
+                message: error.message 
+            });
+        });
+    
+        // General bot error handler
+        this.bot.on('error', (error) => {
+            logger.error('Bot error', { error: error.message });
+        });
+    
+        // Verify connection
+        this.bot.getMe()
+            .then(info => {
+                console.log('✅ Connected to Telegram:', info.username);
+                logger.info('Bot connected to Telegram', { 
+                    username: info.username, 
+                    id: info.id,
+                    mode: 'POLLING'
+                });
+            })
+            .catch(err => {
+                console.error('❌ Failed to connect to Telegram:', err.message);
+                logger.error('Bot connection failed', { error: err.message });
+                process.exit(1);
+            });
+    
+        // ... rest of constructor (RPC, database, etc.)
+    }
 
 async restartPolling() {
   try {
@@ -3164,116 +3167,294 @@ async checkMemoryHealth() {
 
 
 setupMemoryManagement() {
-    // Check every 2 minutes, but only log if action taken
-    setInterval(() => {
-        const mem = process.memoryUsage();
-        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-
-        // Only cleanup at 75% instead of 60%
-        if (heapPercent > 75) {
-            logger.warn('Proactive memory cleanup', {
-                heapPercent: heapPercent.toFixed(1) + '%',
-                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
-            });
-
-            this.performMemoryCleanup();
-
-            if (global.gc) {
-                global.gc();
-            }
-        }
-    }, 2 * 60 * 1000); // Every 2 minutes
-
-    // Emergency shutdown check
+    console.log('🧠 Setting up Railway-optimized memory management...');
+    console.log('   Target: Keep under 400MB for Railway free tier');
+    
+    // ============ AGGRESSIVE MEMORY MONITORING (Every 90 seconds) ============
     setInterval(() => {
         const mem = process.memoryUsage();
         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
         const rssMB = mem.rss / 1024 / 1024;
-        
-        if (heapPercent > 95 || rssMB > 120) {
-            logger.error('EMERGENCY MEMORY SHUTDOWN', {
+        const heapMB = mem.heapUsed / 1024 / 1024;
+
+        // Log every check (helps debug Railway issues)
+        console.log(`\n💾 Memory Check: RSS ${rssMB.toFixed(0)}MB | Heap ${heapMB.toFixed(0)}MB (${heapPercent.toFixed(1)}%)`);
+
+        // WARNING THRESHOLD (70% heap or 350MB RSS)
+        if (heapPercent > 70 || rssMB > 350) {
+            console.log('⚠️  HIGH MEMORY - Starting cleanup...');
+            logger.warn('High memory usage detected', {
                 heapPercent: heapPercent.toFixed(1) + '%',
-                rss: Math.round(rssMB) + 'MB'
+                heapUsed: heapMB.toFixed(0) + 'MB',
+                rss: rssMB.toFixed(0) + 'MB'
             });
-            
-            this.engine.saveState().catch(err => 
-                logger.error('Emergency save failed', { error: err.message })
-            );
-            
-            setTimeout(() => process.exit(1), 2000);
+
+            // Perform cleanup
+            const cleaned = this.performMemoryCleanup();
+            console.log(`   ✅ Cleaned ${cleaned} items`);
+
+            // Force GC (run with --expose-gc flag in Railway)
+            if (global.gc) {
+                global.gc();
+                console.log('   ✅ Garbage collection forced');
+            }
         }
-    }, 30 * 1000);
+
+        // CRITICAL THRESHOLD (85% heap or 450MB RSS)
+        if (heapPercent > 85 || rssMB > 450) {
+            console.log('🚨 CRITICAL MEMORY - Emergency measures!');
+            logger.error('CRITICAL MEMORY', {
+                heapPercent: heapPercent.toFixed(1) + '%',
+                rss: rssMB.toFixed(0) + 'MB'
+            });
+
+            // Emergency cleanup
+            this.performMemoryCleanup();
+
+            // Triple GC
+            if (global.gc) {
+                global.gc();
+                global.gc();
+                global.gc();
+                console.log('   ✅ Triple garbage collection forced');
+            }
+
+            // Pause trading temporarily (but keep monitoring)
+            for (const [userId, user] of this.engine.userStates.entries()) {
+                if (user.isActive && !user.position) {
+                    user.isActive = false;
+                    console.log(`   ⏸️  Paused trading for user ${userId} (memory critical)`);
+                    
+                    // Notify user
+                    this.sendMessage(userId, '⚠️ Bot temporarily paused due to high memory usage. Will resume automatically.', {
+                        parse_mode: 'HTML'
+                    }).catch(err => console.error('Failed to notify user:', err.message));
+                }
+            }
+
+            // Wait 30 seconds, then check if we can resume
+            setTimeout(async () => {
+                const newMem = process.memoryUsage();
+                const newRssMB = newMem.rss / 1024 / 1024;
+                
+                if (newRssMB < 350) {
+                    console.log('   ✅ Memory recovered, resuming trading');
+                    
+                    // Resume trading
+                    for (const [userId, user] of this.engine.userStates.entries()) {
+                        if (!user.isActive && !user.position) {
+                            user.isActive = true;
+                            console.log(`   ▶️  Resumed trading for user ${userId}`);
+                        }
+                    }
+                } else {
+                    console.log('   ❌ Memory still high, keeping trading paused');
+                }
+            }, 30000);
+        }
+    }, 90 * 1000); // Check every 90 seconds
+
+    // ============ PERIODIC CLEANUP (Every 5 minutes) ============
+    setInterval(() => {
+        console.log('🧹 Scheduled cleanup...');
+        const cleaned = this.performMemoryCleanup();
+        console.log(`   ✅ Cleaned ${cleaned} items`);
+        
+        if (global.gc) {
+            global.gc();
+        }
+    }, 5 * 60 * 1000);
+
+    // ============ CLEAR TELEGRAM INTERNAL CACHE (Every 10 minutes) ============
+    setInterval(() => {
+        if (this.bot && this.bot._polling) {
+            // Clear old updates to prevent memory buildup
+            this.bot._polling._lastUpdateId = 0;
+            console.log('🧹 Cleared Telegram polling cache');
+        }
+    }, 10 * 60 * 1000);
+
+    // ============ WINSTON LOG ROTATION (Every 30 minutes) ============
+    setInterval(() => {
+        if (logger && logger.transports) {
+            logger.transports.forEach(transport => {
+                if (transport.filename && transport.filename.includes('combined.log')) {
+                    try {
+                        // Rotate logs by clearing the file
+                        const logFile = transport.filename;
+                        if (fs.existsSync(logFile)) {
+                            const stats = fs.statSync(logFile);
+                            if (stats.size > 5 * 1024 * 1024) { // > 5MB
+                                fs.writeFileSync(logFile, '');
+                                console.log('🧹 Rotated log file:', logFile);
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('Log rotation failed:', err.message);
+                    }
+                }
+            });
+        }
+    }, 30 * 60 * 1000);
+
+    console.log('✅ Memory management initialized');
 }
 
 performMemoryCleanup() {
     let cleaned = 0;
 
-    // Only clear cache
+    // 1. Clear BitQuery cache
     if (this.bitquery && this.bitquery.cache) {
-        cleaned += this.bitquery.cache.size;
+        const size = this.bitquery.cache.size;
         this.bitquery.cache.clear();
+        cleaned += size;
+        if (size > 0) console.log(`   🧹 Cleared ${size} BitQuery cache entries`);
     }
 
-    // Trim trade history to last 5 trades only
+    // 2. Trim trade history to last 10 trades per user
     for (const [userId, user] of this.engine.userStates.entries()) {
-        if (user.tradeHistory && user.tradeHistory.length > 5) {
-            const removed = user.tradeHistory.length - 5;
-            user.tradeHistory = user.tradeHistory.slice(-5);
+        if (user.tradeHistory && user.tradeHistory.length > 10) {
+            const removed = user.tradeHistory.length - 10;
+            user.tradeHistory = user.tradeHistory.slice(-10);
+            cleaned += removed;
+            console.log(`   🧹 Trimmed ${removed} old trades for user ${userId}`);
+        }
+        
+        // 3. Trim profit taking history
+        if (user.profitTakingHistory && user.profitTakingHistory.length > 5) {
+            const removed = user.profitTakingHistory.length - 5;
+            user.profitTakingHistory = user.profitTakingHistory.slice(-5);
             cleaned += removed;
         }
+    }
+
+    // 4. Clear RPC failure tracking (reset counts)
+    if (this.rpcConnection) {
+        this.rpcConnection.failureCounts.fill(0);
+        this.rpcConnection.lastFailureTime.fill(0);
+    }
+
+    // 5. Clear performance tracker averages (keep totals)
+    if (this.engine && this.engine.performanceTracker) {
+        // Don't clear everything, just reset some calculated fields
+        this.engine.performanceTracker.recentFees = [];
+    }
+
+    // 6. Clear priority fee calculator history
+    if (this.engine && this.engine.priorityFeeCalculator) {
+        this.engine.priorityFeeCalculator.recentFees = [];
     }
 
     return cleaned;
 }
 
 async init() {
-  logger.info('='.repeat(50));
-  logger.info('Trading bot initializing... (POLLING MODE)');
-  logger.info('='.repeat(50));
-
-  try {
-      // Initialize database
-      await this.database.init();
-      logger.info('✅ Database initialized');
-
-      // Initialize Bitquery
-      await this.bitquery.init();
-      logger.info('✅ Bitquery initialized');
-
-      // Initialize trading engine
-      await this.engine.init();
-      logger.info('✅ Trading engine initialized');
-
-      // Setup Telegram commands
-      this.setupCommands();
-      logger.info('✅ Telegram commands setup');
-
-      // Start health monitoring
-      if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
-          this.healthMonitor.start(5);
-          logger.info('✅ Health monitoring started');
-      }
-
-      // Start trading cycles
-      this.startTrading();
-      logger.info('✅ Trading cycles started');
-
-      console.log('='.repeat(50));
-      console.log('✅ BOT FULLY OPERATIONAL');
-      console.log('Mode: POLLING (Production)');
-      console.log(`Scan Interval: ${SCAN_INTERVAL_MINUTES}min`);
-      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log('='.repeat(50));
-
-      logger.info('✅ Trading bot fully operational');
-
-  } catch (error) {
-      console.error('❌ Initialization failed:', error.message);
-      logger.error('Initialization failed', { error: error.message, stack: error.stack });
-      throw error;
+    logger.info('='.repeat(50));
+    logger.info('Trading bot initializing... (POLLING MODE)');
+    logger.info('='.repeat(50));
+  
+    try {
+        // Initialize database
+        await this.database.init();
+        logger.info('✅ Database initialized');
+  
+        // Initialize Bitquery
+        await this.bitquery.init();
+        logger.info('✅ Bitquery initialized');
+  
+        // Initialize trading engine
+        await this.engine.init();
+        logger.info('✅ Trading engine initialized');
+  
+        // ============ AUTO-ACTIVATE BOT (NEW) ============
+        if (this.ownerId && AUTHORIZED_USERS.includes(this.ownerId)) {
+            console.log('\n🔄 Auto-activating bot for owner:', this.ownerId);
+            
+            try {
+                const user = this.engine.getUserState(this.ownerId);
+                const balances = await this.engine.getWalletBalance();
+                
+                // Check if already active from database
+                if (!user.isActive) {
+                    user.isActive = true;
+                    user.startingBalance = balances.trading;
+                    user.currentBalance = balances.trading;
+                    user.dailyStartBalance = balances.trading;
+                    user.tradingCapital = balances.trading;
+                    
+                    await this.engine.saveState();
+                    
+                    console.log('✅ Bot auto-activated');
+                    console.log('   Balance:', balances.trading.toFixed(4));
+                    console.log('   Mode:', ENABLE_PAPER_TRADING ? 'Paper Trading' : 'Live Trading');
+                    
+                    logger.info('Bot auto-activated', {
+                        userId: this.ownerId,
+                        balance: balances.trading,
+                        mode: ENABLE_PAPER_TRADING ? 'paper' : 'live'
+                    });
+                    
+                    // Send notification to owner
+                    try {
+                        await this.sendMessage(this.ownerId, `
+  🤖 <b>BOT AUTO-STARTED</b>
+  
+  💼 <b>Account:</b>
+  Trading Balance: ${balances.trading.toFixed(4)}
+  Mode: ${ENABLE_PAPER_TRADING ? '📝 Paper Trading' : '💰 Live Trading'}
+  
+  📊 <b>Settings:</b>
+  Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
+  Scan Interval: ${SCAN_INTERVAL_MINUTES}min
+  
+  ✅ Ready to trade!
+                        `.trim(), {
+                            parse_mode: 'HTML'
+                        });
+                    } catch (msgErr) {
+                        console.warn('⚠️  Could not send auto-start notification:', msgErr.message);
+                    }
+                } else {
+                    console.log('✅ Bot already active (loaded from database)');
+                    console.log('   Balance:', user.currentBalance.toFixed(4));
+                }
+            } catch (activateErr) {
+                console.error('❌ Auto-activation failed:', activateErr.message);
+                logger.error('Auto-activation failed', { error: activateErr.message });
+            }
+        } else {
+            console.log('⚠️  No owner configured - manual /start required');
+        }
+  
+        // Setup Telegram commands
+        this.setupCommands();
+        logger.info('✅ Telegram commands setup');
+  
+        // Start health monitoring
+        if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
+            this.healthMonitor.start(5);
+            logger.info('✅ Health monitoring started');
+        }
+  
+        // Start trading cycles
+        this.startTrading();
+        logger.info('✅ Trading cycles started');
+  
+        console.log('='.repeat(50));
+        console.log('✅ BOT FULLY OPERATIONAL');
+        console.log('Mode: POLLING (Production)');
+        console.log(`Scan Interval: ${SCAN_INTERVAL_MINUTES}min`);
+        console.log(`Environment: ${process.env.NODE_ENV || 'production'}`);
+        console.log('='.repeat(50));
+  
+        logger.info('✅ Trading bot fully operational');
+  
+    } catch (error) {
+        console.error('❌ Initialization failed:', error.message);
+        logger.error('Initialization failed', { error: error.message, stack: error.stack });
+        throw error;
+    }
   }
-}
 
 
 loadWallet(privateKey) {
