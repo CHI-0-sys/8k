@@ -3022,71 +3022,132 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 // Add this to the end of bot.js after TradingEngine class
 
 class TradingBot {
+    // constructor() {
+    //     this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
+    
+    //     console.log('🤖 Bot Configuration:', {
+    //         mode: 'POLLING',
+    //         authorizedUsers: AUTHORIZED_USERS.length,
+    //         scanInterval: SCAN_INTERVAL_MINUTES + 'min',
+    //         environment: process.env.NODE_ENV || 'production'
+    //     });
+    
+    //     logger.info('🔵 Starting in POLLING MODE (Production - Railway Optimized)');
+    
+    //     // ============ RAILWAY-OPTIMIZED POLLING ============
+    //     this.bot = new TelegramBot(TELEGRAM_TOKEN, {
+    //         polling: {
+    //             interval: 3000,              // 3s instead of 2s (less aggressive)
+    //             autoStart: true,
+    //             params: {
+    //                 timeout: 15,             // 15s instead of 20s (faster recovery)
+    //                 allowed_updates: ['message'], // Only messages, no callbacks
+    //                 limit: 10                // Process max 10 updates at once
+    //             }
+    //         },
+    //         filepath: false,                 // Never download files
+    //         request: {
+    //             agentOptions: {
+    //                 keepAlive: true,         // Reuse connections
+    //                 keepAliveMsecs: 10000
+    //             }
+    //         }
+    //     });
+    
+    //     // ============ ENHANCED ERROR HANDLING FOR RAILWAY ============
+    //     this.bot.on('polling_error', (error) => {
+    //         // Railway network resets are normal - don't crash
+    //         if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
+    //             logger.warn('Telegram connection reset (normal on Railway)', { 
+    //                 error: error.message 
+    //             });
+    //             return; // Let it auto-retry
+    //         }
+            
+    //         // Multiple bot instances = critical error
+    //         if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+    //             logger.error('⛔ Multiple bot instances detected - SHUTTING DOWN');
+    //             console.error('⛔ CRITICAL: Another instance is running!');
+    //             process.exit(1);
+    //         }
+            
+    //         // ETIMEDOUT and ECONNREFUSED are common on Railway - just log
+    //         if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+    //             logger.debug('Telegram connection timeout (will retry)', {
+    //                 code: error.code
+    //             });
+    //             return;
+    //         }
+            
+    //         // Other errors
+    //         logger.error('Telegram polling error', { 
+    //             code: error.code, 
+    //             message: error.message 
+    //         });
+    //     });
+    
+    //     // General bot error handler
+    //     this.bot.on('error', (error) => {
+    //         logger.error('Bot error', { error: error.message });
+    //     });
+    
+    //     // Verify connection
+    //     this.bot.getMe()
+    //         .then(info => {
+    //             console.log('✅ Connected to Telegram:', info.username);
+    //             logger.info('Bot connected to Telegram', { 
+    //                 username: info.username, 
+    //                 id: info.id,
+    //                 mode: 'POLLING'
+    //             });
+    //         })
+    //         .catch(err => {
+    //             console.error('❌ Failed to connect to Telegram:', err.message);
+    //             logger.error('Bot connection failed', { error: err.message });
+    //             process.exit(1);
+    //         });
+    
+    //     // ... rest of constructor (RPC, database, etc.)
+    // }
+    
     constructor() {
+        console.log('🤖 TradingBot Constructor Starting...');
+        
         this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
     
-        console.log('🤖 Bot Configuration:', {
-            mode: 'POLLING',
-            authorizedUsers: AUTHORIZED_USERS.length,
-            scanInterval: SCAN_INTERVAL_MINUTES + 'min',
-            environment: process.env.NODE_ENV || 'production'
-        });
+        // ===== TELEGRAM BOT SETUP =====
+        console.log('📱 Initializing Telegram bot...');
+        logger.info('🔵 Starting in POLLING MODE (Production)');
     
-        logger.info('🔵 Starting in POLLING MODE (Production - Railway Optimized)');
-    
-        // ============ RAILWAY-OPTIMIZED POLLING ============
         this.bot = new TelegramBot(TELEGRAM_TOKEN, {
             polling: {
-                interval: 3000,              // 3s instead of 2s (less aggressive)
+                interval: 2000,
                 autoStart: true,
                 params: {
-                    timeout: 15,             // 15s instead of 20s (faster recovery)
-                    allowed_updates: ['message'], // Only messages, no callbacks
-                    limit: 10                // Process max 10 updates at once
+                    timeout: 20,
+                    allowed_updates: ['message']
                 }
             },
-            filepath: false,                 // Never download files
-            request: {
-                agentOptions: {
-                    keepAlive: true,         // Reuse connections
-                    keepAliveMsecs: 10000
-                }
-            }
+            filepath: false
         });
     
-        // ============ ENHANCED ERROR HANDLING FOR RAILWAY ============
+        // Polling error handler
         this.bot.on('polling_error', (error) => {
-            // Railway network resets are normal - don't crash
             if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
-                logger.warn('Telegram connection reset (normal on Railway)', { 
-                    error: error.message 
-                });
-                return; // Let it auto-retry
+                return; // Silently ignore
             }
             
-            // Multiple bot instances = critical error
             if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-                logger.error('⛔ Multiple bot instances detected - SHUTTING DOWN');
-                console.error('⛔ CRITICAL: Another instance is running!');
+                logger.error('Multiple bot instances detected - shutting down');
                 process.exit(1);
             }
             
-            // ETIMEDOUT and ECONNREFUSED are common on Railway - just log
-            if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
-                logger.debug('Telegram connection timeout (will retry)', {
-                    code: error.code
-                });
-                return;
-            }
-            
-            // Other errors
-            logger.error('Telegram polling error', { 
+            logger.error('Polling error', { 
                 code: error.code, 
                 message: error.message 
             });
         });
     
-        // General bot error handler
         this.bot.on('error', (error) => {
             logger.error('Bot error', { error: error.message });
         });
@@ -3107,8 +3168,67 @@ class TradingBot {
                 process.exit(1);
             });
     
-        // ... rest of constructor (RPC, database, etc.)
+        // ===== INITIALIZE COMPONENTS =====
+        console.log('⚙️  Initializing components...');
+        
+        try {
+            // RPC Connection
+            console.log('   - RPC Connection...');
+            this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
+            console.log('     ✅ RPC initialized');
+            
+            // Wallet
+            console.log('   - Wallet...');
+            this.wallet = this.loadWallet(PRIVATE_KEY);
+            console.log('     ✅ Wallet loaded:', this.wallet.publicKey.toString().substring(0, 8) + '...');
+            
+            // Database
+            console.log('   - Database...');
+            this.database = new DatabaseManager('./data/trading.db');
+            if (!this.database) {
+                throw new Error('DatabaseManager failed to instantiate');
+            }
+            console.log('     ✅ Database instantiated');
+            
+            // BitQuery
+            console.log('   - BitQuery Client...');
+            this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+            if (!this.bitquery) {
+                throw new Error('BitqueryClient failed to instantiate');
+            }
+            console.log('     ✅ BitQuery instantiated');
+            
+            // Trading Engine
+            console.log('   - Trading Engine...');
+            this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+            if (!this.engine) {
+                throw new Error('TradingEngine failed to instantiate');
+            }
+            console.log('     ✅ Trading Engine instantiated');
+            
+            // Optional: Health Monitor
+            if (ENABLE_HEALTH_MONITORING) {
+                console.log('   - Health Monitor...');
+                this.healthMonitor = new HealthMonitor(logger, this);
+                console.log('     ✅ Health Monitor instantiated');
+            } else {
+                console.log('   - Health Monitor: DISABLED');
+                this.healthMonitor = null;
+            }
+            
+            console.log('✅ All components instantiated successfully\n');
+            
+        } catch (error) {
+            console.error('❌ Component initialization failed:', error.message);
+            console.error('Stack:', error.stack);
+            logger.error('Constructor failed', { error: error.message, stack: error.stack });
+            throw error;
+        }
+    
+        // Setup memory management
+        this.setupMemoryManagement();
     }
+    
 
 async restartPolling() {
   try {
@@ -3349,112 +3469,68 @@ performMemoryCleanup() {
 }
 
 async init() {
-    logger.info('='.repeat(50));
-    logger.info('Trading bot initializing... (POLLING MODE)');
-    logger.info('='.repeat(50));
-  
+    logger.info('Trading bot initializing...');
+    
     try {
-        // Initialize database
+        // ===== STEP 1: DATABASE INIT =====
+        console.log('📦 Step 1: Initializing database...');
+        if (!this.database) {
+            throw new Error('Database is undefined! Check DatabaseManager initialization in constructor.');
+        }
         await this.database.init();
         logger.info('✅ Database initialized');
-  
-        // Initialize Bitquery
+        
+        // ===== STEP 2: BITQUERY INIT =====
+        console.log('📡 Step 2: Initializing BitQuery...');
+        if (!this.bitquery) {
+            throw new Error('BitQuery is undefined! Check BitqueryClient initialization in constructor.');
+        }
         await this.bitquery.init();
         logger.info('✅ Bitquery initialized');
-  
-        // Initialize trading engine
+        
+        // ===== STEP 3: TRADING ENGINE INIT =====
+        console.log('⚙️  Step 3: Initializing trading engine...');
+        if (!this.engine) {
+            throw new Error('Trading engine is undefined! Check TradingEngine initialization in constructor.');
+        }
         await this.engine.init();
         logger.info('✅ Trading engine initialized');
-  
-        // ============ AUTO-ACTIVATE BOT (NEW) ============
-        if (this.ownerId && AUTHORIZED_USERS.includes(this.ownerId)) {
-            console.log('\n🔄 Auto-activating bot for owner:', this.ownerId);
-            
-            try {
-                const user = this.engine.getUserState(this.ownerId);
-                const balances = await this.engine.getWalletBalance();
-                
-                // Check if already active from database
-                if (!user.isActive) {
-                    user.isActive = true;
-                    user.startingBalance = balances.trading;
-                    user.currentBalance = balances.trading;
-                    user.dailyStartBalance = balances.trading;
-                    user.tradingCapital = balances.trading;
-                    
-                    await this.engine.saveState();
-                    
-                    console.log('✅ Bot auto-activated');
-                    console.log('   Balance:', balances.trading.toFixed(4));
-                    console.log('   Mode:', ENABLE_PAPER_TRADING ? 'Paper Trading' : 'Live Trading');
-                    
-                    logger.info('Bot auto-activated', {
-                        userId: this.ownerId,
-                        balance: balances.trading,
-                        mode: ENABLE_PAPER_TRADING ? 'paper' : 'live'
-                    });
-                    
-                    // Send notification to owner
-                    try {
-                        await this.sendMessage(this.ownerId, `
-  🤖 <b>BOT AUTO-STARTED</b>
-  
-  💼 <b>Account:</b>
-  Trading Balance: ${balances.trading.toFixed(4)}
-  Mode: ${ENABLE_PAPER_TRADING ? '📝 Paper Trading' : '💰 Live Trading'}
-  
-  📊 <b>Settings:</b>
-  Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-  Scan Interval: ${SCAN_INTERVAL_MINUTES}min
-  
-  ✅ Ready to trade!
-                        `.trim(), {
-                            parse_mode: 'HTML'
-                        });
-                    } catch (msgErr) {
-                        console.warn('⚠️  Could not send auto-start notification:', msgErr.message);
-                    }
-                } else {
-                    console.log('✅ Bot already active (loaded from database)');
-                    console.log('   Balance:', user.currentBalance.toFixed(4));
-                }
-            } catch (activateErr) {
-                console.error('❌ Auto-activation failed:', activateErr.message);
-                logger.error('Auto-activation failed', { error: activateErr.message });
-            }
-        } else {
-            console.log('⚠️  No owner configured - manual /start required');
-        }
-  
-        // Setup Telegram commands
+        
+        // ===== STEP 4: TELEGRAM COMMANDS =====
+        console.log('📱 Step 4: Setting up Telegram commands...');
         this.setupCommands();
         logger.info('✅ Telegram commands setup');
-  
-        // Start health monitoring
+        
+        // ===== STEP 5: HEALTH MONITORING (OPTIONAL) =====
         if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
+            console.log('🏥 Step 5: Starting health monitoring...');
             this.healthMonitor.start(5);
             logger.info('✅ Health monitoring started');
+        } else {
+            console.log('⏭️  Step 5: Health monitoring disabled');
         }
-  
-        // Start trading cycles
+        
+        // ===== STEP 6: TRADING CYCLES =====
+        console.log('🚀 Step 6: Starting trading cycles...');
         this.startTrading();
         logger.info('✅ Trading cycles started');
-  
+
         console.log('='.repeat(50));
         console.log('✅ BOT FULLY OPERATIONAL');
-        console.log('Mode: POLLING (Production)');
-        console.log(`Scan Interval: ${SCAN_INTERVAL_MINUTES}min`);
-        console.log(`Environment: ${process.env.NODE_ENV || 'production'}`);
         console.log('='.repeat(50));
-  
+        
         logger.info('✅ Trading bot fully operational');
-  
+
     } catch (error) {
         console.error('❌ Initialization failed:', error.message);
-        logger.error('Initialization failed', { error: error.message, stack: error.stack });
-        throw error;
+        console.error('Stack:', error.stack);
+        logger.error('Initialization failed', { 
+            error: error.message, 
+            stack: error.stack 
+        });
+        throw error; // Re-throw to stop startup
     }
-  }
+}
 
 
 loadWallet(privateKey) {
