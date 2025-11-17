@@ -1575,24 +1575,21 @@ getUserState(userId) {
     console.log('🔄'.repeat(30));
     
     return this.tradeMutex.runExclusive(async () => {
-        // Step 1: Check if already scanning
         if (this.isScanning) {
             console.log('⏭️  Already scanning, skipping cycle');
             this.logger.debug('Already scanning, skipping cycle');
             return;
         }
 
-        // Step 2: Check for active users
         const activeUsers = Array.from(this.userStates.entries()).filter(([_, u]) => u.isActive);
         console.log(`👥 Active users: ${activeUsers.length}`);
         
-        if (!this.hasActiveUsers()) {
+        if (activeUsers.length === 0) {
             console.log('❌ No active users');
             this.logger.debug('No active users');
             return;
         }
 
-        // Step 3: Check circuit breaker
         const canTrade = this.circuitBreaker.canTrade();
         console.log(`🔌 Circuit breaker: ${canTrade ? '✅ OK' : '❌ TRIPPED'}`);
         
@@ -1609,33 +1606,20 @@ getUserState(userId) {
         try {
             this.logger.info('=== Trading Cycle Start ===');
 
-            const userId = this.bot.ownerId || (AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null);
-            console.log(`👤 User ID: ${userId}`);
+            // FIX: Use the FIRST active user, not bot.ownerId
+            const [userId, user] = activeUsers[0];
             
-            if (!userId) {
-                console.log('❌ No authorized user configured');
-                this.logger.error('No authorized user configured');
-                return;
-            }
-
-            const user = this.getUserState(userId);
+            console.log(`👤 User ID: ${userId}`);
             console.log(`📊 User state:`, {
                 isActive: user.isActive,
                 hasPosition: user.position !== null,
                 balance: user.currentBalance
             });
             
-            if (!user.isActive) {
-                console.log('❌ User not active');
-                this.logger.debug('User not active');
-                return;
-            }
-
-            // Check daily reset
+            
             console.log('📅 Checking daily reset...');
             await this.checkDailyReset(user, userId);
 
-            // Check daily target
             const targetHit = this.isDailyTargetHit(user);
             console.log(`🎯 Daily target hit: ${targetHit ? '✅ YES (cooldown)' : '❌ NO'}`);
             
@@ -1644,7 +1628,6 @@ getUserState(userId) {
                 return;
             }
 
-            // Check positions
             const canAddPosition = this.portfolioManager.canAddPosition();
             console.log(`💼 Can add position: ${canAddPosition ? '✅ YES' : '❌ MAX REACHED'}`);
             console.log(`   Current: ${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}`);
@@ -1655,7 +1638,6 @@ getUserState(userId) {
                 return;
             }
 
-            // THE CRITICAL PART - FINDING OPPORTUNITIES
             console.log('\n🔍 SEARCHING FOR OPPORTUNITIES...\n');
             const opportunity = await this.findTradingOpportunity(userId);
             
@@ -3877,83 +3859,57 @@ Status: ${this.engine.circuitBreaker.isTripped ? '❌ TRIPPED' : '✅ OK'}
 }
 
 async handleStart(userId, chatId) {
-    // Use global logger as fallback
     const log = this.logger || logger || console;
     
     try {
         await this.sendMessage(chatId, '⏳ Starting bot...');
 
-        // Validate dependencies
         if (!this.engine) throw new Error('Trading engine not initialized');
         if (!this.wallet || !this.wallet.publicKey) throw new Error('Wallet not connected');
         if (!this.database) throw new Error('Database not initialized');
 
+        // Get user state
         const user = this.engine.getUserState(userId);
         if (!user) throw new Error('User state is null');
         
-        // Get wallet balance
-        let balances;
-        try {
-            balances = await this.engine.getWalletBalance();
-            if (!balances || typeof balances !== 'object') {
-                throw new Error('Invalid balance structure');
-            }
-            
-            balances = {
-                sol: Number(balances.sol) || 0,
-                wsol: Number(balances.wsol) || 0,
-                usdc: Number(balances.usdc) || 0,
-                trading: Number(balances.trading) || 0,
-                totalSol: Number(balances.totalSol) || 0,
-                allTokens: Array.isArray(balances.allTokens) ? balances.allTokens : []
-            };
-            
-        } catch (err) {
-            log.error('Wallet balance fetch failed:', err?.message || String(err));
-            balances = {
-                sol: 0, wsol: 0, usdc: 0, trading: 0, totalSol: 0, allTokens: []
-            };
-        }
-
-        const tradingBalance = Number(balances.trading) || 0;
+        console.log('📊 User state before activation:', {
+            isActive: user.isActive,
+            balance: user.currentBalance
+        });
         
-        // ===== CRITICAL: CHECK IF WALLET IS EMPTY =====
+        // Get wallet balance
+        const balances = await this.engine.getWalletBalance();
+        const tradingBalance = balances.trading;
+        
+        // Check if wallet empty
         if (tradingBalance === 0 || tradingBalance < 0.01) {
             const walletAddress = this.wallet.publicKey.toString();
-            const shortAddress = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-6)}`;
             
             await this.sendMessage(chatId, `
-⚠️ <b>EMPTY WALLET DETECTED</b>
+⚠️ <b>INSUFFICIENT FUNDS</b>
 
-Your trading wallet has no funds!
+Your wallet needs more funds to trade.
 
-💼 <b>Wallet Address:</b>
-<code>${walletAddress}</code>
-
-📊 <b>Current Balance:</b>
+💼 <b>Current Balance:</b>
 SOL: ${balances.sol.toFixed(4)}
 USDC: ${balances.usdc.toFixed(2)}
 
-❌ Cannot start trading with 0 balance.
+<b>Minimum Required:</b>
+0.5 SOL or $50 USDC for live trading
+0.1 SOL or $10 USDC for testing
 
-<b>To start trading:</b>
-1. Send SOL or USDC to the wallet above
-2. Wait for confirmation (1-2 minutes)
-3. Run /start again
+<b>Wallet Address:</b>
+<code>${walletAddress}</code>
 
-<b>Recommended:</b>
-• Minimum: 0.5 SOL or $50 USDC
-• For testing: 0.1 SOL or $10 USDC
-
-Use /wallet to check balance anytime.
+Fund your wallet and run /start again.
             `.trim(), { parse_mode: 'HTML' });
             
-            log.warn('User attempted to start with empty wallet', { 
+            log.warn('User attempted to start with insufficient funds', { 
                 userId, 
                 balance: tradingBalance 
             });
             
-            return; // Exit without activating
+            return;
         }
         
         log.info('Wallet balances for start', {
@@ -3970,10 +3926,9 @@ Use /wallet to check balance anytime.
             dbUser = await this.database.getUser(userId.toString());
         } catch (err) {
             log.error('Database query failed:', err?.message || String(err));
-            dbUser = null;
         }
 
-        // Initialize user
+        // Initialize or update user
         if (!dbUser) {
             user.startingBalance = tradingBalance;
             user.currentBalance = tradingBalance;
@@ -3983,7 +3938,6 @@ Use /wallet to check balance anytime.
             try {
                 await this.database.createUser(userId.toString(), tradingBalance);
                 console.log('✅ New user created:', userId);
-                log.info('New user created', { userId, balance: tradingBalance });
             } catch (err) {
                 log.error('Failed to create user:', err?.message || String(err));
             }
@@ -3996,23 +3950,34 @@ Use /wallet to check balance anytime.
             });
         }
 
-        // ===== CRITICAL: ACTIVATE USER =====
+        // ===== CRITICAL: ACTIVATE USER IN MEMORY =====
         user.isActive = true;
-        console.log('✅ User activated:', userId);
+        console.log('✅ User activated in memory:', userId);
+        console.log('   isActive:', user.isActive);
         
-        // ===== CRITICAL: SAVE TO DATABASE =====
+        // ===== CRITICAL: UPDATE DATABASE =====
         try {
             await this.database.updateUser(userId.toString(), {
-                is_active: 1,
+                is_active: 1, // INTEGER 1 = true
                 current_balance: user.currentBalance,
-                trading_capital: user.tradingCapital
+                trading_capital: user.tradingCapital,
+                daily_start_balance: user.dailyStartBalance
             });
             console.log('✅ Database updated with active status');
+            
+            // VERIFY the update worked
+            const verifyUser = await this.database.getUser(userId.toString());
+            console.log('✅ Database verification:', {
+                is_active: verifyUser.is_active,
+                current_balance: verifyUser.current_balance
+            });
+            
         } catch (err) {
             log.error('Failed to update database:', err?.message || String(err));
+            throw new Error('Database update failed - cannot activate user');
         }
         
-        // Save state
+        // ===== SAVE ENGINE STATE =====
         try {
             await this.engine.saveState();
             console.log('✅ State saved');
@@ -4020,50 +3985,48 @@ Use /wallet to check balance anytime.
             log.error('Failed to save state:', err?.message || String(err));
         }
 
-        // Get strategy
-        let strategy;
-        try {
-            strategy = this.engine.getActiveStrategy();
-            if (!strategy || typeof strategy !== 'object') {
-                throw new Error('Invalid strategy');
-            }
-        } catch (err) {
-            log.error('Failed to get strategy:', err?.message || String(err));
-            strategy = { scalpMin: 0.05, scalpMax: 0.15, extendedTarget: 0.30 };
+        // ===== FINAL VERIFICATION =====
+        const finalCheck = this.engine.getUserState(userId);
+        console.log('✅ Final user state check:', {
+            isActive: finalCheck.isActive,
+            balance: finalCheck.currentBalance,
+            inMemory: this.engine.userStates.has(userId)
+        });
+        
+        if (!finalCheck.isActive) {
+            throw new Error('User activation failed - state not persisted');
         }
 
+        // Get strategy
+        const strategy = this.engine.getActiveStrategy();
+        
         // Build message
         const walletAddress = this.wallet.publicKey.toString();
         const shortAddress = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
-        const modeText = ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE';
         
         const message = `
 🤖 <b>AUTO-TRADING ACTIVATED</b>
-${modeText}
+${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 
 📊 <b>Strategy:</b>
 - Pump.fun ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}% bonding
-- Volume spike ${VOLUME_SPIKE_MULTIPLIER}x
-- Scalp ${(strategy.scalpMin * 100).toFixed(0)}-${(strategy.scalpMax * 100).toFixed(0)}% (0-${EXTENDED_HOLD_MINUTES}min)
-- Extended ${(strategy.extendedTarget * 100).toFixed(0)}% (${EXTENDED_HOLD_MINUTES}min+)
+- Scalp ${(strategy.scalpMin * 100).toFixed(0)}-${(strategy.scalpMax * 100).toFixed(0)}%
+- Extended ${(strategy.extendedTarget * 100).toFixed(0)}%
 
 🎯 <b>Daily Targets:</b>
 Profit: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
 Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
 
-⚙️ <b>Features:</b>
-Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}
-MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}
-Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}
-
 💼 <b>Account:</b>
 Wallet: <code>${shortAddress}</code>
-Trading Balance: ${tradingBalance.toFixed(4)} ${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
+Balance: ${tradingBalance.toFixed(4)} ${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
 Day: ${user.currentDay || 1}
-Scan Interval: ${SCAN_INTERVAL_MINUTES}min
 
-🚀 Bot is scanning for opportunities...
-Use /help for commands
+🚀 Bot scanning for opportunities...
+Next scan in ~${SCAN_INTERVAL_MINUTES} minutes
+
+Use /status to check bot status
+Use /help for all commands
         `.trim();
 
         await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
@@ -4073,40 +4036,23 @@ Use /help for commands
     } catch (error) {
         const safeError = error || new Error('Unknown error occurred');
         const errorMessage = safeError.message || String(safeError);
-        const errorStack = safeError.stack || 'No stack trace';
         
         const log = this.logger || logger || console;
         
         if (log && typeof log.error === 'function') {
             log.error('Critical error in handleStart:', {
                 error: errorMessage,
-                stack: errorStack,
-                userId: userId || 'unknown',
-                chatId: chatId || 'unknown'
-            });
-        } else {
-            console.error('Critical error in handleStart:', {
-                error: errorMessage,
-                stack: errorStack,
                 userId: userId || 'unknown',
                 chatId: chatId || 'unknown'
             });
         }
 
-        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again or contact support.`;
+        const errorMsg = `❌ <b>Failed to start bot</b>\n\n${errorMessage}\n\nPlease try again.`;
         
         try {
             await this.sendMessage(chatId, errorMsg, { parse_mode: 'HTML' });
         } catch (sendError) {
-            try {
-                await this.sendMessage(chatId, '❌ Failed to start bot. Please try again.');
-            } catch (finalError) {
-                if (log && typeof log.error === 'function') {
-                    log.error('Complete send failure');
-                } else {
-                    console.error('Complete send failure');
-                }
-            }
+            console.error('Failed to send error message');
         }
     }
 }
