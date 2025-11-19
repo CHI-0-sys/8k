@@ -1,3 +1,8 @@
+console.log('🚀 Bot starting...', new Date().toISOString());
+process.on('exit', (code) => {
+    console.log('💀 Process exiting with code:', code);
+});
+
 process.on('uncaughtException', (err) => {  // ← Parameter is 'err'
     console.error('UNCAUGHT EXCEPTION:', err);  // ← Use 'err' not 'error'
     console.error('Stack:', err.stack);
@@ -8,8 +13,6 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason);
     // Don't exit on rejection - just log it
 });
-
-
 
 require('dotenv').config(); 
 
