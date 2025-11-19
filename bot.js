@@ -701,19 +701,13 @@ class BitqueryClient {
                 console.log('✅ Using cached data');
                 console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
                 console.log(`   Cached tokens: ${cached.data.length}`);
-                this.logger.debug('Using cached graduating tokens');
                 return cached.data;
-            } else {
-                console.log('❌ Cache expired');
-                console.log(`   Cache age: ${cacheAge.toFixed(0)}s (max: ${CACHE_DURATION_MINUTES * 60}s)`);
             }
         }
-
+    
         console.log('\n🌐 Making fresh BitQuery API call...');
-        console.log('   API Key:', this.apiKey ? this.apiKey.substring(0, 10) + '...' : 'MISSING');
-        console.log('   Endpoint:', this.baseURL);
-
-        // THE EXACT QUERY
+        
+        // 🔥 SIMPLIFIED QUERY - NO COMPLEX CALCULATION
         const query = `{
             Solana {
                 DEXPools(
@@ -724,14 +718,11 @@ class BitqueryClient {
                         Pool: {
                             Base: {PostAmount: {gt: "206900000", lt: "980000000"}},
                             Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}},
-                            Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111", "So11111111111111111111111111111111111111112"]}}}
+                            Market: {QuoteCurrency: {MintAddress: {in: ["So11111111111111111111111111111111111111112"]}}}
                         },
                         Transaction: {Result: {Success: true}}
                     }
                 ) {
-                    Bonding_Curve_Progress_precentage: calculate(
-                        expression: "100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)"
-                    )
                     Pool {
                         Market {
                             BaseCurrency {
@@ -740,15 +731,6 @@ class BitqueryClient {
                                 Symbol
                             }
                             MarketAddress
-                            QuoteCurrency {
-                                MintAddress
-                                Name
-                                Symbol
-                            }
-                        }
-                        Dex {
-                            ProtocolName
-                            ProtocolFamily
                         }
                         Base {
                             Balance: PostAmount
@@ -762,84 +744,79 @@ class BitqueryClient {
                 }
             }
         }`;
-
+    
         console.log('   Query parameters:');
         console.log('   - Limit: 50 tokens');
         console.log('   - Program: Pump.fun (6EF8...)');
         console.log('   - Base range: 206.9M - 980M (graduating range)');
         console.log('   - Order: By liquidity (descending)');
-
+    
         this.estimatedPoints += 150;
         
         try {
             console.log('\n⏳ Sending request...');
             const startTime = Date.now();
             
-            // THIS IS WHERE THE PAYLOAD IS SENT
             const data = await this.query(query);
             
             const duration = Date.now() - startTime;
             console.log(`✅ Response received in ${duration}ms`);
             
-            if (!data) {
-                console.log('❌ NULL response from BitQuery');
+            if (!data?.Solana?.DEXPools) {
+                console.log('❌ No pools returned');
                 return [];
             }
-            
-            if (!data.Solana) {
-                console.log('❌ No Solana data in response');
-                console.log('   Full response:', JSON.stringify(data, null, 2));
-                return [];
-            }
-            
-            if (!data.Solana.DEXPools) {
-                console.log('❌ No DEXPools in Solana data');
-                console.log('   Solana data:', JSON.stringify(data.Solana, null, 2));
-                return [];
-            }
-
+    
             const rawTokenCount = data.Solana.DEXPools.length;
             console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
-
+    
             if (rawTokenCount === 0) {
-                console.log('⚠️  No tokens returned by BitQuery');
-                console.log('   Possible reasons:');
-                console.log('   - No tokens graduating right now (check pump.fun)');
-                console.log('   - Market is slow today');
-                console.log('   - All tokens outside 206.9M-980M range');
-                console.log('='.repeat(60) + '\n');
+                console.log('⚠️  No tokens in graduating range right now');
                 return [];
             }
-
-            // Process tokens
+    
+            // 🔥 FIX: Calculate bonding correctly
             const allTokens = data.Solana.DEXPools.map(pool => {
-                const bondingRemaining = parseFloat(pool.Bonding_Curve_Progress_precentage || 0);
-                const bondingProgress = 100 - bondingRemaining;
+                const baseBalance = parseFloat(pool.Pool.Base.Balance) || 0;
+                
+                // Pump.fun bonding curve constants
+                const VIRTUAL_TOKEN_RESERVES = 1_073_000_000; // 1.073B total supply
+                const VIRTUAL_SOL_RESERVES = 30; // 30 SOL virtual reserves
+                const REAL_TOKEN_RESERVES_START = 793_100_000; // Tokens available for sale
+                const BONDING_COMPLETE = 206_900_000; // When bonding ends (raydium migration)
+                
+                // Calculate how many tokens have been sold
+                const tokensSold = REAL_TOKEN_RESERVES_START - (baseBalance - BONDING_COMPLETE);
+                
+                // Bonding progress = tokens sold / total available
+                let bondingProgress = (tokensSold / REAL_TOKEN_RESERVES_START) * 100;
+                
+                // Clamp between 0-100
+                bondingProgress = Math.max(0, Math.min(100, bondingProgress));
                 
                 return {
                     address: pool.Pool.Market.BaseCurrency.MintAddress,
                     symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
                     name: pool.Pool.Market.BaseCurrency.Name || 'Unknown Token',
                     bondingProgress: bondingProgress,
-                    bondingRemaining: bondingRemaining,
                     liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
                     priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
-                    baseBalance: parseFloat(pool.Pool.Base.Balance) || 0,
+                    baseBalance: baseBalance,
                     marketAddress: pool.Pool.Market.MarketAddress,
-                    protocol: pool.Pool.Dex?.ProtocolName || 'Pump.fun',
+                    protocol: 'Pump.fun',
                     lastUpdate: Date.now(),
                     isHot: bondingProgress >= 96
                 };
             });
-
-            console.log('\n📋 Raw tokens (before filtering):');
+    
+            console.log('\n📋 Raw tokens (with FIXED bonding):');
             allTokens.slice(0, 10).forEach((token, i) => {
-                console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0).padStart(6)} liq`);
+                console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liq`);
             });
             if (allTokens.length > 10) {
                 console.log(`   ... and ${allTokens.length - 10} more`);
             }
-
+    
             // Apply filters
             console.log('\n🔍 Applying filters:');
             console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
@@ -855,20 +832,26 @@ class BitqueryClient {
                 } else if (!passLiquidity) {
                     console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
                 } else {
-                    console.log(`   ✅ ${t.symbol} - PASSED initial filters`);
+                    console.log(`   ✅ ${t.symbol} - PASSED all filters!`);
                 }
                 
                 return passBonding && passLiquidity;
             });
-
+    
             console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
-
+    
             if (filtered.length === 0) {
                 console.log('\n⚠️  NO TOKENS PASSED FILTERS');
-                console.log('   All tokens filtered out by bonding/liquidity requirements');
+                console.log('   This is normal - tokens rarely stay in 93-98% range');
+                console.log('   Bot will keep scanning every 5 minutes');
+            } else {
+                console.log('\n🎯 FOUND QUALIFYING TOKENS:');
+                filtered.forEach(t => {
+                    console.log(`   ✅ ${t.symbol}: ${t.bondingProgress.toFixed(1)}% bonding, $${t.liquidityUSD.toFixed(0)} liq`);
+                });
             }
-
-            // Sort if enabled
+    
+            // Sort by hot tokens first
             if (PRIORITIZE_HOT_TOKENS && filtered.length > 0) {
                 filtered.sort((a, b) => {
                     if (a.isHot && !b.isHot) return -1;
@@ -877,25 +860,19 @@ class BitqueryClient {
                 });
                 console.log('   Sorted by: Hot tokens first, then liquidity');
             }
-
-            this.logger.info('Graduating tokens found', { 
-                raw: rawTokenCount,
-                filtered: filtered.length 
-            });
-
+    
             // Cache results
             if (this.cache) {
                 this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
                 console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
             }
-
+    
             console.log('='.repeat(60) + '\n');
             return filtered;
             
         } catch (error) {
             console.log('\n❌ BitQuery API ERROR');
             console.log('   Error:', error.message);
-            console.log('   Stack:', error.stack);
             console.log('='.repeat(60) + '\n');
             
             this.logger.error('BitQuery API error', { 
