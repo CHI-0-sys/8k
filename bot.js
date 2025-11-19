@@ -863,7 +863,19 @@ class BitqueryClient {
                 });
                 console.log('   Sorted by: Hot tokens first, then liquidity');
             }
-    
+          
+            console.log('\n📋 DETAILED TOKEN ANALYSIS:');
+allTokens.forEach((token, i) => {
+    console.log(`\n${i+1}. ${token.symbol}`);
+    console.log(`   Address: ${token.address}`);
+    console.log(`   Bonding: ${token.bondingProgress.toFixed(2)}%`);
+    console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
+    console.log(`   Price: $${token.priceUSD.toExponential(4)}`);
+    console.log(`   In Range (93-98%)?: ${token.bondingProgress >= 93 && token.bondingProgress <= 98 ? '✅' : '❌'}`);
+    console.log(`   Enough Liquidity?: ${token.liquidityUSD >= 8000 ? '✅' : '❌'}`);
+});    
+
+
             // Cache results
             if (this.cache) {
                 this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
