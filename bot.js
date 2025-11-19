@@ -1182,111 +1182,102 @@ class TradingEngine {
   }
   
   async init() {
-    this.logger.info('Trading engine initializing');
+    logger.info('Trading engine initializing...');
     
-    // Load state from database
-    await this.loadState();
-    
-    // CRITICAL FIX: Ensure authorized users are created and activated
-    for (const userId of AUTHORIZED_USERS) {
-        console.log(`\n👤 Checking user: ${userId}`);
+    try {
+        // Database init
+        console.log('📦 Step 1: Initializing database...');
+        await this.database.init();
+        logger.info('✅ Database initialized');
         
-        let user = this.userStates.get(userId);
+        // BitQuery init
+        console.log('📡 Step 2: Initializing BitQuery...');
+        await this.bitquery.init();
+        logger.info('✅ Bitquery initialized');
         
-        if (!user) {
-            console.log('   ⚠️  User not in memory, creating...');
-            user = this.getUserState(userId); // This creates default state
-        }
+        // Load state from database
+        console.log('💾 Step 3: Loading user state...');
+        await this.loadState();
         
-        // Get wallet balance for initialization
+        // 🔥 FIX: Sync all users with wallet balance on startup
+        console.log('💰 Step 4: Syncing wallet balances...');
         const balances = await this.getWalletBalance();
         const tradingBalance = balances.trading;
         
-        console.log(`   💰 Wallet balance: ${tradingBalance.toFixed(4)}`);
+        console.log(`   Wallet has: ${tradingBalance.toFixed(4)} available for trading`);
         
-        // Check database
-        let dbUser = null;
-        try {
-            dbUser = await this.database.getUser(userId.toString());
-        } catch (err) {
-            this.logger.warn('Failed to load user from DB', { userId, error: err.message });
-        }
-        
-        if (!dbUser) {
-            console.log('   📝 Creating new database user...');
-            // New user - initialize with wallet balance
-            user.startingBalance = tradingBalance;
-            user.currentBalance = tradingBalance;
-            user.dailyStartBalance = tradingBalance;
-            user.tradingCapital = tradingBalance;
-            user.isActive = false; // Will be activated by /start command
+        for (const userId of AUTHORIZED_USERS) {
+            let user = this.userStates.get(userId);
             
+            if (!user) {
+                console.log(`   Creating new user: ${userId}`);
+                user = this.getUserState(userId);
+            }
+            
+            // Get from database
+            let dbUser = null;
             try {
-                await this.database.createUser(userId.toString(), tradingBalance);
-                console.log('   ✅ Database user created');
+                dbUser = await this.database.getUser(userId.toString());
             } catch (err) {
-                this.logger.error('Failed to create user', { userId, error: err.message });
+                logger.warn('Failed to load user from DB', { userId, error: err.message });
             }
-        } else {
-            console.log('   ✅ Existing database user found');
-            console.log(`      - DB Balance: ${dbUser.current_balance}`);
-            console.log(`      - DB Active: ${dbUser.is_active === 1 ? 'YES' : 'NO'}`);
             
-            // Load existing user state
-            user.isActive = dbUser.is_active === 1; // CRITICAL: Load active state
-            user.startingBalance = dbUser.starting_balance;
-            user.currentBalance = dbUser.current_balance;
-            user.dailyStartBalance = dbUser.daily_start_balance;
-            user.dailyProfit = dbUser.daily_profit;
-            user.dailyProfitPercent = dbUser.daily_profit_percent;
-            user.currentDay = dbUser.current_day;
-            user.totalTrades = dbUser.total_trades;
-            user.successfulTrades = dbUser.successful_trades;
-            user.lastTradeAt = dbUser.last_trade_at;
-            user.dailyResetAt = dbUser.daily_reset_at;
-            user.totalProfitTaken = dbUser.total_profit_taken;
-            user.tradingCapital = dbUser.trading_capital;
-            
-            console.log(`   📊 User state loaded: ${user.isActive ? '✅ ACTIVE' : '❌ INACTIVE'}`);
-        }
-        
-        // Sync with wallet balance
-        const balanceDiff = Math.abs(tradingBalance - user.currentBalance);
-        if (balanceDiff > 0.01) {
-            console.log(`   ⚠️  Balance mismatch detected:`);
-            console.log(`      - Tracked: ${user.currentBalance.toFixed(4)}`);
-            console.log(`      - Wallet: ${tradingBalance.toFixed(4)}`);
-            console.log(`      - Difference: ${balanceDiff.toFixed(4)}`);
-            console.log(`   🔄 Syncing to wallet balance...`);
-            
-            user.currentBalance = tradingBalance;
-            user.tradingCapital = tradingBalance;
-        }
-        
-        // Store updated state
-        this.userStates.set(userId, user);
-        
-        console.log(`   ✅ User initialized:`);
-        console.log(`      - Active: ${user.isActive ? 'YES ✅' : 'NO ❌ (use /start)'}`);
-        console.log(`      - Balance: ${user.currentBalance.toFixed(4)}`);
-        console.log(`      - Day: ${user.currentDay}`);
-    }
-    
-    // Initialize anomaly detector baselines
-    if (this.anomalyDetector) {
-        for (const [userId, user] of this.userStates.entries()) {
-            if (user.isActive) {
-                await this.anomalyDetector.updateBaseline(userId);
+            if (!dbUser) {
+                // New user - initialize with wallet balance
+                console.log(`   📝 New user ${userId} - initializing with wallet balance`);
+                user.startingBalance = tradingBalance;
+                user.currentBalance = tradingBalance;  // 🔥 SET THIS
+                user.dailyStartBalance = tradingBalance;
+                user.tradingCapital = tradingBalance;
+                user.isActive = false; // Will be activated by /start
+                
+                await this.database.createUser(userId.toString(), tradingBalance);
+                console.log(`   ✅ Created with balance: ${tradingBalance.toFixed(4)}`);
+            } else {
+                // Existing user - load from DB but sync balance with wallet
+                console.log(`   📝 Existing user ${userId}`);
+                console.log(`      DB balance: ${dbUser.current_balance?.toFixed(4) || '0'}`);
+                console.log(`      Wallet balance: ${tradingBalance.toFixed(4)}`);
+                
+                user.isActive = dbUser.is_active === 1;
+                user.startingBalance = dbUser.starting_balance || tradingBalance;
+                user.dailyStartBalance = dbUser.daily_start_balance || tradingBalance;
+                user.dailyProfit = dbUser.daily_profit || 0;
+                user.dailyProfitPercent = dbUser.daily_profit_percent || 0;
+                user.currentDay = dbUser.current_day || 1;
+                user.totalTrades = dbUser.total_trades || 0;
+                user.successfulTrades = dbUser.successful_trades || 0;
+                user.lastTradeAt = dbUser.last_trade_at || 0;
+                user.dailyResetAt = dbUser.daily_reset_at || Date.now();
+                user.totalProfitTaken = dbUser.total_profit_taken || 0;
+                
+                // 🔥 CRITICAL: Always use wallet balance as source of truth
+                user.currentBalance = tradingBalance;
+                user.tradingCapital = tradingBalance;
+                
+                console.log(`   ✅ Loaded and synced to wallet: ${user.currentBalance.toFixed(4)}`);
             }
+            
+            // Store updated state
+            this.userStates.set(userId, user);
+            
+            console.log(`   Final state: active=${user.isActive}, balance=${user.currentBalance.toFixed(4)}`);
         }
+        
+        console.log('\n📊 Initialization Summary:');
+        console.log(`   Total users: ${this.userStates.size}`);
+        console.log(`   Active users: ${Array.from(this.userStates.values()).filter(u => u.isActive).length}`);
+        
+        logger.info('✅ Trading engine initialized');
+
+    } catch (error) {
+        console.error('❌ Initialization failed:', error.message);
+        logger.error('Initialization failed', { 
+            error: error.message, 
+            stack: error.stack 
+        });
+        throw error;
     }
-    
-    console.log('\n📊 Trading Engine Initialization Summary:');
-    console.log(`   Total users: ${this.userStates.size}`);
-    console.log(`   Active users: ${Array.from(this.userStates.values()).filter(u => u.isActive).length}`);
-    console.log(`   Inactive users: ${Array.from(this.userStates.values()).filter(u => !u.isActive).length}`);
-    
-    this.logger.info('Trading engine initialized');
 }
 
 
@@ -3852,7 +3843,7 @@ async handleStart(userId, chatId) {
 
         const user = this.engine.getUserState(userId);
         
-        // Get wallet balance
+        // Get wallet balance FIRST
         const balances = await this.engine.getWalletBalance();
         const tradingBalance = balances.trading;
         
@@ -3860,18 +3851,20 @@ async handleStart(userId, chatId) {
         console.log('🚀 USER ACTIVATION');
         console.log('='.repeat(60));
         console.log('User ID:', userId);
-        console.log('Trading Balance:', tradingBalance.toFixed(4));
+        console.log('Trading Balance from wallet:', tradingBalance.toFixed(4));
+        console.log('Current user.currentBalance:', user.currentBalance.toFixed(4));
         
+        // Check minimum balance
         if (tradingBalance < 0.01) {
             await this.sendMessage(chatId, `
 ⚠️ <b>INSUFFICIENT FUNDS</b>
 
 Current: ${tradingBalance.toFixed(4)}
-Needed: 0.1 minimum
+Minimum: 0.1 for testing
 
 Wallet: <code>${this.wallet.publicKey.toString()}</code>
 
-Fund your wallet and try again.
+Fund your wallet and try /start again.
             `.trim(), { parse_mode: 'HTML' });
             return;
         }
@@ -3879,43 +3872,71 @@ Fund your wallet and try again.
         // Check database
         let dbUser = await this.database.getUser(userId.toString()).catch(() => null);
         
+        // 🔥 FIX: Set balance BEFORE database operations
         if (!dbUser) {
+            // New user - initialize with wallet balance
+            console.log('📝 New user - initializing with wallet balance');
             user.startingBalance = tradingBalance;
-            user.currentBalance = tradingBalance;
+            user.currentBalance = tradingBalance;  // 🔥 SET THIS
             user.dailyStartBalance = tradingBalance;
             user.tradingCapital = tradingBalance;
+            user.currentDay = 1;
             
             await this.database.createUser(userId.toString(), tradingBalance);
-            console.log('✅ New user created in DB');
+            console.log('✅ New user created in DB with balance:', tradingBalance);
         } else {
-            console.log('✅ Existing user found in DB');
+            // Existing user - sync with wallet balance
+            console.log('📝 Existing user - syncing with wallet balance');
+            console.log('   DB balance:', dbUser.current_balance);
+            console.log('   Wallet balance:', tradingBalance);
+            
+            // 🔥 CRITICAL: Always sync to wallet balance
+            user.currentBalance = tradingBalance;
+            user.tradingCapital = tradingBalance;
+            user.dailyStartBalance = tradingBalance;
+            
+            // Update starting balance if first time or reset
+            if (user.startingBalance === 0 || !user.startingBalance) {
+                user.startingBalance = tradingBalance;
+            }
+            
+            console.log('✅ Synced to wallet balance:', user.currentBalance);
         }
 
-        // 🔥 CRITICAL: ACTIVATE USER
+        // 🔥 CRITICAL: Activate user
         user.isActive = true;
         
-        console.log('✅ User activated in memory');
+        console.log('\n✅ User state after setup:');
         console.log('   isActive:', user.isActive);
-        console.log('   balance:', user.currentBalance);
+        console.log('   currentBalance:', user.currentBalance.toFixed(4));
+        console.log('   tradingCapital:', user.tradingCapital.toFixed(4));
+        console.log('   startingBalance:', user.startingBalance.toFixed(4));
         
-        // Update database
+        // Update database with correct values
         await this.database.updateUser(userId.toString(), {
             is_active: 1,
-            current_balance: user.currentBalance,
-            trading_capital: user.tradingCapital
+            current_balance: user.currentBalance,  // 🔥 Use the synced balance
+            trading_capital: user.tradingCapital,
+            daily_start_balance: user.dailyStartBalance,
+            starting_balance: user.startingBalance
         });
         
         console.log('✅ Database updated');
         
-        // Verify
+        // Verify it worked
         const verify = await this.database.getUser(userId.toString());
         console.log('✅ Verification:', {
             is_active: verify.is_active,
-            balance: verify.current_balance
+            current_balance: verify.current_balance,
+            trading_capital: verify.trading_capital
         });
         
+        if (verify.current_balance === 0 || verify.current_balance === null) {
+            throw new Error('Database balance still 0 after update!');
+        }
+        
         if (verify.is_active !== 1) {
-            throw new Error('Activation failed - database not updated');
+            throw new Error('User not activated in database');
         }
         
         // Save state
@@ -3924,15 +3945,19 @@ Fund your wallet and try again.
         
         // Final check
         const finalUser = this.engine.getUserState(userId);
-        console.log('✅ Final state:', {
+        console.log('✅ Final verification:', {
             isActive: finalUser.isActive,
-            inMemory: this.engine.userStates.has(userId)
+            currentBalance: finalUser.currentBalance.toFixed(4),
+            hasPosition: finalUser.position !== null
         });
-        
         console.log('='.repeat(60) + '\n');
         
         if (!finalUser.isActive) {
-            throw new Error('Activation verification failed');
+            throw new Error('Final state check failed - user not active');
+        }
+        
+        if (finalUser.currentBalance === 0) {
+            throw new Error('Final state check failed - balance is 0');
         }
 
         // Success message
@@ -3941,38 +3966,59 @@ Fund your wallet and try again.
         const shortAddr = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
         
         await this.sendMessage(chatId, `
-🤖 <b>BOT ACTIVATED</b>
-${ENABLE_PAPER_TRADING ? '🧪 PAPER MODE' : '💰 LIVE MODE'}
+🤖 <b>BOT ACTIVATED</b> ✅
+${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 
 💼 <b>Account:</b>
 Wallet: <code>${shortAddr}</code>
-Balance: ${tradingBalance.toFixed(4)}
-Day: ${user.currentDay || 1}
+Balance: ${finalUser.currentBalance.toFixed(4)} ${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
+Day: ${finalUser.currentDay || 1}
 
 🎯 <b>Strategy:</b>
 Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
 Stop Loss: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
+Per Trade: ${(strategy.perTradeTarget * 100).toFixed(0)}%
+
+📊 <b>Filters:</b>
+Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%
+Min Liquidity: $${MIN_LIQUIDITY_USD}
 
 🚀 <b>Status:</b>
-✅ Scanning for opportunities
-Next scan: ~${SCAN_INTERVAL_MINUTES}min
+✅ Bot active and scanning
+⏰ Scan interval: ${SCAN_INTERVAL_MINUTES} minutes
 
-Use /status to check
-Use /stop to halt
+Commands:
+/status - Check bot status
+/balance - View detailed balance
+/stop - Stop trading
         `.trim(), { parse_mode: 'HTML' });
         
-        console.log('✅ Start message sent');
+        console.log('✅ Start message sent to user');
+        logger.info('User activated successfully', { 
+            userId,
+            balance: finalUser.currentBalance,
+            isActive: finalUser.isActive
+        });
 
     } catch (error) {
         console.error('💥 START ERROR:', error.message);
         console.error('Stack:', error.stack);
         
+        logger.error('handleStart failed', {
+            error: error.message,
+            stack: error.stack,
+            userId
+        });
+        
         await this.sendMessage(chatId, 
-            `❌ <b>Activation Failed</b>\n\n${error.message}`,
+            `❌ <b>Activation Failed</b>\n\n${error.message}\n\nPlease try again.`,
             { parse_mode: 'HTML' }
-        ).catch(() => {});
+        ).catch(err => {
+            console.error('Failed to send error message:', err.message);
+        });
     }
 }
+
 
 
 async handleScan(userId, chatId) {
@@ -4183,90 +4229,49 @@ async handleRecent(userId, chatId) {
   }
   
   async handleBalance(userId, chatId) {
-    const user = this.engine.getUserState(userId);
-    
-    // Get real-time wallet balance
-    const balances = await this.engine.getWalletBalance();
-    const tradingBalance = balances.trading;
-    
-    const todayTrades = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt).length;
-    const winningToday = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt && t.profit > 0).length;
-    const profitToday = user.tradeHistory.filter(t => t.exitTime > user.dailyResetAt).reduce((sum, t) => sum + t.profit, 0);
+    try {
+        const user = this.engine.getUserState(userId);
+        
+        // Get REAL wallet balance
+        const balances = await this.engine.getWalletBalance();
+        const tradingBalance = balances.trading;
+        
+        // Get DB balance
+        const dbUser = await this.database.getUser(userId.toString());
+        
+        const message = `
+💼 <b>BALANCE DEBUG</b>
 
-    let profitInfo = '';
-    if (ENABLE_PROFIT_TAKING && user.totalProfitTaken > 0) {
-        profitInfo = `
-💰 <b>Profit Taking:</b>
-Secured: ${user.totalProfitTaken.toFixed(2)}
-Combined: ${(tradingBalance + user.totalProfitTaken).toFixed(2)}
-`;
-    }
-    
-    const walletAddress = this.wallet.publicKey.toString();
-    const shortAddress = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-6)}`;
-    
-    // Build detailed balance display
-    let walletBalances = [];
-    if (balances.sol > 0.001) {
-        walletBalances.push(`Native SOL: ${balances.sol.toFixed(4)}`);
-    }
-    if (balances.wsol > 0.001) {
-        walletBalances.push(`Wrapped SOL: ${balances.wsol.toFixed(4)}`);
-    }
-    if (balances.totalSol > 0.001) {
-        walletBalances.push(`<b>Total SOL: ${balances.totalSol.toFixed(4)}</b>`);
-    }
-    if (balances.usdc > 0.01) {
-        walletBalances.push(`<b>USDC: ${balances.usdc.toFixed(2)}</b>`);
-    }
-    
-    // Show other tokens
-    const otherTokens = balances.allTokens.filter(t => 
-        t.symbol !== 'USDC' && 
-        t.symbol !== 'WSOL' && 
-        t.symbol !== 'SOL'
-    );
-    
-    if (otherTokens.length > 0) {
-        walletBalances.push('\n<b>Other Tokens:</b>');
-        otherTokens.forEach(token => {
-            walletBalances.push(`${token.symbol}: ${token.balance.toFixed(4)}`);
-        });
-    }
-    
-    await this.sendMessage(chatId, `
-💼 <b>BALANCE OVERVIEW</b>
+🔍 <b>Reality Check:</b>
+Wallet Balance: ${tradingBalance.toFixed(4)}
+${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
 
-🏦 <b>Wallet:</b>
-Address: <code>${shortAddress}</code>
-${walletBalances.join('\n')}
+📊 <b>Tracked Balances:</b>
+Memory (currentBalance): ${user.currentBalance.toFixed(4)}
+Database (current_balance): ${dbUser?.current_balance?.toFixed(4) || '0'}
+Trading Capital: ${user.tradingCapital.toFixed(4)}
 
-📊 <b>Trading:</b>
-Trading Balance: ${tradingBalance.toFixed(4)}
-Starting: ${user.startingBalance.toFixed(4)}
-Current Tracked: ${user.currentBalance.toFixed(4)}
+${Math.abs(tradingBalance - user.currentBalance) > 0.01 ? '⚠️ <b>MISMATCH DETECTED!</b>' : '✅ Balances match'}
+
+📈 <b>Trading Stats:</b>
+Starting Balance: ${user.startingBalance.toFixed(4)}
 Daily Start: ${user.dailyStartBalance.toFixed(4)}
+Daily P&L: ${user.dailyProfit >= 0 ? '+' : ''}${user.dailyProfit.toFixed(4)}
+Total Trades: ${user.totalTrades}
 
-📈 <b>Daily Performance:</b>
-P&L: ${user.dailyProfitPercent >= 0 ? '📈 +' : '📉 '}${user.dailyProfitPercent.toFixed(2)}%
-Profit: ${profitToday >= 0 ? '+' : ''}${profitToday.toFixed(4)}
-Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-${profitInfo}
-📊 <b>Trading Stats:</b>
-Today: ${todayTrades} trades (${winningToday} wins)
-Total: ${user.totalTrades} trades
-Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
+🏦 <b>Wallet Details:</b>
+SOL: ${balances.sol.toFixed(4)}
+WSOL: ${balances.wsol.toFixed(4)}
+USDC: ${balances.usdc.toFixed(2)}
 
-<b>Day ${user.currentDay}</b> of 30-day challenge
-    `.trim(), { parse_mode: 'HTML' });
-
-    logger.info('Balance checked', { 
-        userId, 
-        sol: balances.sol,
-        wsol: balances.wsol,
-        usdc: balances.usdc,
-        trading: tradingBalance
-    });
+<b>Status:</b> ${user.isActive ? '✅ Active' : '❌ Inactive'}
+        `.trim();
+        
+        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        
+    } catch (error) {
+        await this.sendMessage(chatId, `Error: ${error.message}`);
+    }
 }
   
   async handleStatus(userId, chatId) {
