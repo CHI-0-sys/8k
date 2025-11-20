@@ -1388,47 +1388,53 @@ async getWalletBalance() {
 async getAllTokenBalances() {
     try {
         const operation = async (conn) => {
-            // Get all token accounts owned by this wallet
-            const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-            const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
-                this.wallet.publicKey,
-                { programId: TOKEN_PROGRAM_ID }
-            );
+            const accounts = await conn.getTokenAccountsByOwner(this.wallet.publicKey, {
+                programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+            });
 
             const balances = [];
-            
-            for (const account of tokenAccounts.value) {
-                const parsedInfo = account.account.data.parsed.info;
-                const mintAddress = parsedInfo.mint;
-                const balance = parsedInfo.tokenAmount.uiAmount || 0;
-                const decimals = parsedInfo.tokenAmount.decimals;
-                
-                // Only include non-zero balances
-                if (balance > 0) {
+            const SOL_MINT = 'So11111111111111111111111111111111111111112';
+            const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+            for (const account of accounts.value) {
+                const data = account.account.data;
+                const raw = Buffer.from(data.parsed.info.tokenAmount.uiAmountString);
+                const mint = data.parsed.info.mint;
+                const amount = parseFloat(data.parsed.info.tokenAmount.uiAmountString || '0');
+                const decimals = data.parsed.info.tokenAmount.decimals;
+
+                let symbol = 'UNKNOWN';
+                if (mint === SOL_MINT) symbol = 'WSOL';
+                else if (mint === USDC_MINT) symbol = 'USDC';
+                else {
+                    // Try to get symbol from known list or leave as first 4 chars
+                    const known = {
+                        'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'BONK',
+                        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK', // new
+                        'A8C3xuq779jnnJDKciP5i4rK2YMa8FLbL8E3oSn2uBjt': 'GME',
+                    };
+                    symbol = known[mint] || mint.substring(0, 4).toUpperCase();
+                }
+
+                if (amount > 0.000001) { // filter dust
                     balances.push({
-                        mint: mintAddress,
-                        balance: balance,
-                        decimals: decimals,
-                        symbol: this.getTokenSymbol(mintAddress)
+                        mint,
+                        symbol,
+                        balance: amount,
+                        decimals
                     });
                 }
             }
-            
-            return balances;
+
+            return balances.sort((a, b) => b.balance - a.balance);
         };
 
-        const balances = await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
-        
-        this.logger.info('All token accounts fetched', { 
-            count: balances.length,
-            tokens: balances.map(b => `${b.symbol}: ${b.balance.toFixed(4)}`)
-        });
-        
-        return balances;
-        
+        return await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
+
     } catch (error) {
-        this.logger.error('Failed to get all token balances', { 
-            error: error.message
+        logger.error('Failed to fetch token balances', { 
+            error: error.message,
+            stack: error.stack 
         });
         return [];
     }
