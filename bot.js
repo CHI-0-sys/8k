@@ -707,7 +707,7 @@ class BitqueryClient {
                 return cached.data;
             }
         }
-    
+        
         console.log('\n🌐 Making fresh BitQuery API call...');
         
         // 🔥 SIMPLIFIED QUERY - NO COMPLEX CALCULATION
@@ -719,7 +719,7 @@ class BitqueryClient {
                     orderBy: {descending: Pool_Quote_PostAmountInUSD}
                     where: {
                         Pool: {
-                            Base: {PostAmount: {gt: "70000000", lt: "180000000"}},
+                            Base: {PostAmount: {gt: "50000000", lt: "160000000"}},
                             Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}},
                             Market: {QuoteCurrency: {MintAddress: {in: ["So11111111111111111111111111111111111111112"]}}}
                         },
