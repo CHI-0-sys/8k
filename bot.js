@@ -719,7 +719,7 @@ class BitqueryClient {
                     orderBy: {descending: Pool_Quote_PostAmountInUSD}
                     where: {
                         Pool: {
-                            Base: {PostAmount: {gt: "206900000", lt: "980000000"}},
+                            Base: {PostAmount: {gt: "70000000", lt: "180000000"}},
                             Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}},
                             Market: {QuoteCurrency: {MintAddress: {in: ["So11111111111111111111111111111111111111112"]}}}
                         },
@@ -3220,181 +3220,181 @@ async restartPolling() {
   }
 } 
 
-async checkMemoryHealth() {
-    const mem = process.memoryUsage();
-    const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-    const rssPercent = (mem.rss / (128 * 1024 * 1024)) * 100; // Assume 128MB limit
+// async checkMemoryHealth() {
+//     const mem = process.memoryUsage();
+//     const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+//     const rssPercent = (mem.rss / (128 * 1024 * 1024)) * 100; // Assume 128MB limit
     
-    if (heapPercent > 85 || rssPercent > 85) {
-        logger.error('CRITICAL MEMORY - Pausing operations', {
-            heap: heapPercent.toFixed(1) + '%',
-            rss: rssPercent.toFixed(1) + '%'
-        });
+//     if (heapPercent > 85 || rssPercent > 85) {
+//         logger.error('CRITICAL MEMORY - Pausing operations', {
+//             heap: heapPercent.toFixed(1) + '%',
+//             rss: rssPercent.toFixed(1) + '%'
+//         });
         
-        // Stop trading temporarily
-        for (const [userId, user] of this.engine.userStates.entries()) {
-            user.isActive = false;
-        }
+//         // Stop trading temporarily
+//         for (const [userId, user] of this.engine.userStates.entries()) {
+//             user.isActive = false;
+//         }
         
-        // Aggressive cleanup
-        await this.performMemoryCleanup();
+//         // Aggressive cleanup
+//         await this.performMemoryCleanup();
         
-        if (global.gc) {
-            global.gc();
-            global.gc(); // Call twice
-        }
+//         if (global.gc) {
+//             global.gc();
+//             global.gc(); // Call twice
+//         }
         
-        // Wait 30 seconds
-        await sleep(30000);
+//         // Wait 30 seconds
+//         await sleep(30000);
         
-        // Check again
-        const newMem = process.memoryUsage();
-        const newHeapPercent = (newMem.heapUsed / newMem.heapTotal * 100);
+//         // Check again
+//         const newMem = process.memoryUsage();
+//         const newHeapPercent = (newMem.heapUsed / newMem.heapTotal * 100);
         
-        if (newHeapPercent < 70) {
-            logger.info('Memory recovered, resuming operations');
-        } else {
-            logger.error('Memory still critical - RESTARTING');
-            process.exit(1); // Let process manager restart
-        }
-    }
-}
+//         if (newHeapPercent < 70) {
+//             logger.info('Memory recovered, resuming operations');
+//         } else {
+//             logger.error('Memory still critical - RESTARTING');
+//             process.exit(1); // Let process manager restart
+//         }
+//     }
+// }
 
 
 
-setupMemoryManagement() {
-    console.log('🧠 Setting up Railway-optimized memory management...');
-    console.log('   Target: Keep under 400MB for Railway free tier');
+// setupMemoryManagement() {
+//     console.log('🧠 Setting up Railway-optimized memory management...');
+//     console.log('   Target: Keep under 400MB for Railway free tier');
     
-    // ============ AGGRESSIVE MEMORY MONITORING (Every 90 seconds) ============
-    setInterval(() => {
-        const mem = process.memoryUsage();
-        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-        const rssMB = mem.rss / 1024 / 1024;
-        const heapMB = mem.heapUsed / 1024 / 1024;
+//     // ============ AGGRESSIVE MEMORY MONITORING (Every 90 seconds) ============
+//     setInterval(() => {
+//         const mem = process.memoryUsage();
+//         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+//         const rssMB = mem.rss / 1024 / 1024;
+//         const heapMB = mem.heapUsed / 1024 / 1024;
 
-        // Log every check (helps debug Railway issues)
-        console.log(`\n💾 Memory Check: RSS ${rssMB.toFixed(0)}MB | Heap ${heapMB.toFixed(0)}MB (${heapPercent.toFixed(1)}%)`);
+//         // Log every check (helps debug Railway issues)
+//         console.log(`\n💾 Memory Check: RSS ${rssMB.toFixed(0)}MB | Heap ${heapMB.toFixed(0)}MB (${heapPercent.toFixed(1)}%)`);
 
-        // WARNING THRESHOLD (70% heap or 350MB RSS)
-        if (heapPercent > 70 || rssMB > 350) {
-            console.log('⚠️  HIGH MEMORY - Starting cleanup...');
-            logger.warn('High memory usage detected', {
-                heapPercent: heapPercent.toFixed(1) + '%',
-                heapUsed: heapMB.toFixed(0) + 'MB',
-                rss: rssMB.toFixed(0) + 'MB'
-            });
+//         // WARNING THRESHOLD (70% heap or 350MB RSS)
+//         if (heapPercent > 70 || rssMB > 350) {
+//             console.log('⚠️  HIGH MEMORY - Starting cleanup...');
+//             logger.warn('High memory usage detected', {
+//                 heapPercent: heapPercent.toFixed(1) + '%',
+//                 heapUsed: heapMB.toFixed(0) + 'MB',
+//                 rss: rssMB.toFixed(0) + 'MB'
+//             });
 
-            // Perform cleanup
-            const cleaned = this.performMemoryCleanup();
-            console.log(`   ✅ Cleaned ${cleaned} items`);
+//             // Perform cleanup
+//             const cleaned = this.performMemoryCleanup();
+//             console.log(`   ✅ Cleaned ${cleaned} items`);
 
-            // Force GC (run with --expose-gc flag in Railway)
-            if (global.gc) {
-                global.gc();
-                console.log('   ✅ Garbage collection forced');
-            }
-        }
+//             // Force GC (run with --expose-gc flag in Railway)
+//             if (global.gc) {
+//                 global.gc();
+//                 console.log('   ✅ Garbage collection forced');
+//             }
+//         }
 
-        // CRITICAL THRESHOLD (85% heap or 450MB RSS)
-        if (heapPercent > 85 || rssMB > 450) {
-            console.log('🚨 CRITICAL MEMORY - Emergency measures!');
-            logger.error('CRITICAL MEMORY', {
-                heapPercent: heapPercent.toFixed(1) + '%',
-                rss: rssMB.toFixed(0) + 'MB'
-            });
+//         // CRITICAL THRESHOLD (85% heap or 450MB RSS)
+//         if (heapPercent > 85 || rssMB > 450) {
+//             console.log('🚨 CRITICAL MEMORY - Emergency measures!');
+//             logger.error('CRITICAL MEMORY', {
+//                 heapPercent: heapPercent.toFixed(1) + '%',
+//                 rss: rssMB.toFixed(0) + 'MB'
+//             });
 
-            // Emergency cleanup
-            this.performMemoryCleanup();
+//             // Emergency cleanup
+//             this.performMemoryCleanup();
 
-            // Triple GC
-            if (global.gc) {
-                global.gc();
-                global.gc();
-                global.gc();
-                console.log('   ✅ Triple garbage collection forced');
-            }
+//             // Triple GC
+//             if (global.gc) {
+//                 global.gc();
+//                 global.gc();
+//                 global.gc();
+//                 console.log('   ✅ Triple garbage collection forced');
+//             }
 
-            // Pause trading temporarily (but keep monitoring)
-            for (const [userId, user] of this.engine.userStates.entries()) {
-                if (user.isActive && !user.position) {
-                    user.isActive = false;
-                    console.log(`   ⏸️  Paused trading for user ${userId} (memory critical)`);
+//             // Pause trading temporarily (but keep monitoring)
+//             for (const [userId, user] of this.engine.userStates.entries()) {
+//                 if (user.isActive && !user.position) {
+//                     user.isActive = false;
+//                     console.log(`   ⏸️  Paused trading for user ${userId} (memory critical)`);
                     
-                    // Notify user
-                    this.sendMessage(userId, '⚠️ Bot temporarily paused due to high memory usage. Will resume automatically.', {
-                        parse_mode: 'HTML'
-                    }).catch(err => console.error('Failed to notify user:', err.message));
-                }
-            }
+//                     // Notify user
+//                     this.sendMessage(userId, '⚠️ Bot temporarily paused due to high memory usage. Will resume automatically.', {
+//                         parse_mode: 'HTML'
+//                     }).catch(err => console.error('Failed to notify user:', err.message));
+//                 }
+//             }
 
-            // Wait 30 seconds, then check if we can resume
-            setTimeout(async () => {
-                const newMem = process.memoryUsage();
-                const newRssMB = newMem.rss / 1024 / 1024;
+//             // Wait 30 seconds, then check if we can resume
+//             setTimeout(async () => {
+//                 const newMem = process.memoryUsage();
+//                 const newRssMB = newMem.rss / 1024 / 1024;
                 
-                if (newRssMB < 350) {
-                    console.log('   ✅ Memory recovered, resuming trading');
+//                 if (newRssMB < 350) {
+//                     console.log('   ✅ Memory recovered, resuming trading');
                     
-                    // Resume trading
-                    for (const [userId, user] of this.engine.userStates.entries()) {
-                        if (!user.isActive && !user.position) {
-                            user.isActive = true;
-                            console.log(`   ▶️  Resumed trading for user ${userId}`);
-                        }
-                    }
-                } else {
-                    console.log('   ❌ Memory still high, keeping trading paused');
-                }
-            }, 30000);
-        }
-    }, 90 * 1000); // Check every 90 seconds
+//                     // Resume trading
+//                     for (const [userId, user] of this.engine.userStates.entries()) {
+//                         if (!user.isActive && !user.position) {
+//                             user.isActive = true;
+//                             console.log(`   ▶️  Resumed trading for user ${userId}`);
+//                         }
+//                     }
+//                 } else {
+//                     console.log('   ❌ Memory still high, keeping trading paused');
+//                 }
+//             }, 30000);
+//         }
+//     }, 90 * 1000); // Check every 90 seconds
 
-    // ============ PERIODIC CLEANUP (Every 5 minutes) ============
-    setInterval(() => {
-        console.log('🧹 Scheduled cleanup...');
-        const cleaned = this.performMemoryCleanup();
-        console.log(`   ✅ Cleaned ${cleaned} items`);
+//     // ============ PERIODIC CLEANUP (Every 5 minutes) ============
+//     setInterval(() => {
+//         console.log('🧹 Scheduled cleanup...');
+//         const cleaned = this.performMemoryCleanup();
+//         console.log(`   ✅ Cleaned ${cleaned} items`);
         
-        if (global.gc) {
-            global.gc();
-        }
-    }, 5 * 60 * 1000);
+//         if (global.gc) {
+//             global.gc();
+//         }
+//     }, 5 * 60 * 1000);
 
-    // ============ CLEAR TELEGRAM INTERNAL CACHE (Every 10 minutes) ============
-    setInterval(() => {
-        if (this.bot && this.bot._polling) {
-            // Clear old updates to prevent memory buildup
-            this.bot._polling._lastUpdateId = 0;
-            console.log('🧹 Cleared Telegram polling cache');
-        }
-    }, 10 * 60 * 1000);
+//     // ============ CLEAR TELEGRAM INTERNAL CACHE (Every 10 minutes) ============
+//     setInterval(() => {
+//         if (this.bot && this.bot._polling) {
+//             // Clear old updates to prevent memory buildup
+//             this.bot._polling._lastUpdateId = 0;
+//             console.log('🧹 Cleared Telegram polling cache');
+//         }
+//     }, 10 * 60 * 1000);
 
-    // ============ WINSTON LOG ROTATION (Every 30 minutes) ============
-    setInterval(() => {
-        if (logger && logger.transports) {
-            logger.transports.forEach(transport => {
-                if (transport.filename && transport.filename.includes('combined.log')) {
-                    try {
-                        // Rotate logs by clearing the file
-                        const logFile = transport.filename;
-                        if (fs.existsSync(logFile)) {
-                            const stats = fs.statSync(logFile);
-                            if (stats.size > 5 * 1024 * 1024) { // > 5MB
-                                fs.writeFileSync(logFile, '');
-                                console.log('🧹 Rotated log file:', logFile);
-                            }
-                        }
-                    } catch (err) {
-                        console.warn('Log rotation failed:', err.message);
-                    }
-                }
-            });
-        }
-    }, 30 * 60 * 1000);
+//     // ============ WINSTON LOG ROTATION (Every 30 minutes) ============
+//     setInterval(() => {
+//         if (logger && logger.transports) {
+//             logger.transports.forEach(transport => {
+//                 if (transport.filename && transport.filename.includes('combined.log')) {
+//                     try {
+//                         // Rotate logs by clearing the file
+//                         const logFile = transport.filename;
+//                         if (fs.existsSync(logFile)) {
+//                             const stats = fs.statSync(logFile);
+//                             if (stats.size > 5 * 1024 * 1024) { // > 5MB
+//                                 fs.writeFileSync(logFile, '');
+//                                 console.log('🧹 Rotated log file:', logFile);
+//                             }
+//                         }
+//                     } catch (err) {
+//                         console.warn('Log rotation failed:', err.message);
+//                     }
+//                 }
+//             });
+//         }
+//     }, 30 * 60 * 1000);
 
-    console.log('✅ Memory management initialized');
-}
+//     console.log('✅ Memory management initialized');
+// }
 
 performMemoryCleanup() {
     let cleaned = 0;
