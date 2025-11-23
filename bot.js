@@ -1,3 +1,11 @@
+// FORCE DNS FIX – solves ENOTFOUND forever
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']); // Google + Cloudflare
+
+// Optional: Log that it worked
+console.log('DNS servers forced to Google/Cloudflare');
+console.log('Current DNS servers:', dns.getServers());
+
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
     console.log('💀 Process exiting with code:', code);
@@ -895,6 +903,28 @@ allTokens.forEach((token, i) => {
             return [];
         }
     }
+      
+     // Add this INSIDE getJupiterQuote, before the fetchWithTimeout
+async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
+    // DNS DEBUG: Test resolution
+    try {
+      const { lookup } = require('dns/promises');
+      const ips = await lookup('quote-api.jup.ag');
+      logger.info('DNS Resolved quote-api.jup.ag', { ips: ips.address });
+      
+      // Also test ping (simple fetch to known endpoint)
+      const testRes = await fetch('https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50');
+      logger.info('Jupiter Test Quote Status', { status: testRes.status, ok: testRes.ok });
+    } catch (dnsErr) {
+      logger.error('DNS/Connectivity Test FAILED', { error: dnsErr.message });
+      throw new Error(`Connectivity issue: ${dnsErr.message}`);
+    }
+  
+    // Your existing for loop with retries...
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      // ... rest unchanged
+    }
+  }
 
     async getVolumeHistory(tokenAddress) {
         if (!ENABLE_VOLUME_CHECK) {
