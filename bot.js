@@ -719,13 +719,15 @@ class BitqueryClient {
                     orderBy: {descending: Pool_Quote_PostAmountInUSD}
                     where: {
                         Pool: {
-                            Base: {PostAmount: {gt: "206900000", lt: "280000000"}},
+                            Base: {PostAmount: {gt: "206900000", lt: "246555000"}},
                             Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}},
-                            Market: {QuoteCurrency: {MintAddress: {in: ["So11111111111111111111111111111111111111112"]}}}
+                            Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111","So11111111111111111111111111111111111111112"]}}}
                         },
-                        Transaction: {Result: {Success: true}}
+                        Transaction: {Result: {Success: true}},
+                        Block: {Time: {since_relative: {minutes_ago: 10}}}  // Fresh pools only
                     }
                 ) {
+                    Bonding_Curve_Progress_precentage: calculate(expression:"100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
                     Pool {
                         Market {
                             BaseCurrency {
@@ -734,6 +736,15 @@ class BitqueryClient {
                                 Symbol
                             }
                             MarketAddress
+                            QuoteCurrency {
+                                MintAddress
+                                Name
+                                Symbol
+                            }
+                        }
+                        Dex {
+                            ProtocolName
+                            ProtocolFamily
                         }
                         Base {
                             Balance: PostAmount
@@ -781,22 +792,8 @@ class BitqueryClient {
             // 🔥 FIX: Calculate bonding correctly
             const allTokens = data.Solana.DEXPools.map(pool => {
                 const baseBalance = parseFloat(pool.Pool.Base.Balance) || 0;
-                
-                // Pump.fun bonding curve constants
-                const VIRTUAL_TOKEN_RESERVES = 1_073_000_000; // 1.073B total supply
-                const VIRTUAL_SOL_RESERVES = 30; // 30 SOL virtual reserves
-                const REAL_TOKEN_RESERVES_START = 793_100_000; // Tokens available for sale
-                const BONDING_COMPLETE = 206_900_000; // When bonding ends (raydium migration)
-                
-                // Calculate how many tokens have been sold
-                const tokensSold = REAL_TOKEN_RESERVES_START - (baseBalance - BONDING_COMPLETE);
-                
-                // Bonding progress = tokens sold / total available
-                let bondingProgress = (tokensSold / REAL_TOKEN_RESERVES_START) * 100;
-                
-                // Clamp between 0-100
-                bondingProgress = Math.max(0, Math.min(100, bondingProgress));
-                
+                const bondingProgress = parseFloat(pool.Bonding_Curve_Progress_precentage) || 0;  // Use BitQuery's calc
+            
                 return {
                     address: pool.Pool.Market.BaseCurrency.MintAddress,
                     symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
@@ -806,7 +803,7 @@ class BitqueryClient {
                     priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
                     baseBalance: baseBalance,
                     marketAddress: pool.Pool.Market.MarketAddress,
-                    protocol: 'Pump.fun',
+                    protocol: pool.Pool.Dex.ProtocolName || 'Pump.fun',
                     lastUpdate: Date.now(),
                     isHot: bondingProgress >= 96
                 };
