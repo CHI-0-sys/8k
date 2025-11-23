@@ -724,7 +724,7 @@ class BitqueryClient {
                             Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111","So11111111111111111111111111111111111111112"]}}}
                         },
                         Transaction: {Result: {Success: true}},
-                        Block: {Time: {since_relative: {minutes_ago: 10}}}  // Fresh pools only
+                        Block: {Time: {since_relative: {minutes_ago: 10}}}
                     }
                 ) {
                     Bonding_Curve_Progress_precentage: calculate(expression:"100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
@@ -792,7 +792,7 @@ class BitqueryClient {
             // 🔥 FIX: Calculate bonding correctly
             const allTokens = data.Solana.DEXPools.map(pool => {
                 const baseBalance = parseFloat(pool.Pool.Base.Balance) || 0;
-                const bondingProgress = parseFloat(pool.Bonding_Curve_Progress_precentage) || 0;  // Use BitQuery's calc
+                const bondingProgress = parseFloat(pool.Bonding_Curve_Progress_precentage) || 0;  // BitQuery's official calc
             
                 return {
                     address: pool.Pool.Market.BaseCurrency.MintAddress,
