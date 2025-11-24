@@ -990,45 +990,40 @@ async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
     }
 
     async detectWhaleDumps(tokenAddress) {
-        if (!ENABLE_WHALE_CHECK) {
-            return false;
-        }
-
-        const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60000);
-
-        const query = `{
-            Solana {
-                DEXPools(
-                    where: {
-                        Pool: {
-                            Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                            Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}}
-                        }
-                        Block: {Time: {since: "${timeAgo.toISOString()}"}}
-                        Transaction: {Result: {Success: true}}
-                    }
-                ) {
-                    Pool { Quote { PostAmountInUSD } }
+        if (!ENABLE_WHALE_CHECK) return false;
+    
+        const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60 * 1000);
+    
+        const query = `
+        {
+          Solana {
+            DEXTrades(
+              where: {
+                Trade: {
+                  Sell: { Currency: { MintAddress: { is: "${tokenAddress}" } } }
+                  Buy: { Currency: { MintAddress: { in: ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"] } } }
+                  AmountInUSD: { gt: ${LARGE_SELL_THRESHOLD} }   // ← THIS IS THE SELL SIZE
                 }
+                Block: { Time: { since: "${timeAgo.toISOString()}" } }
+                Transaction: { Result: { Success: true } }
+              }
+              limit: { count: 10 }
+            ) {
+              Trade { AmountInUSD }
             }
+          }
         }`;
-
-        this.estimatedPoints += 40;
+    
         const data = await this.query(query);
-        if (!data?.Solana?.DEXPools) return false;
-
-        const largeSells = data.Solana.DEXPools.filter(
-            p => (p.Pool?.Quote?.PostAmountInUSD || 0) > LARGE_SELL_THRESHOLD
-        );
-
-        const hasWhale = largeSells.length > 0;
-        this.logger.debug('Whale check', { 
-            token: tokenAddress.substring(0, 8), 
-            hasWhale, 
-            largeSells: largeSells.length 
+        const hasWhaleSell = (data?.Solana?.DEXTrades?.length || 0) > 0;
+    
+        this.logger.debug('Whale check result', {
+            token: tokenAddress.slice(0, 8),
+            whaleSellsFound: data?.Solana?.DEXTrades?.length || 0,
+            hasWhaleSell
         });
-
-        return hasWhale;
+    
+        return hasWhaleSell;
     }
 
     getStats() {
