@@ -1,10 +1,17 @@
-// FORCE DNS FIX – solves ENOTFOUND forever
+// PERMANENT DNS FIX — NOVEMBER 2025
 const dns = require('dns');
-dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']); // Google + Cloudflare
+dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
+console.log('Forced DNS to Google + Cloudflare');
 
-// Optional: Log that it worked
-console.log('DNS servers forced to Google/Cloudflare');
-console.log('Current DNS servers:', dns.getServers());
+// Nuclear backup — if DNS still fails, use IP
+const originalFetch = global.fetch;
+global.fetch = async (input, init) => {
+  let url = typeof input === 'string' ? input : input.url;
+  if (url.includes('quote-api.jup.ag')) {
+    url = url.replace('quote-api.jup.ag', '104.18.20.123');
+  }
+  return originalFetch(url, init);
+};
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
@@ -990,50 +997,49 @@ async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
     }
 
     async detectWhaleDumps(tokenAddress) {
-        if (!ENABLE_WHALE_CHECK) {
-            return false;
-        }
+        if (!ENABLE_WHALE_CHECK) return false;
+    
         const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60 * 1000);
     
         const query = `{
           Solana {
             DEXTrades(
               where: {
-                Sell: {
-                  Currency: { MintAddress: { is: "${tokenAddress}" } }
+                Trade: {
+                  Side: { Currency: { MintAddress: { is: "${tokenAddress}" } } }
                   AmountInUSD: { gt: ${LARGE_SELL_THRESHOLD} }
                 }
-                Buy: {
-                  Currency: { MintAddress: { in: ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"] } }
-                }
-                Dex: { ProtocolName: { is: "pump" } }
+                Dex: { ProtocolName: { in: ["pump", "Pump.fun"] } }
                 Block: { Time: { since: "${timeAgo.toISOString()}" } }
                 Transaction: { Result: { Success: true } }
               }
               limit: { count: 10 }
             ) {
-              Sell { AmountInUSD }
-              Block { Time }
+              Trade {
+                AmountInUSD
+                Side { Currency { Symbol } }
+              }
             }
           }
         }`;
     
         try {
             const data = await this.query(query);
-            const largeSells = data?.Solana?.DEXTrades || [];
-            const hasWhale = largeSells.length > 0;
+            const sells = (data?.Solana?.DEXTrades || []).filter(t => 
+                t.Trade.Side.Currency.MintAddress === tokenAddress
+            );
+            const hasWhale = sells.length > 0;
     
-            this.logger.debug('Whale check', {
-                token: tokenAddress.substring(0, 8),
-                largeSells: largeSells.length,
-                threshold: LARGE_SELL_THRESHOLD,
+            this.logger.debug('Whale check result', {
+                token: tokenAddress.slice(0, 8),
+                largeSells: sells.length,
                 hasWhale
             });
     
             return hasWhale;
         } catch (error) {
-            this.logger.error('Whale query failed', { error: error.message, token: tokenAddress });
-            return false;  // Fail-safe: Don't block trades on error
+            this.logger.warn('Whale query failed - skipping check', { error: error.message });
+            return false; // Don't block good tokens
         }
     }
 
