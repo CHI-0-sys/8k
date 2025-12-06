@@ -1,9 +1,8 @@
-// PERMANENT DNS FIX — NOVEMBER 2025
+// DELETE THIS ENTIRE BLOCK:
 const dns = require('dns');
 dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 console.log('Forced DNS to Google + Cloudflare');
 
-// Nuclear backup — if DNS still fails, use IP
 const originalFetch = global.fetch;
 global.fetch = async (input, init) => {
   let url = typeof input === 'string' ? input : input.url;
@@ -12,6 +11,9 @@ global.fetch = async (input, init) => {
   }
   return originalFetch(url, init);
 };
+
+const axios = require('axios');
+const axiosRetry = require('axios-retry');
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
@@ -97,6 +99,56 @@ const logger = winston.createLogger({
     ]
 });
 
+const jupiterClient = axios.create({
+    timeout: 15000,
+    headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'SolanaTrader/1.0'
+    }
+});
+
+axiosRetry(jupiterClient, {
+    retries: 5,
+    retryDelay: axiosRetry.exponentialDelay,
+    retryCondition: (error) => {
+        return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+               (error.response && error.response.status >= 500) ||
+               error.code === 'ECONNRESET' ||
+               error.code === 'ETIMEDOUT' ||
+               error.code === 'ENOTFOUND';
+    },
+    onRetry: (retryCount, error) => {
+        console.log(`🔄 Jupiter retry ${retryCount}/5: ${error.message}`);
+    }
+});
+
+const JUPITER_ENDPOINTS = [
+    'https://quote-api.jup.ag/v6',
+    'https://public.jupiterapi.com/v6',
+    'https://jupiter-swap-api.quiknode.pro/v6'
+];
+
+let currentJupiterEndpoint = 0;
+let jupiterEndpointFailures = [0, 0, 0];
+
+function getJupiterEndpoint() {
+    if (jupiterEndpointFailures[currentJupiterEndpoint] > 3) {
+        const oldIndex = currentJupiterEndpoint;
+        currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
+        console.log(`⚠️  Switching Jupiter endpoint: ${oldIndex} → ${currentJupiterEndpoint}`);
+        jupiterEndpointFailures[oldIndex] = 0;
+    }
+    return JUPITER_ENDPOINTS[currentJupiterEndpoint];
+}
+
+function recordJupiterSuccess() {
+    jupiterEndpointFailures[currentJupiterEndpoint] = 0;
+}
+
+function recordJupiterFailure() {
+    jupiterEndpointFailures[currentJupiterEndpoint]++;
+}
 
 
 
@@ -912,26 +964,76 @@ allTokens.forEach((token, i) => {
     }
       
      // Add this INSIDE getJupiterQuote, before the fetchWithTimeout
-async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
-    // DNS DEBUG: Test resolution
-    try {
-      const { lookup } = require('dns/promises');
-      const ips = await lookup('quote-api.jup.ag');
-      logger.info('DNS Resolved quote-api.jup.ag', { ips: ips.address });
-      
-      // Also test ping (simple fetch to known endpoint)
-      const testRes = await fetch('https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50');
-      logger.info('Jupiter Test Quote Status', { status: testRes.status, ok: testRes.ok });
-    } catch (dnsErr) {
-      logger.error('DNS/Connectivity Test FAILED', { error: dnsErr.message });
-      throw new Error(`Connectivity issue: ${dnsErr.message}`);
+     async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
+        const maxEndpointAttempts = JUPITER_ENDPOINTS.length;
+        
+        for (let endpointAttempt = 0; endpointAttempt < maxEndpointAttempts; endpointAttempt++) {
+            try {
+                const baseUrl = getJupiterEndpoint();
+                const url = `${baseUrl}/quote`;
+                
+                console.log(`\n🔍 Jupiter Quote [Endpoint ${currentJupiterEndpoint + 1}/${JUPITER_ENDPOINTS.length}]`);
+                console.log(`   Amount: ${amount}, Slippage: ${slippageBps}bps`);
+                
+                const params = {
+                    inputMint,
+                    outputMint,
+                    amount: amount.toString(),
+                    slippageBps,
+                    onlyDirectRoutes: false,
+                    asLegacyTransaction: false
+                };
+                
+                const response = await jupiterClient.get(url, { params });
+                
+                if (!response.data || !response.data.inAmount || !response.data.outAmount) {
+                    throw new Error('Invalid quote response');
+                }
+                
+                console.log(`✅ Quote received: ${response.data.outAmount} tokens\n`);
+                
+                recordJupiterSuccess();
+                
+                this.logger.info('Jupiter quote success', {
+                    endpoint: baseUrl,
+                    inAmount: response.data.inAmount,
+                    outAmount: response.data.outAmount
+                });
+                
+                return {
+                    ...response.data,
+                    inAmount: response.data.inAmount,
+                    outAmount: response.data.outAmount,
+                    route: response.data
+                };
+                
+            } catch (error) {
+                recordJupiterFailure();
+                
+                const isLastAttempt = endpointAttempt === maxEndpointAttempts - 1;
+                
+                console.error(`❌ Quote failed [Endpoint ${currentJupiterEndpoint + 1}]: ${error.message}`);
+                
+                this.logger.error('Jupiter quote error', {
+                    endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint],
+                    error: error.message,
+                    attempt: endpointAttempt + 1
+                });
+                
+                if (isLastAttempt) {
+                    console.error(`\n💥 ALL Jupiter endpoints failed!\n`);
+                    return null;
+                }
+                
+                // Try next endpoint
+                currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
+                console.log(`🔄 Trying next endpoint in 2s...\n`);
+                await sleep(2000);
+            }
+        }
+        
+        return null;
     }
-  
-    // Your existing for loop with retries...
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      // ... rest unchanged
-    }
-  }
 
     async getVolumeHistory(tokenAddress) {
         if (!ENABLE_VOLUME_CHECK) {
@@ -2511,64 +2613,74 @@ async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
 }
 
 async executeSwap(quoteResponse, priorityFeeLamports = 0) {
-  try {
-      const payload = {
-          quoteResponse: quoteResponse.route || quoteResponse,
-          userPublicKey: this.wallet.publicKey.toString(),
-          wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true,
-          prioritizationFeeLamports: priorityFeeLamports
-      };
+    try {
+        const baseUrl = getJupiterEndpoint();
+        const url = `${baseUrl}/swap`;
+        
+        console.log(`\n🔄 Jupiter Swap Request`);
+        console.log(`   Endpoint: ${url}`);
+        
+        const payload = {
+            quoteResponse: quoteResponse.route || quoteResponse,
+            userPublicKey: this.wallet.publicKey.toString(),
+            wrapAndUnwrapSol: true,
+            dynamicComputeUnitLimit: true,
+            prioritizationFeeLamports: priorityFeeLamports
+        };
 
-      const res = await fetchWithTimeout(`${JUPITER_API_URL}/swap`, {
-          method: 'POST',
-          body: JSON.stringify(payload),
-          headers: { 'Content-Type': 'application/json' }
-      }, JUPITER_SWAP_TIMEOUT);
+        const response = await jupiterClient.post(url, payload);
 
-      if (!res.ok) {
-          throw new Error(`Swap request failed: ${res.status}`);
-      }
+        if (!response.data || !response.data.swapTransaction) {
+            throw new Error('No swapTransaction in response');
+        }
 
-      const data = await res.json();
-      if (!data || !data.swapTransaction) {
-          throw new Error('No swapTransaction in response');
-      }
+        console.log(`✅ Swap transaction received\n`);
+        
+        recordJupiterSuccess();
 
-      const txBuffer = Buffer.from(data.swapTransaction, 'base64');
-      let transaction = VersionedTransaction.deserialize(txBuffer);
-      
-      // Apply MEV protection
-      if (ENABLE_MEV_PROTECTION && this.mevProtection) {
-          const protectedTx = await this.mevProtection.protectTransaction(transaction);
-          transaction = protectedTx.transaction;
-      }
+        const txBuffer = Buffer.from(response.data.swapTransaction, 'base64');
+        let transaction = VersionedTransaction.deserialize(txBuffer);
+        
+        // Apply MEV protection if enabled
+        if (ENABLE_MEV_PROTECTION && this.mevProtection) {
+            const protectedTx = await this.mevProtection.protectTransaction(transaction);
+            transaction = protectedTx.transaction;
+        }
 
-      transaction.sign([this.wallet]);
+        transaction.sign([this.wallet]);
 
-      const operation = async (conn) => {
-          const rawSigned = transaction.serialize();
-          const signature = await conn.sendRawTransaction(rawSigned, { 
-              skipPreflight: false, 
-              maxRetries: 2
-          });
+        const operation = async (conn) => {
+            const rawSigned = transaction.serialize();
+            const signature = await conn.sendRawTransaction(rawSigned, { 
+                skipPreflight: false, 
+                maxRetries: 2
+            });
 
-          const confirmation = await conn.confirmTransaction(signature, 'confirmed');
-          if (confirmation.value.err) {
-              throw new Error(`TX failed: ${JSON.stringify(confirmation.value.err)}`);
-          }
+            const confirmation = await conn.confirmTransaction(signature, 'confirmed');
+            if (confirmation.value.err) {
+                throw new Error(`TX failed: ${JSON.stringify(confirmation.value.err)}`);
+            }
 
-          return signature;
-      };
+            return signature;
+        };
 
-      const signature = await this.rpcConnection.executeWithFallback(operation, 'executeSwap');
-      this.logger.info('Swap successful', { signature });
-      return { success: true, signature };
+        const signature = await this.rpcConnection.executeWithFallback(operation, 'executeSwap');
+        
+        this.logger.info('Swap successful', { signature, endpoint: baseUrl });
+        
+        return { success: true, signature };
 
-  } catch (err) {
-      this.logger.error('Swap execution error', { error: err.message, stack: err.stack });
-      return { success: false, error: err.message };
-  }
+    } catch (error) {
+        recordJupiterFailure();
+        
+        this.logger.error('Swap execution error', { 
+            error: error.message, 
+            stack: error.stack,
+            endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint]
+        });
+        
+        return { success: false, error: error.message };
+    }
 }
 
 calculateSlippage(liquidityUSD) {
