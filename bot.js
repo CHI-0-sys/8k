@@ -46,7 +46,6 @@ console.log('PRIVATE_KEY:', process.env.PRIVATE_KEY ? 'SET' : 'MISSING');
 console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
 
 
-
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
@@ -56,7 +55,7 @@ const { Connection, PublicKey, VersionedTransaction, LAMPORTS_PER_SOL, Keypair, 
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
 const AbortController = require('abort-controller');
-const axios = require('axios');
+
 const fs = require('fs');
 
 const requiredDirs = ['logs', 'data'];
