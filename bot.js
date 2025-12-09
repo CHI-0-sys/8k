@@ -3251,35 +3251,89 @@ class TradingBot {
         // ===== TELEGRAM BOT SETUP =====
         console.log('📱 Initializing Telegram bot...');
         logger.info('🔵 Starting in POLLING MODE (Production)');
-    
+
         this.bot = new TelegramBot(TELEGRAM_TOKEN, {
             polling: {
-                interval: 2000,
+                interval: 5000,
                 autoStart: true,
                 params: {
-                    timeout: 20,
+                    timeout: 10,
                     allowed_updates: ['message']
                 }
             },
-            filepath: false
+            filepath: false,
+            request:{
+              agentOptions:{
+                keepAlive : false ,
+                family: 4
+              }
+            }
         });
-    
+        
         // Polling error handler
-        this.bot.on('polling_error', (error) => {
-            if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
-                return; // Silently ignore
-            }
-            
-            if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-                logger.error('Multiple bot instances detected - shutting down');
-                process.exit(1);
-            }
-            
-            logger.error('Polling error', { 
-                code: error.code, 
-                message: error.message 
+        let pollingErrorCount = 0;
+        let lastPollingError = 0;
+
+      this.bot.on('polling_error', async (error) => {
+      const now = Date.now();
+    
+    // Reset counter if no errors for 5 minutes
+      if (now - lastPollingError > 300000) {
+        pollingErrorCount = 0;
+      }
+    
+       lastPollingError = now;
+        pollingErrorCount++;
+    
+    // ECONNRESET is normal on Railway - just log and continue
+      if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
+        console.log(`⚠️  Telegram connection reset (normal on Railway) - retry ${pollingErrorCount}`);
+        
+        // Only log to Winston every 10 resets (reduce spam)
+        if (pollingErrorCount % 10 === 0) {
+            logger.warn('Telegram connection resets', { 
+                count: pollingErrorCount,
+                error: error.message 
             });
-        });
+        }
+        
+        // If too many resets in short time, restart polling
+        if (pollingErrorCount > 20) {
+            console.log('🔄 Too many resets, restarting polling...');
+            await this.restartPolling();
+            pollingErrorCount = 0;
+        }
+        
+        return; // Don't crash, let it auto-retry
+    }
+    
+    // Multiple bot instances = critical error
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+        logger.error('❌ Multiple bot instances detected - SHUTTING DOWN');
+        console.error('❌ CRITICAL: Another instance is running!');
+        process.exit(1);
+    }
+    
+    // ETIMEDOUT is common on Railway
+    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+        console.log(`⏳ Telegram timeout (will retry) - ${error.code}`);
+        return;
+    }
+    
+    // Unknown errors
+    console.error('❌ Telegram polling error:', error.code, error.message);
+    logger.error('Telegram polling error', { 
+        code: error.code, 
+        message: error.message 
+    });
+});
+
+// General bot error handler
+this.bot.on('error', (error) => {
+    console.error('❌ Bot error:', error.message);
+    logger.error('Bot error', { error: error.message });
+});
+
     
         this.bot.on('error', (error) => {
             logger.error('Bot error', { error: error.message });
@@ -3363,19 +3417,27 @@ class TradingBot {
     }
     
 
-async restartPolling() {
-  try {
-      logger.info('Attempting to restart polling...');
-      await this.bot.stopPolling();
-      await sleep(3000);  // Wait 3 seconds
-      await this.bot.startPolling();
-      logger.info('Polling restarted successfully');
-  } catch (error) {
-      logger.error('Failed to restart polling', { error: error.message });
-      // If restart fails, exit and let process manager (PM2/Railway) restart the whole bot
-      process.exit(1);
-  }
-} 
+    async restartPolling() {
+        try {
+            console.log('🔄 Restarting Telegram polling...');
+            logger.info('Attempting to restart polling');
+            
+            await this.bot.stopPolling();
+            await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5s
+            await this.bot.startPolling();
+            
+            console.log('✅ Polling restarted successfully');
+            logger.info('Polling restarted successfully');
+        } catch (error) {
+            console.error('❌ Failed to restart polling:', error.message);
+            logger.error('Failed to restart polling', { error: error.message });
+            
+            // If restart fails, exit and let Railway restart the whole bot
+            console.log('🔄 Exiting for Railway restart...');
+            process.exit(1);
+        }
+    }
+    
 
 // async checkMemoryHealth() {
 //     const mem = process.memoryUsage();
