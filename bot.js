@@ -13,7 +13,9 @@ global.fetch = async (input, init) => {
 };
 
 const axios = require('axios');
-const axiosRetry = require('axios-retry');
+const axiosRetry = require('axios-retry').default;
+axiosRetry(axios, { retries: 3 });
+
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
