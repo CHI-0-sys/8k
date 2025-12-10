@@ -15,7 +15,7 @@ global.fetch = async (input, init) => {
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 axiosRetry(axios, { retries: 3 });
-
+const MIN_JUPITER_AMOUNT_LAMPORTS = Math.floor(0.0025 * LAMPORTS_PER_SOL);
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
@@ -966,76 +966,202 @@ allTokens.forEach((token, i) => {
       
      // Add this INSIDE getJupiterQuote, before the fetchWithTimeout
      async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
-        const maxEndpointAttempts = JUPITER_ENDPOINTS.length;
+        console.log('\n' + '📡'.repeat(30));
+        console.log('📡 JUPITER QUOTE REQUEST');
+        console.log('📡'.repeat(30));
         
-        for (let endpointAttempt = 0; endpointAttempt < maxEndpointAttempts; endpointAttempt++) {
+        // ===== VALIDATE INPUTS =====
+        console.log('\n🔍 Validating inputs...');
+        
+        if (!inputMint || typeof inputMint !== 'string') {
+            throw new Error(`Invalid inputMint: ${inputMint}`);
+        }
+        
+        if (!outputMint || typeof outputMint !== 'string') {
+            throw new Error(`Invalid outputMint: ${outputMint}`);
+        }
+        
+        if (!amount || amount <= 0 || isNaN(amount)) {
+            throw new Error(`Invalid amount: ${amount} (must be positive number)`);
+        }
+        
+        if (!slippageBps || slippageBps <= 0) {
+            slippageBps = 300; // Default 3%
+        }
+        
+        console.log('✅ Inputs valid');
+        console.log(`   Input Mint: ${inputMint.substring(0, 8)}...`);
+        console.log(`   Output Mint: ${outputMint.substring(0, 8)}...`);
+        console.log(`   Amount: ${amount} lamports`);
+        console.log(`   Slippage: ${slippageBps}bps (${(slippageBps / 100).toFixed(2)}%)`);
+        
+        // ===== TRY ALL ENDPOINTS =====
+        const maxAttempts = JUPITER_ENDPOINTS.length;
+        let lastError = null;
+        
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
-                const baseUrl = getJupiterEndpoint();
-                const url = `${baseUrl}/quote`;
+                const endpoint = getJupiterEndpoint();
+                console.log(`\n🌐 Attempt ${attempt + 1}/${maxAttempts}`);
+                console.log(`   Endpoint: ${endpoint}`);
                 
-                console.log(`\n🔍 Jupiter Quote [Endpoint ${currentJupiterEndpoint + 1}/${JUPITER_ENDPOINTS.length}]`);
-                console.log(`   Amount: ${amount}, Slippage: ${slippageBps}bps`);
-                
+                // ===== BUILD REQUEST =====
+                const url = `${endpoint}/quote`;
                 const params = {
-                    inputMint,
-                    outputMint,
+                    inputMint: inputMint,
+                    outputMint: outputMint,
                     amount: amount.toString(),
-                    slippageBps,
+                    slippageBps: slippageBps.toString(),
                     onlyDirectRoutes: false,
                     asLegacyTransaction: false
                 };
                 
-                const response = await jupiterClient.get(url, { params });
+                console.log(`   URL: ${url}`);
+                console.log(`   Params:`, params);
                 
-                if (!response.data || !response.data.inAmount || !response.data.outAmount) {
-                    throw new Error('Invalid quote response');
+                // ===== MAKE REQUEST =====
+                console.log(`   ⏳ Sending request...`);
+                const startTime = Date.now();
+                
+                const response = await jupiterClient.get(url, {
+                    params: params,
+                    timeout: JUPITER_QUOTE_TIMEOUT,
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const duration = Date.now() - startTime;
+                console.log(`   ⏱️  Response time: ${duration}ms`);
+                
+                // ===== CHECK RESPONSE =====
+                if (!response) {
+                    throw new Error('No response from Jupiter');
                 }
                 
-                console.log(`✅ Quote received: ${response.data.outAmount} tokens\n`);
+                console.log(`   📊 Status: ${response.status} ${response.statusText}`);
+                
+                if (response.status !== 200) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!response.data) {
+                    throw new Error('Empty response body');
+                }
+                
+                // ===== VALIDATE RESPONSE DATA =====
+                console.log(`   📦 Response keys:`, Object.keys(response.data));
+                
+                // Check for error in response
+                if (response.data.error) {
+                    throw new Error(`Jupiter API error: ${response.data.error}`);
+                }
+                
+                // Check required fields
+                if (!response.data.inAmount) {
+                    console.log(`   ❌ Missing inAmount`);
+                    console.log(`   Full response:`, JSON.stringify(response.data, null, 2));
+                    throw new Error('Response missing inAmount field');
+                }
+                
+                if (!response.data.outAmount) {
+                    console.log(`   ❌ Missing outAmount`);
+                    console.log(`   Full response:`, JSON.stringify(response.data, null, 2));
+                    throw new Error('Response missing outAmount field');
+                }
+                
+                // Parse amounts
+                const inAmount = parseInt(response.data.inAmount);
+                const outAmount = parseInt(response.data.outAmount);
+                
+                if (isNaN(inAmount) || isNaN(outAmount)) {
+                    throw new Error(`Invalid amount values: in=${response.data.inAmount}, out=${response.data.outAmount}`);
+                }
+                
+                if (outAmount <= 0) {
+                    throw new Error('Output amount is zero or negative');
+                }
+                
+                // ===== SUCCESS =====
+                console.log(`\n✅ QUOTE RECEIVED`);
+                console.log(`   In: ${inAmount} lamports (${(inAmount / 1_000_000).toFixed(6)} USDC)`);
+                console.log(`   Out: ${outAmount} lamports (${(outAmount / 1_000_000_000).toFixed(6)} tokens)`);
+                console.log(`   Price Impact: ${response.data.priceImpactPct || 'N/A'}%`);
+                console.log(`   Routes: ${response.data.routePlan?.length || 1}`);
+                console.log('📡'.repeat(30) + '\n');
                 
                 recordJupiterSuccess();
                 
                 this.logger.info('Jupiter quote success', {
-                    endpoint: baseUrl,
-                    inAmount: response.data.inAmount,
-                    outAmount: response.data.outAmount
+                    endpoint: endpoint,
+                    inAmount: inAmount,
+                    outAmount: outAmount,
+                    duration: `${duration}ms`,
+                    priceImpact: response.data.priceImpactPct
                 });
                 
+                // ===== RETURN STANDARDIZED OBJECT =====
                 return {
-                    ...response.data,
                     inAmount: response.data.inAmount,
                     outAmount: response.data.outAmount,
-                    route: response.data
+                    otherAmountThreshold: response.data.otherAmountThreshold,
+                    swapMode: response.data.swapMode || 'ExactIn',
+                    slippageBps: response.data.slippageBps || slippageBps,
+                    priceImpactPct: response.data.priceImpactPct,
+                    routePlan: response.data.routePlan,
+                    contextSlot: response.data.contextSlot,
+                    timeTaken: response.data.timeTaken,
+                    route: response.data // Full response for executeSwap
                 };
                 
             } catch (error) {
+                lastError = error;
+                const isLastAttempt = attempt === maxAttempts - 1;
+                
+                console.log(`   ❌ Attempt ${attempt + 1} failed`);
+                console.log(`   Error: ${error.message}`);
+                
+                // Log response details if available
+                if (error.response) {
+                    console.log(`   Response status: ${error.response.status}`);
+                    console.log(`   Response data:`, error.response.data);
+                }
+                
                 recordJupiterFailure();
                 
-                const isLastAttempt = endpointAttempt === maxEndpointAttempts - 1;
-                
-                console.error(`❌ Quote failed [Endpoint ${currentJupiterEndpoint + 1}]: ${error.message}`);
-                
-                this.logger.error('Jupiter quote error', {
+                this.logger.error('Jupiter quote attempt failed', {
                     endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint],
+                    attempt: attempt + 1,
                     error: error.message,
-                    attempt: endpointAttempt + 1
+                    status: error.response?.status,
+                    data: error.response?.data
                 });
                 
                 if (isLastAttempt) {
-                    console.error(`\n💥 ALL Jupiter endpoints failed!\n`);
+                    console.log(`\n💥 ALL ${maxAttempts} ENDPOINTS FAILED`);
+                    console.log(`   Last error: ${lastError.message}`);
+                    console.log('📡'.repeat(30) + '\n');
                     return null;
                 }
                 
-                // Try next endpoint
+                // Switch to next endpoint
+                const oldIdx = currentJupiterEndpoint;
                 currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
-                console.log(`🔄 Trying next endpoint in 2s...\n`);
+                
+                console.log(`   🔄 Switching endpoint: ${oldIdx} → ${currentJupiterEndpoint}`);
+                console.log(`   ⏳ Waiting 2 seconds...\n`);
+                
                 await sleep(2000);
             }
         }
         
+        // All attempts failed
         return null;
     }
 
+
+    
     async getVolumeHistory(tokenAddress) {
         if (!ENABLE_VOLUME_CHECK) {
             return { recent: 0, previous: 0, spike: true };
@@ -2092,113 +2218,228 @@ Combined Value: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)}
 // Add these methods to the TradingEngine class after formatProfitTakingMessage()
 
 async executeBuy(userId, token) {
-  const user = this.getUserState(userId);
-  
-  try {
-      this.logger.info('Executing buy', { token: token.symbol });
+    const user = this.getUserState(userId);
+    
+    try {
+        console.log('\n' + '💰'.repeat(30));
+        console.log('🔵 EXECUTING BUY');
+        console.log('💰'.repeat(30));
+        
+        this.logger.info('Executing buy', { token: token.symbol });
 
-      // Check if paper trading
-      if (ENABLE_PAPER_TRADING) {
-          return await this.executePaperBuy(userId, token);
-      }
+        // Check if paper trading
+        if (ENABLE_PAPER_TRADING) {
+            console.log('📄 Paper trading mode - simulating buy');
+            return await this.executePaperBuy(userId, token);
+        }
 
-      const positionSize = this.calculatePositionSize(user, token.liquidityUSD);
-      const amountUSDC = Math.floor(positionSize * 1_000_000);
-      
-      if (amountUSDC <= 0 || positionSize > user.currentBalance) {
-          throw new Error('Insufficient balance for buy');
-      }
+        // ===== STEP 1: CALCULATE POSITION SIZE =====
+        const positionSize = this.calculatePositionSize(user, token.liquidityUSD);
+        console.log(`\n💵 Position size: ${positionSize.toFixed(4)}`);
+        console.log(`   User balance: ${user.currentBalance.toFixed(4)}`);
+        
+        if (positionSize > user.currentBalance) {
+            throw new Error(`Insufficient balance: have ${user.currentBalance.toFixed(4)}, need ${positionSize.toFixed(4)}`);
+        }
 
-      // Get best quote from multiple DEXes
-      let quote;
-      if (ENABLE_MULTI_DEX && this.dexAggregator) {
-          quote = await this.dexAggregator.getBestQuote(USDC_MINT, token.address, amountUSDC);
-      } else {
-          const slippageBps = this.calculateSlippage(token.liquidityUSD);
-          quote = await this.getJupiterQuote(USDC_MINT, token.address, amountUSDC, slippageBps);
-      }
+        // ===== STEP 2: FORMAT AMOUNT CORRECTLY =====
+        // CRITICAL: USDC has 6 decimals, tokens usually have 9
+        const amountLamports = Math.floor(positionSize * 1_000_000); // USDC amount in smallest unit
+        
+        console.log(`   Amount in lamports: ${amountLamports}`);
+        
+        if (amountLamports <= 0) {
+            throw new Error('Position size too small (rounds to 0 lamports)');
+        }
 
-      if (!quote) {
-          throw new Error('No quote available');
-      }
+        // ===== STEP 3: GET QUOTE WITH RETRY LOGIC =====
+        console.log(`\n📡 Getting Jupiter quote...`);
+        console.log(`   From: USDC`);
+        console.log(`   To: ${token.symbol} (${token.address})`);
+        console.log(`   Amount: ${amountLamports} lamports (${positionSize.toFixed(4)} USDC)`);
+        
+        let quote = null;
+        let lastError = null;
+        
+        // Try each Jupiter endpoint
+        for (let attempt = 0; attempt < JUPITER_ENDPOINTS.length; attempt++) {
+            try {
+                const endpoint = getJupiterEndpoint();
+                console.log(`\n   Attempt ${attempt + 1}/${JUPITER_ENDPOINTS.length}`);
+                console.log(`   Using endpoint: ${endpoint}`);
+                
+                const slippageBps = this.calculateSlippage(token.liquidityUSD);
+                console.log(`   Slippage: ${slippageBps}bps (${(slippageBps / 100).toFixed(2)}%)`);
+                
+                // Call quote with explicit parameters
+                quote = await this.getJupiterQuote(
+                    USDC_MINT,           // Input: USDC
+                    token.address,       // Output: Token
+                    amountLamports,      // Amount in smallest unit
+                    slippageBps          // Slippage
+                );
 
-      const expectedTokens = parseFloat(quote.outAmount) / (10 ** 9);
-      const isHotLaunch = token.bondingProgress >= 96;
+                if (quote && quote.outAmount) {
+                    console.log(`   ✅ Quote received!`);
+                    console.log(`   In: ${quote.inAmount} lamports USDC`);
+                    console.log(`   Out: ${quote.outAmount} lamports ${token.symbol}`);
+                    recordJupiterSuccess();
+                    break; // Success!
+                } else {
+                    throw new Error('Quote response missing required fields');
+                }
+                
+            } catch (error) {
+                lastError = error;
+                console.log(`   ❌ Attempt ${attempt + 1} failed: ${error.message}`);
+                recordJupiterFailure();
+                
+                // If not last attempt, switch endpoint and retry
+                if (attempt < JUPITER_ENDPOINTS.length - 1) {
+                    currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
+                    console.log(`   🔄 Switching to next endpoint...`);
+                    await sleep(2000); // Wait 2s before retry
+                }
+            }
+        }
 
-      // Calculate priority fee
-      const priorityFeeLamports = await this.priorityFeeCalculator.calculateOptimalFee(
-          isHotLaunch, 
-          isHotLaunch ? 'high' : 'normal'
-      );
+        // ===== STEP 4: CHECK IF QUOTE SUCCEEDED =====
+        if (!quote || !quote.outAmount) {
+            console.log('\n❌ ALL QUOTE ATTEMPTS FAILED');
+            console.log('💰'.repeat(30) + '\n');
+            
+            // Send detailed error to user
+            await this.bot.sendMessage(userId, `
+❌ <b>Buy Failed - No Quote Available</b>
 
-      this.logger.info('Quote received', { 
-          inAmount: quote.inAmount, 
-          outAmount: quote.outAmount,
-          dex: quote.dex || 'Jupiter',
-          priorityFee: priorityFeeLamports
-      });
+<b>Token:</b> ${token.symbol}
+<b>Attempted Amount:</b> ${positionSize.toFixed(4)} USDC
 
-      // Execute swap with MEV protection
-      const tx = await this.executeSwap(quote, priorityFeeLamports);
-      if (!tx.success) {
-          throw new Error(`Swap failed: ${tx.error}`);
-      }
+<b>Issue:</b> All Jupiter endpoints failed to provide a quote.
 
-      const tokensReceived = expectedTokens;
-      const usdcSpent = parseFloat(quote.inAmount) / 1000000;
-      const entryPrice = usdcSpent / tokensReceived;
-      
-      const strategy = this.getActiveStrategy();
-      
-      const position = {
-          tokenAddress: token.address,
-          symbol: token.symbol,
-          entryPrice,
-          entryTime: Date.now(),
-          tokensOwned: tokensReceived,
-          investedUSDC: usdcSpent,
-          targetPrice: entryPrice * (1 + strategy.perTradeTarget),
-          stopLossPrice: entryPrice * (1 - strategy.stopLoss),
-          scalpMode: true,
-          txSignature: tx.signature,
-          bondingProgress: token.bondingProgress,
-          liquidityUSD: token.liquidityUSD,
-          tokenDecimals: 9,
-          positionSizeMode: POSITION_SIZE_MODE
-      };
-      
-      user.position = position;
-      user.currentBalance -= usdcSpent;
+<b>Possible Reasons:</b>
+• Low liquidity (token may not be tradeable yet)
+• Network congestion
+• Jupiter API issues
 
-      // Add to portfolio
-      this.portfolioManager.addPosition(token.address, position);
+<b>Next Steps:</b>
+✓ Bot will retry on next scan (${SCAN_INTERVAL_MINUTES}m)
+✓ Check /status for bot health
+            `.trim(), { parse_mode: 'HTML' });
 
-      // Save to database
-      if (this.database) {
-          await this.database.createPosition(userId, position);
-      }
+            throw new Error(`Quote failed after ${JUPITER_ENDPOINTS.length} attempts. Last error: ${lastError?.message || 'Unknown'}`);
+        }
 
-      await this.saveState();
+        // ===== STEP 5: CALCULATE EXPECTED TOKENS =====
+        const expectedTokens = parseFloat(quote.outAmount) / (10 ** 9); // Assuming 9 decimals
+        console.log(`\n📊 Quote Details:`);
+        console.log(`   Expected tokens: ${expectedTokens.toFixed(4)}`);
+        console.log(`   Effective price: ${(positionSize / expectedTokens).toFixed(8)} USDC per token`);
 
-      await this.bot.sendMessage(userId, this.formatBuyMessage(position, token, user), {
-          parse_mode: 'HTML'
-      });
+        // ===== STEP 6: CALCULATE PRIORITY FEE =====
+        const isHotLaunch = token.bondingProgress >= 96;
+        const priorityFeeLamports = await this.priorityFeeCalculator.calculateOptimalFee(
+            isHotLaunch, 
+            isHotLaunch ? 'high' : 'normal'
+        );
+        
+        console.log(`\n⚡ Priority fee: ${priorityFeeLamports} lamports (${(priorityFeeLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL)`);
 
-      this.logger.info('Buy executed successfully', { 
-          symbol: token.symbol, 
-          price: entryPrice.toFixed(8),
-          amount: usdcSpent.toFixed(2)
-      });
+        // ===== STEP 7: EXECUTE SWAP =====
+        console.log(`\n🔄 Executing swap...`);
+        const tx = await this.executeSwap(quote, priorityFeeLamports);
+        
+        if (!tx.success) {
+            throw new Error(`Swap failed: ${tx.error}`);
+        }
 
-      return true;
+        console.log(`✅ Swap successful!`);
+        console.log(`   TX: ${tx.signature}`);
 
-  } catch (error) {
-      this.logger.error('Buy execution failed', { error: error.message, stack: error.stack });
-      await this.bot.sendMessage(userId, `❌ <b>Buy Failed</b>\n\n${error.message}`, {
-          parse_mode: 'HTML'
-      }).catch(err => this.logger.error('Failed to send error message', { error: err.message }));
-      return false;
-  }
+        // ===== STEP 8: UPDATE STATE =====
+        const tokensReceived = expectedTokens;
+        const usdcSpent = parseFloat(quote.inAmount) / 1000000;
+        const entryPrice = usdcSpent / tokensReceived;
+        
+        const strategy = this.getActiveStrategy();
+        
+        const position = {
+            tokenAddress: token.address,
+            symbol: token.symbol,
+            entryPrice,
+            entryTime: Date.now(),
+            tokensOwned: tokensReceived,
+            investedUSDC: usdcSpent,
+            targetPrice: entryPrice * (1 + strategy.perTradeTarget),
+            stopLossPrice: entryPrice * (1 - strategy.stopLoss),
+            scalpMode: true,
+            txSignature: tx.signature,
+            bondingProgress: token.bondingProgress,
+            liquidityUSD: token.liquidityUSD,
+            tokenDecimals: 9,
+            positionSizeMode: POSITION_SIZE_MODE
+        };
+        
+        user.position = position;
+        user.currentBalance -= usdcSpent;
+
+        // Add to portfolio
+        this.portfolioManager.addPosition(token.address, position);
+
+        // Save to database
+        if (this.database) {
+            await this.database.createPosition(userId, position);
+        }
+
+        await this.saveState();
+
+        console.log(`\n✅ Position opened successfully`);
+        console.log(`   New balance: ${user.currentBalance.toFixed(4)} USDC`);
+        console.log('💰'.repeat(30) + '\n');
+
+        // Send success message
+        await this.bot.sendMessage(userId, this.formatBuyMessage(position, token, user), {
+            parse_mode: 'HTML'
+        });
+
+        this.logger.info('Buy executed successfully', { 
+            symbol: token.symbol, 
+            price: entryPrice.toFixed(8),
+            amount: usdcSpent.toFixed(2),
+            tx: tx.signature
+        });
+
+        return true;
+
+    } catch (error) {
+        console.log('\n❌ BUY EXECUTION FAILED');
+        console.log(`   Error: ${error.message}`);
+        console.log('💰'.repeat(30) + '\n');
+        
+        this.logger.error('Buy execution failed', { 
+            error: error.message, 
+            stack: error.stack,
+            token: token.symbol,
+            userId
+        });
+        
+        // Send user-friendly error message
+        await this.bot.sendMessage(userId, `
+❌ <b>Buy Failed</b>
+
+<b>Token:</b> ${token.symbol}
+<b>Error:</b> ${error.message}
+
+<b>Your balance is safe.</b>
+Bot will continue scanning for opportunities.
+
+Use /status to check bot health.
+        `.trim(), {
+            parse_mode: 'HTML'
+        }).catch(err => this.logger.error('Failed to send error message', { error: err.message }));
+        
+        return false;
+    }
 }
 
 async executePaperBuy(userId, token) {
@@ -2685,11 +2926,191 @@ async executeSwap(quoteResponse, priorityFeeLamports = 0) {
 }
 
 calculateSlippage(liquidityUSD) {
-  if (liquidityUSD >= 50000) return 300;
-  if (liquidityUSD >= 20000) return 500;
-  if (liquidityUSD >= 10000) return 800;
-  return 1200;
+    let slippageBps;
+    
+    if (liquidityUSD >= 100000) {
+        slippageBps = 200;  // 2% - very liquid
+    } else if (liquidityUSD >= 50000) {
+        slippageBps = 300;  // 3% - good liquidity
+    } else if (liquidityUSD >= 20000) {
+        slippageBps = 500;  // 5% - medium liquidity
+    } else if (liquidityUSD >= 10000) {
+        slippageBps = 800;  // 8% - low liquidity
+    } else if (liquidityUSD >= 5000) {
+        slippageBps = 1200; // 12% - very low liquidity
+    } else {
+        slippageBps = 1500; // 15% - extremely low liquidity
+    }
+    
+    this.logger.debug('Slippage calculated', {
+        liquidityUSD: liquidityUSD.toFixed(0),
+        slippageBps: slippageBps,
+        slippagePercent: (slippageBps / 100).toFixed(1) + '%'
+    });
+    
+    return slippageBps;
 }
+
+validateQuote(quote, requestedAmount, token) {
+    try {
+        const inAmount = parseInt(quote.inAmount);
+        const outAmount = parseInt(quote.outAmount);
+        
+        // Check 1: Required fields exist
+        if (!quote.inAmount || !quote.outAmount) {
+            return { 
+                valid: false, 
+                reason: 'Missing required fields (inAmount or outAmount)' 
+            };
+        }
+        
+        // Check 2: Amounts are valid numbers
+        if (isNaN(inAmount) || isNaN(outAmount)) {
+            return { 
+                valid: false, 
+                reason: 'Invalid amount values' 
+            };
+        }
+        
+        // Check 3: Output is positive
+        if (outAmount <= 0) {
+            return { 
+                valid: false, 
+                reason: 'Output amount is zero or negative' 
+            };
+        }
+        
+        // Check 4: Input matches request (within 2%)
+        const inputDiff = Math.abs(inAmount - requestedAmount) / requestedAmount;
+        if (inputDiff > 0.02) {
+            return { 
+                valid: false, 
+                reason: `Input mismatch: requested ${requestedAmount}, got ${inAmount} (${(inputDiff * 100).toFixed(1)}% diff)` 
+            };
+        }
+        
+        // Check 5: Price impact not extreme (>25% is very suspicious)
+        if (quote.priceImpactPct) {
+            const impact = parseFloat(quote.priceImpactPct);
+            if (impact > 25) {
+                return { 
+                    valid: false, 
+                    reason: `Extreme price impact: ${impact.toFixed(2)}% (max 25%)` 
+                };
+            }
+        }
+        
+        // Check 6: Output amount is reasonable
+        const minExpectedOutput = 100; // At least 100 lamports
+        if (outAmount < minExpectedOutput) {
+            return { 
+                valid: false, 
+                reason: `Output too small: ${outAmount} lamports (min ${minExpectedOutput})` 
+            };
+        }
+        
+        this.logger.info('Quote validation passed', {
+            inAmount: inAmount,
+            outAmount: outAmount,
+            priceImpact: quote.priceImpactPct || 'N/A'
+        });
+        
+        return { valid: true };
+        
+    } catch (error) {
+        return { 
+            valid: false, 
+            reason: `Validation error: ${error.message}` 
+        };
+    }
+}
+
+async handleTestQuote(userId, chatId) {
+    try {
+        await this.sendMessage(chatId, '🧪 <b>Testing Jupiter Quote...</b>', { 
+            parse_mode: 'HTML' 
+        });
+        
+        // Test with 1 USDC to SOL
+        const testAmount = 1_000_000; // 1 USDC (6 decimals)
+        const inputMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
+        const outputMint = 'So11111111111111111111111111111111111111112'; // SOL
+        
+        console.log('\n🧪 MANUAL QUOTE TEST');
+        console.log('   Amount: 1 USDC');
+        console.log('   From: USDC');
+        console.log('   To: SOL\n');
+        
+        const quote = await this.engine.getJupiterQuote(
+            inputMint,
+            outputMint,
+            testAmount,
+            300 // 3% slippage
+        );
+        
+        if (quote) {
+            const inUSDC = parseInt(quote.inAmount) / 1_000_000;
+            const outSOL = parseInt(quote.outAmount) / 1_000_000_000;
+            const pricePerSOL = inUSDC / outSOL;
+            
+            await this.sendMessage(chatId, `
+✅ <b>QUOTE TEST PASSED</b>
+
+<b>Input:</b> ${inUSDC.toFixed(6)} USDC
+<b>Output:</b> ${outSOL.toFixed(6)} SOL
+<b>Price:</b> $${pricePerSOL.toFixed(2)} per SOL
+<b>Price Impact:</b> ${quote.priceImpactPct || 'N/A'}%
+<b>Routes:</b> ${quote.routePlan?.length || 1}
+
+✅ Jupiter API is working!
+All endpoints are operational.
+
+<i>You can now use /start to begin trading.</i>
+            `.trim(), { parse_mode: 'HTML' });
+            
+            this.logger.info('Quote test successful', {
+                inAmount: quote.inAmount,
+                outAmount: quote.outAmount,
+                pricePerSOL: pricePerSOL.toFixed(2)
+            });
+            
+        } else {
+            await this.sendMessage(chatId, `
+❌ <b>QUOTE TEST FAILED</b>
+
+All Jupiter endpoints failed to respond.
+
+<b>Possible issues:</b>
+• Network connectivity
+• Jupiter API is down
+• Rate limiting
+
+<b>Debugging steps:</b>
+1. Check the bot logs (console output)
+2. Try again in 1-2 minutes
+3. Verify RPC is working with /status
+
+<b>Jupiter Status:</b>
+${JUPITER_ENDPOINTS.map((ep, i) => 
+    `${i + 1}. ${ep.substring(0, 40)}... - Failures: ${jupiterEndpointFailures[i]}`
+).join('\n')}
+            `.trim(), { parse_mode: 'HTML' });
+            
+            this.logger.error('Quote test failed - all endpoints unreachable');
+        }
+        
+    } catch (error) {
+        this.logger.error('Quote test error', { error: error.message });
+        await this.sendMessage(chatId, `
+❌ <b>Test Error</b>
+
+${error.message}
+
+Check logs for details.
+        `.trim(), { parse_mode: 'HTML' });
+    }
+}
+
 
 async checkStrategyAdjustment(userId) {
   if (!this.performanceTracker.shouldAdjustStrategy()) return;
@@ -3916,6 +4337,12 @@ stripHtmlTags(text) {
                 case '/scan':
                     handlerPromise = this.handleScan(userId, chatId);
                     break;    
+                
+                    
+                case '/testquote':
+                    handlerPromise = this.handleTestQuote(userId, chatId);
+                    break;
+                    
                     
                 default:
                     await this.sendMessage(chatId, 
@@ -4796,6 +5223,8 @@ USDC: ${balances.usdc.toFixed(2)}
 /stats - API usage
 /profits - Profit history
 /portfolio - Active positions
+/testquote -  test jupiterquote
+
 
 <b>🔧 Advanced:</b>
 /health - System health
