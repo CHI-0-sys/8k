@@ -1,4 +1,4 @@
-// DELETE THIS ENTIRE BLOCK:
+
 const dns = require('dns');
 dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 console.log('Forced DNS to Google + Cloudflare');
@@ -964,201 +964,7 @@ allTokens.forEach((token, i) => {
         }
     }
       
-     // Add this INSIDE getJupiterQuote, before the fetchWithTimeout
-     async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
-        console.log('\n' + '📡'.repeat(30));
-        console.log('📡 JUPITER QUOTE REQUEST');
-        console.log('📡'.repeat(30));
-        
-        // ===== VALIDATE INPUTS =====
-        console.log('\n🔍 Validating inputs...');
-        
-        if (!inputMint || typeof inputMint !== 'string') {
-            throw new Error(`Invalid inputMint: ${inputMint}`);
-        }
-        
-        if (!outputMint || typeof outputMint !== 'string') {
-            throw new Error(`Invalid outputMint: ${outputMint}`);
-        }
-        
-        if (!amount || amount <= 0 || isNaN(amount)) {
-            throw new Error(`Invalid amount: ${amount} (must be positive number)`);
-        }
-        
-        if (!slippageBps || slippageBps <= 0) {
-            slippageBps = 300; // Default 3%
-        }
-        
-        console.log('✅ Inputs valid');
-        console.log(`   Input Mint: ${inputMint.substring(0, 8)}...`);
-        console.log(`   Output Mint: ${outputMint.substring(0, 8)}...`);
-        console.log(`   Amount: ${amount} lamports`);
-        console.log(`   Slippage: ${slippageBps}bps (${(slippageBps / 100).toFixed(2)}%)`);
-        
-        // ===== TRY ALL ENDPOINTS =====
-        const maxAttempts = JUPITER_ENDPOINTS.length;
-        let lastError = null;
-        
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                const endpoint = getJupiterEndpoint();
-                console.log(`\n🌐 Attempt ${attempt + 1}/${maxAttempts}`);
-                console.log(`   Endpoint: ${endpoint}`);
-                
-                // ===== BUILD REQUEST =====
-                const url = `${endpoint}/quote`;
-                const params = {
-                    inputMint: inputMint,
-                    outputMint: outputMint,
-                    amount: amount.toString(),
-                    slippageBps: slippageBps.toString(),
-                    onlyDirectRoutes: false,
-                    asLegacyTransaction: false
-                };
-                
-                console.log(`   URL: ${url}`);
-                console.log(`   Params:`, params);
-                
-                // ===== MAKE REQUEST =====
-                console.log(`   ⏳ Sending request...`);
-                const startTime = Date.now();
-                
-                const response = await jupiterClient.get(url, {
-                    params: params,
-                    timeout: JUPITER_QUOTE_TIMEOUT,
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    }
-                });
-                
-                const duration = Date.now() - startTime;
-                console.log(`   ⏱️  Response time: ${duration}ms`);
-                
-                // ===== CHECK RESPONSE =====
-                if (!response) {
-                    throw new Error('No response from Jupiter');
-                }
-                
-                console.log(`   📊 Status: ${response.status} ${response.statusText}`);
-                
-                if (response.status !== 200) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                
-                if (!response.data) {
-                    throw new Error('Empty response body');
-                }
-                
-                // ===== VALIDATE RESPONSE DATA =====
-                console.log(`   📦 Response keys:`, Object.keys(response.data));
-                
-                // Check for error in response
-                if (response.data.error) {
-                    throw new Error(`Jupiter API error: ${response.data.error}`);
-                }
-                
-                // Check required fields
-                if (!response.data.inAmount) {
-                    console.log(`   ❌ Missing inAmount`);
-                    console.log(`   Full response:`, JSON.stringify(response.data, null, 2));
-                    throw new Error('Response missing inAmount field');
-                }
-                
-                if (!response.data.outAmount) {
-                    console.log(`   ❌ Missing outAmount`);
-                    console.log(`   Full response:`, JSON.stringify(response.data, null, 2));
-                    throw new Error('Response missing outAmount field');
-                }
-                
-                // Parse amounts
-                const inAmount = parseInt(response.data.inAmount);
-                const outAmount = parseInt(response.data.outAmount);
-                
-                if (isNaN(inAmount) || isNaN(outAmount)) {
-                    throw new Error(`Invalid amount values: in=${response.data.inAmount}, out=${response.data.outAmount}`);
-                }
-                
-                if (outAmount <= 0) {
-                    throw new Error('Output amount is zero or negative');
-                }
-                
-                // ===== SUCCESS =====
-                console.log(`\n✅ QUOTE RECEIVED`);
-                console.log(`   In: ${inAmount} lamports (${(inAmount / 1_000_000).toFixed(6)} USDC)`);
-                console.log(`   Out: ${outAmount} lamports (${(outAmount / 1_000_000_000).toFixed(6)} tokens)`);
-                console.log(`   Price Impact: ${response.data.priceImpactPct || 'N/A'}%`);
-                console.log(`   Routes: ${response.data.routePlan?.length || 1}`);
-                console.log('📡'.repeat(30) + '\n');
-                
-                recordJupiterSuccess();
-                
-                this.logger.info('Jupiter quote success', {
-                    endpoint: endpoint,
-                    inAmount: inAmount,
-                    outAmount: outAmount,
-                    duration: `${duration}ms`,
-                    priceImpact: response.data.priceImpactPct
-                });
-                
-                // ===== RETURN STANDARDIZED OBJECT =====
-                return {
-                    inAmount: response.data.inAmount,
-                    outAmount: response.data.outAmount,
-                    otherAmountThreshold: response.data.otherAmountThreshold,
-                    swapMode: response.data.swapMode || 'ExactIn',
-                    slippageBps: response.data.slippageBps || slippageBps,
-                    priceImpactPct: response.data.priceImpactPct,
-                    routePlan: response.data.routePlan,
-                    contextSlot: response.data.contextSlot,
-                    timeTaken: response.data.timeTaken,
-                    route: response.data // Full response for executeSwap
-                };
-                
-            } catch (error) {
-                lastError = error;
-                const isLastAttempt = attempt === maxAttempts - 1;
-                
-                console.log(`   ❌ Attempt ${attempt + 1} failed`);
-                console.log(`   Error: ${error.message}`);
-                
-                // Log response details if available
-                if (error.response) {
-                    console.log(`   Response status: ${error.response.status}`);
-                    console.log(`   Response data:`, error.response.data);
-                }
-                
-                recordJupiterFailure();
-                
-                this.logger.error('Jupiter quote attempt failed', {
-                    endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint],
-                    attempt: attempt + 1,
-                    error: error.message,
-                    status: error.response?.status,
-                    data: error.response?.data
-                });
-                
-                if (isLastAttempt) {
-                    console.log(`\n💥 ALL ${maxAttempts} ENDPOINTS FAILED`);
-                    console.log(`   Last error: ${lastError.message}`);
-                    console.log('📡'.repeat(30) + '\n');
-                    return null;
-                }
-                
-                // Switch to next endpoint
-                const oldIdx = currentJupiterEndpoint;
-                currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
-                
-                console.log(`   🔄 Switching endpoint: ${oldIdx} → ${currentJupiterEndpoint}`);
-                console.log(`   ⏳ Waiting 2 seconds...\n`);
-                
-                await sleep(2000);
-            }
-        }
-        
-        // All attempts failed
-        return null;
-    }
+
 
 
     
@@ -1563,7 +1369,49 @@ class TradingEngine {
     }
 }
 
+formatSellMessageWithBalance(trade, user, updatedBalances) {
+    const emoji = trade.profit > 0 ? '✅' : '⚠️';
+    const color = trade.profit > 0 ? '🟢' : '🔴';
+    const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+    
+    const reasonEmojis = {
+        'scalp_profit': '⚡ Quick Profit',
+        'extended_profit': '🎯 Target Hit',
+        'stop_loss': '🛡️ Stop Loss'
+    };
+    
+    const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
+    
+    return `
+${emoji} <b>POSITION CLOSED</b> ${color}
 
+<b>${trade.symbol}</b>
+└ ${reason}
+
+💰 <b>Trade Summary</b>
+├ Entry: $${trade.entryPrice.toFixed(8)}
+├ Exit: $${trade.exitPrice.toFixed(8)}
+├ Change: ${((trade.exitPrice/trade.entryPrice - 1) * 100).toFixed(2)}%
+└ Hold Time: ${trade.holdTimeMinutes}m
+
+📊 <b>Financial Result</b>
+├ Invested: $${trade.investedUSDC.toFixed(2)}
+├ Received: $${trade.usdcReceived.toFixed(2)}
+├ Net P&L: ${trade.profit > 0 ? '+' : ''}$${trade.profit.toFixed(2)}
+└ Return: ${trade.profit > 0 ? '+' : ''}${trade.profitPercent.toFixed(2)}%
+
+💼 <b>Portfolio Update</b>
+├ Balance: $${user.currentBalance.toFixed(2)}
+├ Wallet Actual: $${updatedBalances.trading.toFixed(4)}
+├ Daily P&L: ${user.dailyProfitPercent > 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+├ Total Trades: ${user.totalTrades}
+└ Win Rate: ${((user.successfulTrades / user.totalTrades) * 100).toFixed(1)}%
+
+🔗 <a href="${solscanUrl}">View TX</a>
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim();
+}
 
  
 async getWalletBalance() {
@@ -3025,91 +2873,7 @@ validateQuote(quote, requestedAmount, token) {
     }
 }
 
-async handleTestQuote(userId, chatId) {
-    try {
-        await this.sendMessage(chatId, '🧪 <b>Testing Jupiter Quote...</b>', { 
-            parse_mode: 'HTML' 
-        });
-        
-        // Test with 1 USDC to SOL
-        const testAmount = 1_000_000; // 1 USDC (6 decimals)
-        const inputMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
-        const outputMint = 'So11111111111111111111111111111111111111112'; // SOL
-        
-        console.log('\n🧪 MANUAL QUOTE TEST');
-        console.log('   Amount: 1 USDC');
-        console.log('   From: USDC');
-        console.log('   To: SOL\n');
-        
-        const quote = await this.engine.getJupiterQuote(
-            inputMint,
-            outputMint,
-            testAmount,
-            300 // 3% slippage
-        );
-        
-        if (quote) {
-            const inUSDC = parseInt(quote.inAmount) / 1_000_000;
-            const outSOL = parseInt(quote.outAmount) / 1_000_000_000;
-            const pricePerSOL = inUSDC / outSOL;
-            
-            await this.sendMessage(chatId, `
-✅ <b>QUOTE TEST PASSED</b>
 
-<b>Input:</b> ${inUSDC.toFixed(6)} USDC
-<b>Output:</b> ${outSOL.toFixed(6)} SOL
-<b>Price:</b> $${pricePerSOL.toFixed(2)} per SOL
-<b>Price Impact:</b> ${quote.priceImpactPct || 'N/A'}%
-<b>Routes:</b> ${quote.routePlan?.length || 1}
-
-✅ Jupiter API is working!
-All endpoints are operational.
-
-<i>You can now use /start to begin trading.</i>
-            `.trim(), { parse_mode: 'HTML' });
-            
-            this.logger.info('Quote test successful', {
-                inAmount: quote.inAmount,
-                outAmount: quote.outAmount,
-                pricePerSOL: pricePerSOL.toFixed(2)
-            });
-            
-        } else {
-            await this.sendMessage(chatId, `
-❌ <b>QUOTE TEST FAILED</b>
-
-All Jupiter endpoints failed to respond.
-
-<b>Possible issues:</b>
-• Network connectivity
-• Jupiter API is down
-• Rate limiting
-
-<b>Debugging steps:</b>
-1. Check the bot logs (console output)
-2. Try again in 1-2 minutes
-3. Verify RPC is working with /status
-
-<b>Jupiter Status:</b>
-${JUPITER_ENDPOINTS.map((ep, i) => 
-    `${i + 1}. ${ep.substring(0, 40)}... - Failures: ${jupiterEndpointFailures[i]}`
-).join('\n')}
-            `.trim(), { parse_mode: 'HTML' });
-            
-            this.logger.error('Quote test failed - all endpoints unreachable');
-        }
-        
-    } catch (error) {
-        this.logger.error('Quote test error', { error: error.message });
-        await this.sendMessage(chatId, `
-❌ <b>Test Error</b>
-
-${error.message}
-
-Check logs for details.
-        `.trim(), { parse_mode: 'HTML' });
-    }
-}
 
 
 async checkStrategyAdjustment(userId) {
@@ -3577,94 +3341,6 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 // Add this to the end of bot.js after TradingEngine class
 
 class TradingBot {
-    // constructor() {
-    //     this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
-    
-    //     console.log('🤖 Bot Configuration:', {
-    //         mode: 'POLLING',
-    //         authorizedUsers: AUTHORIZED_USERS.length,
-    //         scanInterval: SCAN_INTERVAL_MINUTES + 'min',
-    //         environment: process.env.NODE_ENV || 'production'
-    //     });
-    
-    //     logger.info('🔵 Starting in POLLING MODE (Production - Railway Optimized)');
-    
-    //     // ============ RAILWAY-OPTIMIZED POLLING ============
-    //     this.bot = new TelegramBot(TELEGRAM_TOKEN, {
-    //         polling: {
-    //             interval: 3000,              // 3s instead of 2s (less aggressive)
-    //             autoStart: true,
-    //             params: {
-    //                 timeout: 15,             // 15s instead of 20s (faster recovery)
-    //                 allowed_updates: ['message'], // Only messages, no callbacks
-    //                 limit: 10                // Process max 10 updates at once
-    //             }
-    //         },
-    //         filepath: false,                 // Never download files
-    //         request: {
-    //             agentOptions: {
-    //                 keepAlive: true,         // Reuse connections
-    //                 keepAliveMsecs: 10000
-    //             }
-    //         }
-    //     });
-    
-    //     // ============ ENHANCED ERROR HANDLING FOR RAILWAY ============
-    //     this.bot.on('polling_error', (error) => {
-    //         // Railway network resets are normal - don't crash
-    //         if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
-    //             logger.warn('Telegram connection reset (normal on Railway)', { 
-    //                 error: error.message 
-    //             });
-    //             return; // Let it auto-retry
-    //         }
-            
-    //         // Multiple bot instances = critical error
-    //         if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-    //             logger.error('⛔ Multiple bot instances detected - SHUTTING DOWN');
-    //             console.error('⛔ CRITICAL: Another instance is running!');
-    //             process.exit(1);
-    //         }
-            
-    //         // ETIMEDOUT and ECONNREFUSED are common on Railway - just log
-    //         if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
-    //             logger.debug('Telegram connection timeout (will retry)', {
-    //                 code: error.code
-    //             });
-    //             return;
-    //         }
-            
-    //         // Other errors
-    //         logger.error('Telegram polling error', { 
-    //             code: error.code, 
-    //             message: error.message 
-    //         });
-    //     });
-    
-    //     // General bot error handler
-    //     this.bot.on('error', (error) => {
-    //         logger.error('Bot error', { error: error.message });
-    //     });
-    
-    //     // Verify connection
-    //     this.bot.getMe()
-    //         .then(info => {
-    //             console.log('✅ Connected to Telegram:', info.username);
-    //             logger.info('Bot connected to Telegram', { 
-    //                 username: info.username, 
-    //                 id: info.id,
-    //                 mode: 'POLLING'
-    //             });
-    //         })
-    //         .catch(err => {
-    //             console.error('❌ Failed to connect to Telegram:', err.message);
-    //             logger.error('Bot connection failed', { error: err.message });
-    //             process.exit(1);
-    //         });
-    
-    //     // ... rest of constructor (RPC, database, etc.)
-    // }
-    
     constructor() {
         console.log('🤖 TradingBot Constructor Starting...');
         
@@ -3861,181 +3537,6 @@ this.bot.on('error', (error) => {
     }
     
 
-// async checkMemoryHealth() {
-//     const mem = process.memoryUsage();
-//     const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-//     const rssPercent = (mem.rss / (128 * 1024 * 1024)) * 100; // Assume 128MB limit
-    
-//     if (heapPercent > 85 || rssPercent > 85) {
-//         logger.error('CRITICAL MEMORY - Pausing operations', {
-//             heap: heapPercent.toFixed(1) + '%',
-//             rss: rssPercent.toFixed(1) + '%'
-//         });
-        
-//         // Stop trading temporarily
-//         for (const [userId, user] of this.engine.userStates.entries()) {
-//             user.isActive = false;
-//         }
-        
-//         // Aggressive cleanup
-//         await this.performMemoryCleanup();
-        
-//         if (global.gc) {
-//             global.gc();
-//             global.gc(); // Call twice
-//         }
-        
-//         // Wait 30 seconds
-//         await sleep(30000);
-        
-//         // Check again
-//         const newMem = process.memoryUsage();
-//         const newHeapPercent = (newMem.heapUsed / newMem.heapTotal * 100);
-        
-//         if (newHeapPercent < 70) {
-//             logger.info('Memory recovered, resuming operations');
-//         } else {
-//             logger.error('Memory still critical - RESTARTING');
-//             process.exit(1); // Let process manager restart
-//         }
-//     }
-// }
-
-
-
-// setupMemoryManagement() {
-//     console.log('🧠 Setting up Railway-optimized memory management...');
-//     console.log('   Target: Keep under 400MB for Railway free tier');
-    
-//     // ============ AGGRESSIVE MEMORY MONITORING (Every 90 seconds) ============
-//     setInterval(() => {
-//         const mem = process.memoryUsage();
-//         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-//         const rssMB = mem.rss / 1024 / 1024;
-//         const heapMB = mem.heapUsed / 1024 / 1024;
-
-//         // Log every check (helps debug Railway issues)
-//         console.log(`\n💾 Memory Check: RSS ${rssMB.toFixed(0)}MB | Heap ${heapMB.toFixed(0)}MB (${heapPercent.toFixed(1)}%)`);
-
-//         // WARNING THRESHOLD (70% heap or 350MB RSS)
-//         if (heapPercent > 70 || rssMB > 350) {
-//             console.log('⚠️  HIGH MEMORY - Starting cleanup...');
-//             logger.warn('High memory usage detected', {
-//                 heapPercent: heapPercent.toFixed(1) + '%',
-//                 heapUsed: heapMB.toFixed(0) + 'MB',
-//                 rss: rssMB.toFixed(0) + 'MB'
-//             });
-
-//             // Perform cleanup
-//             const cleaned = this.performMemoryCleanup();
-//             console.log(`   ✅ Cleaned ${cleaned} items`);
-
-//             // Force GC (run with --expose-gc flag in Railway)
-//             if (global.gc) {
-//                 global.gc();
-//                 console.log('   ✅ Garbage collection forced');
-//             }
-//         }
-
-//         // CRITICAL THRESHOLD (85% heap or 450MB RSS)
-//         if (heapPercent > 85 || rssMB > 450) {
-//             console.log('🚨 CRITICAL MEMORY - Emergency measures!');
-//             logger.error('CRITICAL MEMORY', {
-//                 heapPercent: heapPercent.toFixed(1) + '%',
-//                 rss: rssMB.toFixed(0) + 'MB'
-//             });
-
-//             // Emergency cleanup
-//             this.performMemoryCleanup();
-
-//             // Triple GC
-//             if (global.gc) {
-//                 global.gc();
-//                 global.gc();
-//                 global.gc();
-//                 console.log('   ✅ Triple garbage collection forced');
-//             }
-
-//             // Pause trading temporarily (but keep monitoring)
-//             for (const [userId, user] of this.engine.userStates.entries()) {
-//                 if (user.isActive && !user.position) {
-//                     user.isActive = false;
-//                     console.log(`   ⏸️  Paused trading for user ${userId} (memory critical)`);
-                    
-//                     // Notify user
-//                     this.sendMessage(userId, '⚠️ Bot temporarily paused due to high memory usage. Will resume automatically.', {
-//                         parse_mode: 'HTML'
-//                     }).catch(err => console.error('Failed to notify user:', err.message));
-//                 }
-//             }
-
-//             // Wait 30 seconds, then check if we can resume
-//             setTimeout(async () => {
-//                 const newMem = process.memoryUsage();
-//                 const newRssMB = newMem.rss / 1024 / 1024;
-                
-//                 if (newRssMB < 350) {
-//                     console.log('   ✅ Memory recovered, resuming trading');
-                    
-//                     // Resume trading
-//                     for (const [userId, user] of this.engine.userStates.entries()) {
-//                         if (!user.isActive && !user.position) {
-//                             user.isActive = true;
-//                             console.log(`   ▶️  Resumed trading for user ${userId}`);
-//                         }
-//                     }
-//                 } else {
-//                     console.log('   ❌ Memory still high, keeping trading paused');
-//                 }
-//             }, 30000);
-//         }
-//     }, 90 * 1000); // Check every 90 seconds
-
-//     // ============ PERIODIC CLEANUP (Every 5 minutes) ============
-//     setInterval(() => {
-//         console.log('🧹 Scheduled cleanup...');
-//         const cleaned = this.performMemoryCleanup();
-//         console.log(`   ✅ Cleaned ${cleaned} items`);
-        
-//         if (global.gc) {
-//             global.gc();
-//         }
-//     }, 5 * 60 * 1000);
-
-//     // ============ CLEAR TELEGRAM INTERNAL CACHE (Every 10 minutes) ============
-//     setInterval(() => {
-//         if (this.bot && this.bot._polling) {
-//             // Clear old updates to prevent memory buildup
-//             this.bot._polling._lastUpdateId = 0;
-//             console.log('🧹 Cleared Telegram polling cache');
-//         }
-//     }, 10 * 60 * 1000);
-
-//     // ============ WINSTON LOG ROTATION (Every 30 minutes) ============
-//     setInterval(() => {
-//         if (logger && logger.transports) {
-//             logger.transports.forEach(transport => {
-//                 if (transport.filename && transport.filename.includes('combined.log')) {
-//                     try {
-//                         // Rotate logs by clearing the file
-//                         const logFile = transport.filename;
-//                         if (fs.existsSync(logFile)) {
-//                             const stats = fs.statSync(logFile);
-//                             if (stats.size > 5 * 1024 * 1024) { // > 5MB
-//                                 fs.writeFileSync(logFile, '');
-//                                 console.log('🧹 Rotated log file:', logFile);
-//                             }
-//                         }
-//                     } catch (err) {
-//                         console.warn('Log rotation failed:', err.message);
-//                     }
-//                 }
-//             });
-//         }
-//     }, 30 * 60 * 1000);
-
-//     console.log('✅ Memory management initialized');
-// }
 
 performMemoryCleanup() {
     let cleaned = 0;
@@ -4172,7 +3673,148 @@ loadWallet(privateKey) {
   }
 }
 
+async handleTestQuote(userId, chatId) {
+    try {
+        await this.sendMessage(chatId, '🧪 <b>Testing Jupiter Quote...</b>', { 
+            parse_mode: 'HTML' 
+        });
+        
+        console.log('\n🧪 MANUAL QUOTE TEST TRIGGERED');
+        console.log('   User:', userId);
+        console.log('   Testing: 1 USDC → SOL\n');
+        
+        // Test parameters
+        const testAmount = 1_000_000; // 1 USDC (6 decimals)
+        const inputMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
+        const outputMint = 'So11111111111111111111111111111111111111112'; // SOL
+        const slippage = 300; // 3%
+        
+        // Call the quote method
+        const quote = await this.engine.getJupiterQuote(
+            inputMint,
+            outputMint,
+            testAmount,
+            slippage
+        );
+        
+        if (quote && quote.outAmount) {
+            // Calculate human-readable values
+            const inUSDC = parseInt(quote.inAmount) / 1_000_000;
+            const outSOL = parseInt(quote.outAmount) / 1_000_000_000;
+            const pricePerSOL = inUSDC / outSOL;
+            
+            console.log('✅ Quote test PASSED');
+            console.log(`   In: ${inUSDC} USDC`);
+            console.log(`   Out: ${outSOL} SOL`);
+            console.log(`   Price: $${pricePerSOL.toFixed(2)} per SOL\n`);
+            
+            // Send success message
+            await this.sendMessage(chatId, `
+✅ <b>QUOTE TEST PASSED</b>
 
+<b>Request:</b>
+Amount: ${inUSDC.toFixed(6)} USDC
+From: USDC
+To: SOL
+
+<b>Response:</b>
+Input: ${inUSDC.toFixed(6)} USDC
+Output: ${outSOL.toFixed(6)} SOL
+Price: $${pricePerSOL.toFixed(2)} per SOL
+
+<b>Details:</b>
+Price Impact: ${quote.priceImpactPct || 'N/A'}%
+Routes: ${quote.routePlan?.length || 1}
+Slippage: ${slippage / 100}%
+
+✅ <b>Jupiter API is working!</b>
+All endpoints are operational.
+
+<i>You can now use /start to begin trading.</i>
+            `.trim(), { parse_mode: 'HTML' });
+            
+            this.logger.info('Quote test successful', {
+                userId,
+                inAmount: quote.inAmount,
+                outAmount: quote.outAmount,
+                pricePerSOL: pricePerSOL.toFixed(2)
+            });
+            
+        } else {
+            console.log('❌ Quote test FAILED - no quote returned\n');
+            
+            // Send failure message
+            await this.sendMessage(chatId, `
+❌ <b>QUOTE TEST FAILED</b>
+
+All Jupiter endpoints failed to respond.
+
+<b>Possible Issues:</b>
+• Network connectivity problems
+• Jupiter API is down
+• Rate limiting active
+• RPC connection issues
+
+<b>Debugging Steps:</b>
+1. Check bot logs (console output)
+2. Wait 1-2 minutes and try again
+3. Verify RPC is working: /status
+4. Check wallet has funds: /wallet
+
+<b>Jupiter Endpoint Status:</b>
+${JUPITER_ENDPOINTS.map((ep, i) => 
+    `${i + 1}. ${ep.substring(0, 40)}...\n   Failures: ${jupiterEndpointFailures[i]}`
+).join('\n')}
+
+<b>What to do:</b>
+• If all endpoints show 0-3 failures: Try again
+• If any endpoint shows 4+ failures: Wait 5 minutes
+• If issue persists: Check Railway logs
+
+<i>Contact support if problem continues.</i>
+            `.trim(), { parse_mode: 'HTML' });
+            
+            this.logger.error('Quote test failed - all endpoints unreachable', {
+                userId,
+                endpointFailures: jupiterEndpointFailures
+            });
+        }
+        
+    } catch (error) {
+        console.error('💥 Quote test error:', error.message);
+        console.error('Stack:', error.stack);
+        
+        this.logger.error('Quote test error', { 
+            userId,
+            error: error.message,
+            stack: error.stack
+        });
+        
+        // Send error message
+        await this.sendMessage(chatId, `
+❌ <b>Test Error</b>
+
+<b>Error:</b> ${error.message}
+
+<b>Possible Causes:</b>
+${error.message.includes('getJupiterQuote') ? 
+    '• getJupiterQuote method missing or broken' : 
+    '• Network connectivity issue'}
+${error.message.includes('timeout') ? 
+    '• Request timeout (Jupiter API slow)' : ''}
+${error.message.includes('Invalid') ? 
+    '• Invalid parameters or response' : ''}
+
+<b>Next Steps:</b>
+1. Check bot logs for details
+2. Verify /status shows bot is healthy
+3. Try /wallet to check connectivity
+4. Contact support with error code: ${Date.now()}
+
+<i>Check console output for full error details.</i>
+        `.trim(), { parse_mode: 'HTML' });
+    }
+}
 async sendMessage(chatId, text, options = {}) {
     const maxRetries = 3;
     const maxLength = 4096;
@@ -5392,24 +5034,32 @@ Can lose all capital. Trade responsibly.
 
 // ============ REDUCE MEMORY CLEANUP SPAM ============
 // Replace setupMemoryManagement() with this QUIETER version
-
 setupMemoryManagement() {
-    console.log('🧠 Memory management: MINIMAL MODE (no trade blocking)');
+    console.log('🧠 Memory management: Monitoring only');
     
-    // Only log memory every 5 minutes - NO ACTION
+    // Just log every 5 minutes - NO ACTION TAKEN
     setInterval(() => {
         const mem = process.memoryUsage();
         const rssMB = mem.rss / 1024 / 1024;
         const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
         
-        console.log(`💾 Memory: ${rssMB.toFixed(0)}MB RSS, ${heapPercent.toFixed(0)}% heap`);
+        // Only log, don't interrupt trading
+        if (rssMB > 300 || heapPercent > 80) {
+            console.log(`⚠️  Memory: ${rssMB.toFixed(0)}MB RSS, ${heapPercent.toFixed(0)}% heap`);
+            
+            // Force GC if available
+            if (global.gc) {
+                global.gc();
+                console.log('   ♻️ Garbage collected');
+            }
+        }
         
-        // ONLY shutdown if truly critical (>200MB on Railway)
-        if (rssMB > 200) {
-            logger.error('CRITICAL MEMORY - Restarting', { rss: rssMB });
+        // ONLY exit if critically over limit (Railway = 512MB)
+        if (rssMB > 480) {
+            console.error('💥 CRITICAL MEMORY - Restarting');
             process.exit(1); // Railway will restart
         }
-    }, 5 * 60 * 1000);
+    }, 5 * 60 * 1000); // Every 5 minutes
 }
 
 
