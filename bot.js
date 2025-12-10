@@ -15,7 +15,7 @@ global.fetch = async (input, init) => {
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 axiosRetry(axios, { retries: 3 });
-const MIN_JUPITER_AMOUNT_LAMPORTS = Math.floor(0.0025 * LAMPORTS_PER_SOL);
+
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
@@ -71,7 +71,7 @@ requiredDirs.forEach(dir => {
 
 const logDir = path.join(__dirname, 'logs');
 const dataDir = path.join(__dirname, 'data'); 
-
+const MIN_JUPITER_AMOUNT_LAMPORTS = Math.floor(0.0025 * LAMPORTS_PER_SOL);
 
 
 // Import our new modules
