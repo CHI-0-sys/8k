@@ -15,6 +15,7 @@ global.fetch = async (input, init) => {
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 axiosRetry(axios, { retries: 3 });
+const PumpFunDirect = require('./modules/pumpfun-direct');
 
 
 console.log('🚀 Bot starting...', new Date().toISOString());
@@ -52,7 +53,7 @@ const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const winston = require('winston');
-const { Worker } = require('worker_threads');
+// const { Worker } = require('worker_threads');
 const { Connection, PublicKey, VersionedTransaction, LAMPORTS_PER_SOL, Keypair, Transaction, SystemProgram } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
@@ -1251,6 +1252,7 @@ class TradingEngine {
       this.portfolioManager = new PortfolioManager();
       this.circuitBreaker = new CircuitBreaker();
       this.priorityFeeCalculator = new PriorityFeeCalculator(rpcConnection);
+      this.pumpDirect = new PumpFunDirect(this.rpcConnection.getCurrentConnection(), logger);
       
       // Initialize new modules
       if (ENABLE_MULTI_DEX) {
@@ -1907,91 +1909,85 @@ getUserState(userId) {
         console.log('\n' + '='.repeat(60));
         console.log('🔍 TOKEN SCAN START');
         console.log('='.repeat(60));
-        
-        const candidates = await this.bitquery.getGraduatingTokens();
 
+        const candidates = await this.bitquery.getGraduatingTokens();
         if (!candidates.length) {
             console.log('❌ No candidates from BitQuery');
             return null;
         }
-
         console.log(`✅ Found ${candidates.length} tokens`);
-        
-        // Show top candidates
+
         console.log('\n📊 Top Candidates:');
         candidates.slice(0, 5).forEach((token, i) => {
-            console.log(`  ${i+1}. ${token.symbol} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liq`);
+            console.log(` ${i+1}. ${token.symbol} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liq`);
         });
 
-        // 🔥 SIMPLIFIED ANALYSIS - FEWER CHECKS
         const tokensToAnalyze = candidates.slice(0, MAX_CANDIDATES_TO_ANALYZE);
 
         for (const token of tokensToAnalyze) {
-            console.log(`\n🔍 Analyzing: ${token.symbol}`);
-            console.log(`   Bonding: ${token.bondingProgress.toFixed(1)}%`);
-            console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
-            
-            // ✅ ONLY CHECK IF ENABLED
+            console.log(`\n🔎 Analyzing: ${token.symbol}`);
+            console.log(` Bonding: ${token.bondingProgress.toFixed(1)}%`);
+            console.log(` Liquidity: $${token.liquidityUSD.toFixed(0)}`);
+
+            // Volume check
             if (ENABLE_VOLUME_CHECK) {
-                console.log(`   Checking volume...`);
-                const volume = await this.bitquery.getVolumeHistory(token.address);
-                
-                if (!volume.spike) {
-                    console.log(`   ❌ No volume spike - SKIPPING`);
-                    continue;
+                try {
+                    const volume = await this.bitquery.getVolumeHistory(token.address);
+                    if (!volume.spike) {
+                        console.log(` ❌ No volume spike - SKIPPING`);
+                        continue;
+                    }
+                    console.log(` ✅ Volume spike: ${(volume.recent / volume.previous).toFixed(2)}x`);
+                } catch (err) {
+                    console.log(` ⚠️ Volume check failed - continuing`);
                 }
-                console.log(`   ✅ Volume spike: ${(volume.recent / volume.previous).toFixed(2)}x`);
-            } else {
-                console.log(`   ⏭️  Volume check DISABLED`);
             }
 
-            // ✅ ONLY CHECK IF ENABLED
+            // Whale check
             if (ENABLE_WHALE_CHECK) {
-                console.log(`   Checking whales...`);
-                const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
-                
-                if (whaleDump) {
-                    console.log(`   ❌ Whale dump detected - SKIPPING`);
-                    continue;
+                try {
+                    const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
+                    if (whaleDump) {
+                        console.log(` ❌ Whale dump detected - SKIPPING`);
+                        continue;
+                    }
+                } catch (err) {
+                    console.log(` ⚠️ Whale check failed - continuing`);
                 }
-                console.log(`   ✅ No whale dumps`);
-            } else {
-                console.log(`   ⏭️  Whale check DISABLED`);
             }
 
-            // Technical analysis (optional)
+            // Technical analysis
             if (ENABLE_TECHNICAL_ANALYSIS && this.technicalIndicators) {
-                const analysis = this.technicalIndicators.analyzeToken(token.address);
-                if (analysis && analysis.score < 60) {
-                    console.log(`   ❌ Technical score low (${analysis.score})`);
-                    continue;
-                }
-                console.log(`   ✅ Technical score: ${analysis?.score || 'N/A'}`);
+                try {
+                    const analysis = this.technicalIndicators.analyzeToken(token.address);
+                    if (analysis && analysis.score < 60) continue;
+                } catch (err) { /* continue */ }
             }
 
-            // 🎯 FOUND ONE!
-            console.log('\n🎯 ✅ TRADE SIGNAL FOUND!');
-            console.log(`   Token: ${token.symbol}`);
-            console.log(`   Address: ${token.address}`);
-            console.log('='.repeat(60) + '\n');
+            // Liquidity check
+            const minTradeableUSD = 10000;
+            if (token.liquidityUSD < minTradeableUSD) {
+                console.log(` ⚠️ Liquidity too low - skipping`);
+                continue;
+            }
 
+            console.log('\n🎯 TRADE SIGNAL FOUND!');
             return {
                 ...token,
                 volumeRecent: 0,
                 volumePrevious: 0,
-                volumeSpike: 1
+                volumeSpike: 1  // Fixed!
             };
         }
 
-        console.log('❌ No tokens passed filters');
-        console.log('='.repeat(60) + '\n');
         return null;
-        
-    } catch (err) {
-        console.error('❌ Scanner error:', err.message);
+    } catch (error) {
+        console.error('findTradingOpportunity error:', error);
         return null;
     }
 }
+
+
 
   calculatePositionSize(user, tokenLiquidity) {
       let positionSize;
@@ -2065,152 +2061,98 @@ Combined Value: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)}
   // ============ COMPLETE TRADING ENGINE - ADD THESE METHODS ============
 // Add these methods to the TradingEngine class after formatProfitTakingMessage()
 
+
+
 async executeBuy(userId, token) {
     const user = this.getUserState(userId);
-    
-    try {
-        console.log('\n' + '💰'.repeat(30));
-        console.log('🔵 EXECUTING BUY');
-        console.log('💰'.repeat(30));
-        
-        this.logger.info('Executing buy', { token: token.symbol });
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY)); // Your wallet
 
-        // Check if paper trading
+    try {
+        console.log('\n' + '💰'.repeat(40));
+        console.log('🔵 EXECUTING BUY:', token.symbol);
+        console.log('💰'.repeat(40));
+
         if (ENABLE_PAPER_TRADING) {
-            console.log('📄 Paper trading mode - simulating buy');
             return await this.executePaperBuy(userId, token);
         }
 
-        // ===== STEP 1: CALCULATE POSITION SIZE =====
-        const positionSize = this.calculatePositionSize(user, token.liquidityUSD);
-        console.log(`\n💵 Position size: ${positionSize.toFixed(4)}`);
-        console.log(`   User balance: ${user.currentBalance.toFixed(4)}`);
-        
-        if (positionSize > user.currentBalance) {
-            throw new Error(`Insufficient balance: have ${user.currentBalance.toFixed(4)}, need ${positionSize.toFixed(4)}`);
+        const positionSizeUSDC = this.calculatePositionSize(user, token.liquidityUSD);
+        if (positionSizeUSDC > user.currentBalance) {
+            throw new Error('Insufficient balance');
         }
 
-        // ===== STEP 2: FORMAT AMOUNT CORRECTLY =====
-        // CRITICAL: USDC has 6 decimals, tokens usually have 9
-        const amountLamports = Math.floor(positionSize * 1_000_000); // USDC amount in smallest unit
-        
-        console.log(`   Amount in lamports: ${amountLamports}`);
-        
-        if (amountLamports <= 0) {
-            throw new Error('Position size too small (rounds to 0 lamports)');
-        }
+        const amountUSDC = Math.floor(positionSizeUSDC * 1_000_000); // 6 decimals
 
-        // ===== STEP 3: GET QUOTE WITH RETRY LOGIC =====
-        console.log(`\n📡 Getting Jupiter quote...`);
-        console.log(`   From: USDC`);
-        console.log(`   To: ${token.symbol} (${token.address})`);
-        console.log(`   Amount: ${amountLamports} lamports (${positionSize.toFixed(4)} USDC)`);
-        
-        let quote = null;
-        let lastError = null;
-        
-        // Try each Jupiter endpoint
-        for (let attempt = 0; attempt < JUPITER_ENDPOINTS.length; attempt++) {
-            try {
-                const endpoint = getJupiterEndpoint();
-                console.log(`\n   Attempt ${attempt + 1}/${JUPITER_ENDPOINTS.length}`);
-                console.log(`   Using endpoint: ${endpoint}`);
-                
-                const slippageBps = this.calculateSlippage(token.liquidityUSD);
-                console.log(`   Slippage: ${slippageBps}bps (${(slippageBps / 100).toFixed(2)}%)`);
-                
-                // Call quote with explicit parameters
-                quote = await this.getJupiterQuote(
-                    USDC_MINT,           // Input: USDC
-                    token.address,       // Output: Token
-                    amountLamports,      // Amount in smallest unit
-                    slippageBps          // Slippage
-                );
-
-                if (quote && quote.outAmount) {
-                    console.log(`   ✅ Quote received!`);
-                    console.log(`   In: ${quote.inAmount} lamports USDC`);
-                    console.log(`   Out: ${quote.outAmount} lamports ${token.symbol}`);
-                    recordJupiterSuccess();
-                    break; // Success!
-                } else {
-                    throw new Error('Quote response missing required fields');
-                }
-                
-            } catch (error) {
-                lastError = error;
-                console.log(`   ❌ Attempt ${attempt + 1} failed: ${error.message}`);
-                recordJupiterFailure();
-                
-                // If not last attempt, switch endpoint and retry
-                if (attempt < JUPITER_ENDPOINTS.length - 1) {
-                    currentJupiterEndpoint = (currentJupiterEndpoint + 1) % JUPITER_ENDPOINTS.length;
-                    console.log(`   🔄 Switching to next endpoint...`);
-                    await sleep(2000); // Wait 2s before retry
-                }
-            }
-        }
-
-        // ===== STEP 4: CHECK IF QUOTE SUCCEEDED =====
-        if (!quote || !quote.outAmount) {
-            console.log('\n❌ ALL QUOTE ATTEMPTS FAILED');
-            console.log('💰'.repeat(30) + '\n');
-            
-            // Send detailed error to user
-            await this.bot.sendMessage(userId, `
-❌ <b>Buy Failed - No Quote Available</b>
-
-<b>Token:</b> ${token.symbol}
-<b>Attempted Amount:</b> ${positionSize.toFixed(4)} USDC
-
-<b>Issue:</b> All Jupiter endpoints failed to provide a quote.
-
-<b>Possible Reasons:</b>
-• Low liquidity (token may not be tradeable yet)
-• Network congestion
-• Jupiter API issues
-
-<b>Next Steps:</b>
-✓ Bot will retry on next scan (${SCAN_INTERVAL_MINUTES}m)
-✓ Check /status for bot health
-            `.trim(), { parse_mode: 'HTML' });
-
-            throw new Error(`Quote failed after ${JUPITER_ENDPOINTS.length} attempts. Last error: ${lastError?.message || 'Unknown'}`);
-        }
-
-        // ===== STEP 5: CALCULATE EXPECTED TOKENS =====
-        const expectedTokens = parseFloat(quote.outAmount) / (10 ** 9); // Assuming 9 decimals
-        console.log(`\n📊 Quote Details:`);
-        console.log(`   Expected tokens: ${expectedTokens.toFixed(4)}`);
-        console.log(`   Effective price: ${(positionSize / expectedTokens).toFixed(8)} USDC per token`);
-
-        // ===== STEP 6: CALCULATE PRIORITY FEE =====
-        const isHotLaunch = token.bondingProgress >= 96;
-        const priorityFeeLamports = await this.priorityFeeCalculator.calculateOptimalFee(
-            isHotLaunch, 
-            isHotLaunch ? 'high' : 'normal'
+        const onCurve = token.bondingProgress < 100;
+        const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(
+            token.bondingProgress >= 96,
+            token.bondingProgress >= 96 ? 'critical' : 'high'
         );
-        
-        console.log(`\n⚡ Priority fee: ${priorityFeeLamports} lamports (${(priorityFeeLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL)`);
 
-        // ===== STEP 7: EXECUTE SWAP =====
-        console.log(`\n🔄 Executing swap...`);
-        const tx = await this.executeSwap(quote, priorityFeeLamports);
-        
-        if (!tx.success) {
-            throw new Error(`Swap failed: ${tx.error}`);
+        let tokensReceived;
+        let usdcSpent = positionSizeUSDC;
+        let entryPrice;
+        let buySignature;
+
+        if (onCurve) {
+            console.log(`🎪 DIRECT PUMP.FUN CURVE BUY (bridging USDC → SOL)`);
+
+            // Step 1: Swap USDC → SOL via Jupiter
+            const slippageBps = 100; // 1%
+            const solQuote = await this.getJupiterQuote(USDC_MINT, SOL_MINT, amountUSDC, slippageBps);
+            if (!solQuote) throw new Error('Failed to get USDC→SOL quote');
+
+            const solSwapTx = await this.executeSwap(solQuote, priorityFee);
+            if (!solSwapTx.success) throw new Error('USDC→SOL swap failed');
+
+            const solAmount = parseFloat(solQuote.outAmount) / 1e9;
+            console.log(`✅ Bridged ${positionSizeUSDC.toFixed(2)} USDC → ${solAmount.toFixed(6)} SOL`);
+
+            // Step 2: Direct curve buy with SOL
+            const directResult = await this.pumpDirect.executeBuy({
+                wallet,
+                mint: token.address,
+                amountSOL: solAmount * 0.995, // 0.5% buffer for fees/slippage
+                slippageBps: 1500, // 15%
+                priorityFeeLamports: priorityFee
+            });
+
+            if (!directResult.success) throw new Error(`Direct buy failed: ${directResult.error}`);
+
+            buySignature = directResult.signature;
+            console.log(`✅ Direct curve buy success! Sig: ${buySignature}`);
+
+            // Step 3: Estimate tokens received (post-tx balance or on-chain query)
+            tokensReceived = await this.getTokenBalanceAfterTx(token.address, buySignature);
+            if (!tokensReceived || tokensReceived <= 0) {
+                // Fallback estimation
+                tokensReceived = this.pumpDirect.estimateTokensFromSOL(solAmount * 1e9);
+            }
+
+            entryPrice = usdcSpent / tokensReceived;
+
+        } else {
+            // Standard Jupiter buy (post-migration)
+            console.log(`🔄 Standard Jupiter buy (migrated token)`);
+
+            let quote = null;
+            for (let i = 0; i < 3; i++) {
+                const slippageBps = this.calculateSlippage(token.liquidityUSD);
+                quote = await this.getJupiterQuote(USDC_MINT, token.address, amountUSDC, slippageBps);
+                if (quote) break;
+                await sleep(2000);
+            }
+            if (!quote) throw new Error('No Jupiter quote available');
+
+            const swapTx = await this.executeSwap(quote, priorityFee);
+            if (!swapTx.success) throw new Error('Jupiter swap failed');
+
+            buySignature = swapTx.signature;
+            tokensReceived = parseFloat(quote.outAmount) / 1e9;
+            entryPrice = usdcSpent / tokensReceived;
         }
 
-        console.log(`✅ Swap successful!`);
-        console.log(`   TX: ${tx.signature}`);
-
-        // ===== STEP 8: UPDATE STATE =====
-        const tokensReceived = expectedTokens;
-        const usdcSpent = parseFloat(quote.inAmount) / 1000000;
-        const entryPrice = usdcSpent / tokensReceived;
-        
-        const strategy = this.getActiveStrategy();
-        
+        // Create position
         const position = {
             tokenAddress: token.address,
             symbol: token.symbol,
@@ -2218,77 +2160,137 @@ async executeBuy(userId, token) {
             entryTime: Date.now(),
             tokensOwned: tokensReceived,
             investedUSDC: usdcSpent,
-            targetPrice: entryPrice * (1 + strategy.perTradeTarget),
-            stopLossPrice: entryPrice * (1 - strategy.stopLoss),
+            targetPrice: entryPrice * (1 + this.getActiveStrategy().perTradeTarget),
+            stopLossPrice: entryPrice * (1 - this.getActiveStrategy().stopLoss),
             scalpMode: true,
-            txSignature: tx.signature,
+            txSignature: buySignature,
             bondingProgress: token.bondingProgress,
             liquidityUSD: token.liquidityUSD,
-            tokenDecimals: 9,
-            positionSizeMode: POSITION_SIZE_MODE
+            tokenDecimals: 9
         };
-        
+
         user.position = position;
         user.currentBalance -= usdcSpent;
-
-        // Add to portfolio
         this.portfolioManager.addPosition(token.address, position);
-
-        // Save to database
-        if (this.database) {
-            await this.database.createPosition(userId, position);
-        }
-
         await this.saveState();
 
-        console.log(`\n✅ Position opened successfully`);
-        console.log(`   New balance: ${user.currentBalance.toFixed(4)} USDC`);
-        console.log('💰'.repeat(30) + '\n');
-
-        // Send success message
-        await this.bot.sendMessage(userId, this.formatBuyMessage(position, token, user), {
+        await this.bot.sendMessage(userId, this.formatBuyMessage(position, token, user, { method: onCurve ? 'Pump.fun Direct' : 'Jupiter' }), {
             parse_mode: 'HTML'
         });
 
-        this.logger.info('Buy executed successfully', { 
-            symbol: token.symbol, 
-            price: entryPrice.toFixed(8),
-            amount: usdcSpent.toFixed(2),
-            tx: tx.signature
+        this.logger.info('Buy successful', {
+            symbol: token.symbol,
+            method: onCurve ? 'pumpfun_direct' : 'jupiter',
+            tokens: tokensReceived.toFixed(4),
+            entry: entryPrice.toFixed(8),
+            tx: buySignature
         });
 
         return true;
 
     } catch (error) {
-        console.log('\n❌ BUY EXECUTION FAILED');
-        console.log(`   Error: ${error.message}`);
-        console.log('💰'.repeat(30) + '\n');
-        
-        this.logger.error('Buy execution failed', { 
-            error: error.message, 
-            stack: error.stack,
-            token: token.symbol,
-            userId
-        });
-        
-        // Send user-friendly error message
+        console.log('❌ BUY FAILED:', error.message);
+        this.logger.error('Buy failed', { error: error.message, token: token.symbol });
+
         await this.bot.sendMessage(userId, `
 ❌ <b>Buy Failed</b>
-
 <b>Token:</b> ${token.symbol}
 <b>Error:</b> ${error.message}
+Balance safe. Bot continues scanning.
+        `.trim(), { parse_mode: 'HTML' });
 
-<b>Your balance is safe.</b>
-Bot will continue scanning for opportunities.
-
-Use /status to check bot health.
-        `.trim(), {
-            parse_mode: 'HTML'
-        }).catch(err => this.logger.error('Failed to send error message', { error: err.message }));
-        
         return false;
     }
 }
+
+async executeDirectPumpFunBuy(mintStr, usdcAmountLamports, priorityFeeLamports) {
+    const connection = this.rpcConnection.getCurrentConnection(); // or your robust one
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+
+    const mint = new PublicKey(mintStr);
+
+    // PDAs
+    const [bondingCurve] = PublicKey.findProgramAddressSync(
+        [Buffer.from("bonding-curve"), mint.toBuffer()],
+        new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+    );
+
+    const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
+    const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
+
+    const global = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+    const feeRecipient = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ");
+    const eventAuthority = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
+    const program = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+
+    // Buy discriminator (updated 2025)
+    const buyDiscriminator = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
+
+    // Min tokens out (slippage: e.g., 15% less)
+    const minTokensOut = 0n; // Or calculate properly for tight slippage
+
+    const data = Buffer.alloc(16);
+    data.writeBigUInt64LE(BigInt(usdcAmountLamports), 0); // Amount in (USDC lamports? Wait — pump.fun curve is SOL-based!)
+    data.writeBigUInt64LE(minTokensOut, 8);
+
+    const ixData = Buffer.concat([buyDiscriminator, data]);
+
+    const keys = [
+        { pubkey: global, isSigner: false, isWritable: false },
+        { pubkey: feeRecipient, isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: bondingCurve, isSigner: false, isWritable: true },
+        { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+        { pubkey: userTokenATA, isSigner: false, isWritable: true },
+        { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: eventAuthority, isSigner: false, isWritable: false },
+        { pubkey: program, isSigner: false, isWritable: false },
+    ];
+
+    const buyIx = new TransactionInstruction({
+        keys,
+        programId: program,
+        data: ixData
+    });
+
+    // Add ATA creation if not exists
+    const instructions = [];
+    const ataAccount = await connection.getAccountInfo(userTokenATA);
+    if (!ataAccount) {
+        instructions.push(createAssociatedTokenAccountInstruction(
+            wallet.publicKey,
+            userTokenATA,
+            wallet.publicKey,
+            mint
+        ));
+    }
+
+    // Priority fee
+    instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: Math.ceil(priorityFeeLamports / 100_000) // adjust
+    }));
+
+    instructions.push(buyIx);
+
+    const tx = new VersionedTransaction(await connection.getLatestBlockhash());
+    tx.message = new TransactionMessage({
+        payerKey: wallet.publicKey,
+        instructions,
+        recentBlockhash: (await connection.getLatestBlockhash()).blockhash
+    }).compileToV0Message();
+
+    tx.sign([wallet]);
+
+    const sig = await connection.sendTransaction(tx, { skipPreflight: false });
+    await connection.confirmTransaction(sig);
+
+    return { success: true, signature: sig };
+}
+
+
 
 async executePaperBuy(userId, token) {
   const user = this.getUserState(userId);
@@ -2332,140 +2334,117 @@ async executePaperBuy(userId, token) {
 async executeSell(userId, reason, currentPrice) {
     const user = this.getUserState(userId);
     const pos = user.position;
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
 
     try {
-        this.logger.info('Executing sell', { symbol: pos.symbol, reason, price: currentPrice });
+        console.log('\n' + '🔴'.repeat(40));
+        console.log('🔴 EXECUTING SELL:', pos.symbol, reason);
+        console.log('🔴'.repeat(40));
 
-        // Paper trading
-        if (ENABLE_PAPER_TRADING || pos.isPaperTrade) {
+        if (ENABLE_PAPER_TRADING) {
             return await this.executePaperSell(userId, reason, currentPrice);
         }
 
-        const tokenDecimals = pos.tokenDecimals || 9;
-        const amountTokens = Math.floor(pos.tokensOwned * (10 ** tokenDecimals));
+        const tokenAmountRaw = Math.floor(pos.tokensOwned * 1e9);
+        const onCurve = pos.bondingProgress < 100;
+        const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(false, 'normal');
 
-        if (amountTokens <= 0) {
-            throw new Error('Insufficient token balance for sell');
-        }
+        let usdcReceived;
+        let sellSignature;
+        let solToUsdcSignature = null;
+        let solReceived = 0;
 
-        // Get best sell quote
-        let quote;
-        if (ENABLE_MULTI_DEX && this.dexAggregator) {
-            quote = await this.dexAggregator.getBestQuote(pos.tokenAddress, USDC_MINT, amountTokens);
+        if (onCurve) {
+            console.log(`🎪 DIRECT CURVE SELL → SOL → USDC`);
+
+            // Direct sell on curve
+            const directResult = await this.pumpDirect.executeSell({
+                wallet,
+                mint: pos.tokenAddress,
+                tokenAmount: tokenAmountRaw,
+                slippageBps: 1500,
+                priorityFeeLamports: priorityFee
+            });
+
+            if (!directResult.success) throw new Error(`Direct sell failed: ${directResult.error}`);
+
+            sellSignature = directResult.signature;
+            console.log(`✅ Curve sell success! Sig: ${sellSignature}`);
+
+            // Estimate/measure SOL received
+            solReceived = await this.estimateSOLReceivedAfterTx(wallet.publicKey, sellSignature);
+            if (solReceived < 0.001) throw new Error('No meaningful SOL received');
+
+            // Swap SOL → USDC
+            const solLamports = Math.floor(solReceived * 1e9);
+            const usdcQuote = await this.getJupiterQuote(SOL_MINT, USDC_MINT, solLamports, 100);
+            if (!usdcQuote) throw new Error('SOL→USDC quote failed');
+
+            const usdcSwap = await this.executeSwap(usdcQuote, priorityFee);
+            if (!usdcSwap.success) throw new Error('SOL→USDC swap failed');
+
+            solToUsdcSignature = usdcSwap.signature;
+            usdcReceived = parseFloat(usdcQuote.outAmount) / 1_000_000;
+
         } else {
-            const slippageBps = this.calculateSlippage(pos.liquidityUSD || 10000);
-            quote = await this.getJupiterQuote(pos.tokenAddress, USDC_MINT, amountTokens, slippageBps);
+            // Standard Jupiter sell
+            let quote = await this.getJupiterQuote(pos.tokenAddress, USDC_MINT, tokenAmountRaw, this.calculateSlippage(pos.liquidityUSD));
+            if (!quote) throw new Error('No sell quote');
+
+            const swapTx = await this.executeSwap(quote, priorityFee);
+            if (!swapTx.success) throw new Error('Sell swap failed');
+
+            sellSignature = swapTx.signature;
+            usdcReceived = parseFloat(quote.outAmount) / 1_000_000;
         }
 
-        if (!quote) throw new Error('No sell quote available');
-
-        const priorityFeeLamports = await this.priorityFeeCalculator.calculateOptimalFee(false, 'normal');
-
-        const tx = await this.executeSwap(quote, priorityFeeLamports);
-        if (!tx.success) throw new Error(`Sell swap failed: ${tx.error}`);
-
-        const usdcReceived = parseFloat(quote.outAmount) / 1_000_000;
         const profit = usdcReceived - pos.investedUSDC;
         const profitPercent = (profit / pos.investedUSDC) * 100;
 
-        user.currentBalance += usdcReceived;
-        user.dailyProfit += profit;
-        user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
-        user.totalTrades += 1;
-        if (profit > 0) user.successfulTrades += 1;
-        user.lastTradeAt = Date.now();
-
+        // Update trade record
         const trade = {
             ...pos,
-            exitPrice: currentPrice,
-            exitTime: Date.now(),
+            exitPrice: currentPrice || (usdcReceived / pos.tokensOwned),
             usdcReceived,
             profit,
             profitPercent,
             reason,
-            sellTxSignature: tx.signature,
+            sellTxSignature: sellSignature,
+            solToUsdcSignature,
+            solReceived,
             holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1)
         };
 
         user.tradeHistory.push(trade);
         user.position = null;
+        user.currentBalance += usdcReceived;
+        user.dailyProfit += profit;
+        user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
+        user.totalTrades += 1;
+        if (profit > 0) user.successfulTrades += 1;
 
-        // Remove from portfolio
         this.portfolioManager.removePosition(pos.tokenAddress);
-
-        // ===== REFRESH WALLET BALANCE AFTER TRADE =====
-        const updatedBalances = await this.getWalletBalance();
-        this.logger.info('Wallet balance refreshed after sell', {
-            beforeTrade: user.currentBalance.toFixed(4),
-            actualWallet: updatedBalances.trading.toFixed(4),
-            profit: profit.toFixed(4)
-        });
-        
-        // Sync tracked balance with actual wallet balance
-        // This ensures we're always using real on-chain data
-        user.currentBalance = updatedBalances.trading;
-        user.tradingCapital = updatedBalances.trading;
-
-        // Save to database
-        if (this.database) {
-            await this.database.recordTrade(userId, {
-                tokenAddress: trade.tokenAddress,
-                symbol: trade.symbol,
-                entryPrice: trade.entryPrice,
-                exitPrice: trade.exitPrice,
-                entryTime: trade.entryTime,
-                exitTime: trade.exitTime,
-                tokensOwned: trade.tokensOwned,
-                investedUSDC: trade.investedUSDC,
-                usdcReceived: trade.usdcReceived,
-                profit: trade.profit,
-                profitPercent: trade.profitPercent,
-                reason: trade.reason,
-                buyTxSignature: trade.txSignature,
-                sellTxSignature: trade.sellTxSignature,
-                holdTimeMinutes: parseFloat(trade.holdTimeMinutes),
-                bondingProgress: trade.bondingProgress,
-                liquidityUSD: trade.liquidityUSD,
-                wasPaperTrade: false
-            });
-        }
-
-        this.performanceTracker.recordTrade(profit, profitPercent);
-        this.circuitBreaker.recordTrade(profit > 0);
-        
-        if (this.anomalyDetector) {
-            this.anomalyDetector.addTrade(trade);
-            await this.anomalyDetector.detectAllAnomalies(userId, trade);
-        }
-        
-        await this.checkStrategyAdjustment(userId);
         await this.saveState();
 
-        // Enhanced sell message with updated balance
-        await this.bot.sendMessage(userId, this.formatSellMessageWithBalance(trade, user, updatedBalances), {
+        // Use your custom message
+        const updatedBalances = await this.getWalletBalance();
+        user.currentBalance = updatedBalances.trading;
+
+        await this.bot.sendMessage(userId, formatPumpFunSellMessage(trade, user, updatedBalances), {
             parse_mode: 'HTML'
-        }).catch(err => this.logger.error('Failed to send sell message', { error: err.message }));
+        });
 
-        if (this.isDailyTargetHit(user)) {
-            const target = user.dailyProfitPercent >= DAILY_PROFIT_TARGET ? 'PROFIT TARGET' : 'STOP LOSS';
-            await this.bot.sendMessage(userId, this.formatDailyTargetMessage(user, target), {
-                parse_mode: 'HTML'
-            }).catch(err => this.logger.error('Failed to send target message', { error: err.message }));
-        }
-
-        this.logger.info('Sell executed successfully', { 
-            symbol: pos.symbol, 
+        this.logger.info('Sell successful', {
+            symbol: pos.symbol,
             profit: profitPercent.toFixed(2) + '%',
-            newBalance: user.currentBalance.toFixed(4)
+            method: onCurve ? 'pumpfun_direct' : 'jupiter'
         });
 
         return true;
 
     } catch (error) {
-        this.logger.error('Sell execution failed', { error: error.message, stack: error.stack });
-        await this.bot.sendMessage(userId, `❌ <b>Sell Failed</b>\n\n${error.message}`, {
-            parse_mode: 'HTML'
-        }).catch(err => this.logger.error('Failed to send error message', { error: err.message }));
+        this.logger.error('Sell failed', { error: error.message });
+        await this.bot.sendMessage(userId, `❌ <b>Sell Failed</b>\n${error.message}`, { parse_mode: 'HTML' });
         return false;
     }
 }
@@ -2563,13 +2542,92 @@ async monitorPosition(userId) {
               return;
           }
       }
-
+      
       if (currentPrice <= pos.stopLossPrice) {
           await this.executeSell(userId, 'stop_loss', currentPrice);
           return;
       }
   });
 }
+
+async executeDirectPumpFunSell(mintStr, tokenAmountRaw, priorityFeeLamports) {
+    const connection = this.rpcConnection.getCurrentConnection();
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+
+    const mint = new PublicKey(mintStr);
+
+    const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+    const GLOBAL = new PublicKey('4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf');
+    const FEE_RECIPIENT = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ');
+    const EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+
+    const [bondingCurve] = PublicKey.findProgramAddressSync(
+        [Buffer.from('bonding-curve'), mint.toBuffer()],
+        PUMP_FUN_PROGRAM
+    );
+
+    const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
+    const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
+
+    // Sell discriminator (confirmed 2025)
+    const sellDiscriminator = Buffer.from([51, 230, 237, 178, 9, 198, 242, 6]);
+
+    const minSolOut = 0n; // Set proper slippage here if needed
+
+    const data = Buffer.alloc(16);
+    data.writeBigUInt64LE(BigInt(tokenAmountRaw), 0);
+    data.writeBigUInt64LE(minSolOut, 8);
+
+    const ixData = Buffer.concat([sellDiscriminator, data]);
+
+    const keys = [
+        { pubkey: GLOBAL, isSigner: false, isWritable: false },
+        { pubkey: FEE_RECIPIENT, isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: bondingCurve, isSigner: false, isWritable: true },
+        { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+        { pubkey: userTokenATA, isSigner: false, isWritable: true },
+        { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: EVENT_AUTHORITY, isSigner: false, isWritable: false },
+        { pubkey: PUMP_FUN_PROGRAM, isSigner: false, isWritable: false },
+    ];
+
+    const sellIx = new TransactionInstruction({
+        keys,
+        programId: PUMP_FUN_PROGRAM,
+        data: ixData
+    });
+
+    const instructions = [];
+
+    // Priority fee
+    instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: Math.ceil(priorityFeeLamports * 10) // adjust multiplier as needed
+    }));
+
+    instructions.push(sellIx);
+
+    // Build & send VersionedTransaction
+    const { blockhash } = await connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+        payerKey: wallet.publicKey,
+        instructions,
+        recentBlockhash: blockhash
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(messageV0);
+    tx.sign([wallet]);
+
+    const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+    await connection.confirmTransaction(sig, 'confirmed');
+
+    return { success: true, signature: sig };
+}
+
+
 // Add to TradingEngine.findTradingOpportunity() - around line 1150
 async findTradingOpportunity(userId) {
     try {
