@@ -15,8 +15,7 @@ global.fetch = async (input, init) => {
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 axiosRetry(axios, { retries: 3 });
-const PumpFunDirect = require('./modules/pumpfun-direct');
-
+const PumpFunDirect = require('../modules/pumpfun-direct');
 
 console.log('🚀 Bot starting...', new Date().toISOString());
 process.on('exit', (code) => {
@@ -1421,85 +1420,36 @@ async getWalletBalance() {
         console.log('\n' + '='.repeat(60));
         console.log('FETCHING WALLET BALANCE');
         console.log('='.repeat(60));
-        
-        // Get native SOL balance
-        const operation = async (conn) => {
-            const balance = await conn.getBalance(this.wallet.publicKey);
-            return balance / LAMPORTS_PER_SOL;
-        };
 
-        const solBalance = await this.rpcConnection.executeWithFallback(operation, 'getWalletBalance');
-        
-        console.log('\nNative SOL Balance:', solBalance.toFixed(4));
-        
-        this.logger.info('Native SOL balance fetched', { 
-            sol: solBalance.toFixed(4),
-            lamports: Math.floor(solBalance * LAMPORTS_PER_SOL)
-        });
-        
-        // Get all token accounts
+        const operation = async (conn) => await conn.getBalance(this.wallet.publicKey);
+        const lamports = await this.rpcConnection.executeWithFallback(operation, 'getBalance');
+        const nativeSOL = lamports / LAMPORTS_PER_SOL;
+
         const tokenBalances = await this.getAllTokenBalances();
-        
-        console.log('\nAll Token Balances:');
-        tokenBalances.forEach(t => {
-            if (t.balance > 0) {
-                console.log(`  ${t.symbol}: ${t.balance.toFixed(4)}`);
-            }
-        });
-        
-        // Find specific tokens
-        const usdcBalance = tokenBalances.find(t => 
-            t.mint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' ||
-            t.symbol === 'USDC'
-        )?.balance || 0;
-        
-        const wsolBalance = tokenBalances.find(t => 
-            t.mint === 'So11111111111111111111111111111111111111112' ||
-            t.symbol === 'WSOL'
-        )?.balance || 0;
-        
-        console.log('\nDetected Balances:');
-        console.log('  Native SOL:', solBalance.toFixed(4));
-        console.log('  Wrapped SOL:', wsolBalance.toFixed(4));
-        console.log('  USDC:', usdcBalance.toFixed(4));
-        console.log('  Total SOL:', (solBalance + wsolBalance).toFixed(4));
-        
-        const totalSol = solBalance + wsolBalance;
-        const tradingBalance = usdcBalance > 0.01 ? usdcBalance : totalSol;
-        
-        console.log('\nTrading Balance:', tradingBalance.toFixed(4), usdcBalance > 0.01 ? 'USDC' : 'SOL');
+
+        const usdcBalance = tokenBalances.find(t => t.mint === USDC_MINT)?.balance || 0;
+        const wsolBalance = tokenBalances.find(t => t.mint === SOL_MINT)?.balance || 0;
+
+        console.log(`\nNative SOL: ${nativeSOL.toFixed(6)}`);
+        console.log(`Wrapped SOL: ${wsolBalance.toFixed(6)}`);
+        console.log(`USDC: ${usdcBalance.toFixed(2)}`);
+
+        // Trading balance = native SOL (priority) or USDC if large
+        const tradingBalance = nativeSOL + wsolBalance; // Pure SOL focus
+
+        console.log(`\nTrading Balance: ${tradingBalance.toFixed(6)} SOL`);
         console.log('='.repeat(60) + '\n');
-        
-        this.logger.info('Token balances fetched', { 
-            usdc: usdcBalance.toFixed(2),
-            wsol: wsolBalance.toFixed(4),
-            totalTokens: tokenBalances.length,
-            trading: tradingBalance.toFixed(4)
-        });
-        
+
         return {
-            sol: solBalance,
+            nativeSOL,
             wsol: wsolBalance,
-            totalSol: totalSol,
             usdc: usdcBalance,
-            trading: tradingBalance,
-            allTokens: tokenBalances.filter(t => t.balance > 0)
+            trading: tradingBalance, // This is now SOL
+            allTokens: tokenBalances
         };
-        
     } catch (error) {
-        console.error('BALANCE FETCH ERROR:', error);
-        this.logger.error('Failed to get wallet balance', { 
-            error: error.message,
-            stack: error.stack
-        });
-        return { 
-            sol: 0, 
-            wsol: 0,
-            totalSol: 0,
-            usdc: 0, 
-            trading: 0,
-            allTokens: []
-        };
+        logger.error('Wallet balance fetch failed', { error: error.message });
+        return { nativeSOL: 0, trading: 0, usdc: 0, allTokens: [] };
     }
 }
 
@@ -2065,7 +2015,7 @@ Combined Value: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)}
 
 async executeBuy(userId, token) {
     const user = this.getUserState(userId);
-    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY)); // Your wallet
+    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
 
     try {
         console.log('\n' + '💰'.repeat(40));
@@ -2076,12 +2026,11 @@ async executeBuy(userId, token) {
             return await this.executePaperBuy(userId, token);
         }
 
-        const positionSizeUSDC = this.calculatePositionSize(user, token.liquidityUSD);
-        if (positionSizeUSDC > user.currentBalance) {
-            throw new Error('Insufficient balance');
+        // Position size now in native SOL
+        const positionSizeSOL = this.calculatePositionSize(user, token.liquidityUSD); // Your existing function — now returns SOL amount
+        if (positionSizeSOL > user.currentBalance) {
+            throw new Error('Insufficient SOL balance');
         }
-
-        const amountUSDC = Math.floor(positionSizeUSDC * 1_000_000); // 6 decimals
 
         const onCurve = token.bondingProgress < 100;
         const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(
@@ -2090,76 +2039,66 @@ async executeBuy(userId, token) {
         );
 
         let tokensReceived;
-        let usdcSpent = positionSizeUSDC;
-        let entryPrice;
+        let solSpent = positionSizeSOL;
+        let entryPrice; // Price in SOL per token
         let buySignature;
 
         if (onCurve) {
-            console.log(`🎪 DIRECT PUMP.FUN CURVE BUY (bridging USDC → SOL)`);
+            console.log(`🎪 DIRECT PUMP.FUN CURVE BUY (${solSpent.toFixed(6)} SOL)`);
 
-            // Step 1: Swap USDC → SOL via Jupiter
-            const slippageBps = 100; // 1%
-            const solQuote = await this.getJupiterQuote(USDC_MINT, SOL_MINT, amountUSDC, slippageBps);
-            if (!solQuote) throw new Error('Failed to get USDC→SOL quote');
-
-            const solSwapTx = await this.executeSwap(solQuote, priorityFee);
-            if (!solSwapTx.success) throw new Error('USDC→SOL swap failed');
-
-            const solAmount = parseFloat(solQuote.outAmount) / 1e9;
-            console.log(`✅ Bridged ${positionSizeUSDC.toFixed(2)} USDC → ${solAmount.toFixed(6)} SOL`);
-
-            // Step 2: Direct curve buy with SOL
+            // Direct buy with native SOL — no bridge needed
             const directResult = await this.pumpDirect.executeBuy({
                 wallet,
                 mint: token.address,
-                amountSOL: solAmount * 0.995, // 0.5% buffer for fees/slippage
+                amountSOL: solSpent * 0.995, // 0.5% buffer for fees/slippage
                 slippageBps: 1500, // 15%
                 priorityFeeLamports: priorityFee
             });
 
-            if (!directResult.success) throw new Error(`Direct buy failed: ${directResult.error}`);
+            if (!directResult.success) {
+                throw new Error(`Direct curve buy failed: ${directResult.error}`);
+            }
 
             buySignature = directResult.signature;
             console.log(`✅ Direct curve buy success! Sig: ${buySignature}`);
 
-            // Step 3: Estimate tokens received (post-tx balance or on-chain query)
-            tokensReceived = await this.getTokenBalanceAfterTx(token.address, buySignature);
-            if (!tokensReceived || tokensReceived <= 0) {
-                // Fallback estimation
-                tokensReceived = this.pumpDirect.estimateTokensFromSOL(solAmount * 1e9);
-            }
+            // Get tokens received (from post-tx balance or estimation)
+            tokensReceived = await this.getTokenBalanceAfterTx(token.address, buySignature) || 
+                             this.pumpDirect.estimateTokensFromSOL(solSpent * 1e9);
 
-            entryPrice = usdcSpent / tokensReceived;
+            entryPrice = solSpent / tokensReceived;
 
         } else {
-            // Standard Jupiter buy (post-migration)
-            console.log(`🔄 Standard Jupiter buy (migrated token)`);
+            // Post-migration: Jupiter swap SOL → Token
+            console.log(`🔄 Jupiter buy (migrated token) — ${solSpent.toFixed(6)} SOL`);
+
+            const amountSOLLamports = Math.floor(solSpent * 1e9);
 
             let quote = null;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 5; i++) {
                 const slippageBps = this.calculateSlippage(token.liquidityUSD);
-                quote = await this.getJupiterQuote(USDC_MINT, token.address, amountUSDC, slippageBps);
+                quote = await this.getJupiterQuote(SOL_MINT, token.address, amountSOLLamports, slippageBps);
                 if (quote) break;
                 await sleep(2000);
             }
-            if (!quote) throw new Error('No Jupiter quote available');
+            if (!quote) throw new Error('No Jupiter quote available (SOL → Token)');
 
             const swapTx = await this.executeSwap(quote, priorityFee);
             if (!swapTx.success) throw new Error('Jupiter swap failed');
 
             buySignature = swapTx.signature;
             tokensReceived = parseFloat(quote.outAmount) / 1e9;
-            entryPrice = usdcSpent / tokensReceived;
+            entryPrice = solSpent / tokensReceived;
         }
 
-        // Create position
+        // Create position (now in SOL)
         const position = {
             tokenAddress: token.address,
             symbol: token.symbol,
-            entryPrice,
+            entryPrice, // SOL per token
             entryTime: Date.now(),
             tokensOwned: tokensReceived,
-            investedUSDC: usdcSpent,
+            investedSOL: solSpent,        // ← Changed from investedUSDC
             targetPrice: entryPrice * (1 + this.getActiveStrategy().perTradeTarget),
             stopLossPrice: entryPrice * (1 - this.getActiveStrategy().stopLoss),
             scalpMode: true,
@@ -2170,19 +2109,21 @@ async executeBuy(userId, token) {
         };
 
         user.position = position;
-        user.currentBalance -= usdcSpent;
+        user.currentBalance -= solSpent;  // Subtract SOL
         this.portfolioManager.addPosition(token.address, position);
         await this.saveState();
 
-        await this.bot.sendMessage(userId, this.formatBuyMessage(position, token, user, { method: onCurve ? 'Pump.fun Direct' : 'Jupiter' }), {
+        // Updated message — now shows SOL
+        await this.bot.sendMessage(userId, this.formatBuyMessageSOL(position, token, user, { method: onCurve ? 'Pump.fun Direct' : 'Jupiter' }), {
             parse_mode: 'HTML'
         });
 
         this.logger.info('Buy successful', {
             symbol: token.symbol,
             method: onCurve ? 'pumpfun_direct' : 'jupiter',
+            invested: solSpent.toFixed(6) + ' SOL',
             tokens: tokensReceived.toFixed(4),
-            entry: entryPrice.toFixed(8),
+            entry: entryPrice.toFixed(10) + ' SOL/token',
             tx: buySignature
         });
 
@@ -2349,15 +2290,14 @@ async executeSell(userId, reason, currentPrice) {
         const onCurve = pos.bondingProgress < 100;
         const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(false, 'normal');
 
-        let usdcReceived;
+        let solReceived;
         let sellSignature;
-        let solToUsdcSignature = null;
-        let solReceived = 0;
+        let entryPriceSOL = pos.entryPrice; // Already in SOL/token from buy
+        let exitPriceSOL;
 
         if (onCurve) {
-            console.log(`🎪 DIRECT CURVE SELL → SOL → USDC`);
+            console.log(`🎪 DIRECT CURVE SELL → native SOL back`);
 
-            // Direct sell on curve
             const directResult = await this.pumpDirect.executeSell({
                 wallet,
                 mint: pos.tokenAddress,
@@ -2366,85 +2306,96 @@ async executeSell(userId, reason, currentPrice) {
                 priorityFeeLamports: priorityFee
             });
 
-            if (!directResult.success) throw new Error(`Direct sell failed: ${directResult.error}`);
+            if (!directResult.success) {
+                throw new Error(`Direct curve sell failed: ${directResult.error}`);
+            }
 
             sellSignature = directResult.signature;
             console.log(`✅ Curve sell success! Sig: ${sellSignature}`);
 
-            // Estimate/measure SOL received
+            // Get SOL received (post-tx native balance delta or estimation)
             solReceived = await this.estimateSOLReceivedAfterTx(wallet.publicKey, sellSignature);
-            if (solReceived < 0.001) throw new Error('No meaningful SOL received');
+            if (solReceived < 0.001) {
+                throw new Error('No meaningful SOL received from sell');
+            }
 
-            // Swap SOL → USDC
-            const solLamports = Math.floor(solReceived * 1e9);
-            const usdcQuote = await this.getJupiterQuote(SOL_MINT, USDC_MINT, solLamports, 100);
-            if (!usdcQuote) throw new Error('SOL→USDC quote failed');
-
-            const usdcSwap = await this.executeSwap(usdcQuote, priorityFee);
-            if (!usdcSwap.success) throw new Error('SOL→USDC swap failed');
-
-            solToUsdcSignature = usdcSwap.signature;
-            usdcReceived = parseFloat(usdcQuote.outAmount) / 1_000_000;
+            exitPriceSOL = solReceived / pos.tokensOwned;
 
         } else {
-            // Standard Jupiter sell
-            let quote = await this.getJupiterQuote(pos.tokenAddress, USDC_MINT, tokenAmountRaw, this.calculateSlippage(pos.liquidityUSD));
-            if (!quote) throw new Error('No sell quote');
+            // Post-migration: Jupiter token → SOL
+            console.log(`🔄 Jupiter sell (migrated token) → SOL`);
+
+            let quote = null;
+            for (let i = 0; i < 5; i++) {
+                const slippageBps = this.calculateSlippage(pos.liquidityUSD);
+                quote = await this.getJupiterQuote(pos.tokenAddress, SOL_MINT, tokenAmountRaw, slippageBps);
+                if (quote) break;
+                await sleep(2000);
+            }
+            if (!quote) throw new Error('No Jupiter quote available (Token → SOL)');
 
             const swapTx = await this.executeSwap(quote, priorityFee);
-            if (!swapTx.success) throw new Error('Sell swap failed');
+            if (!swapTx.success) throw new Error('Jupiter swap failed');
 
             sellSignature = swapTx.signature;
-            usdcReceived = parseFloat(quote.outAmount) / 1_000_000;
+            solReceived = parseFloat(quote.outAmount) / 1e9;
+            exitPriceSOL = solReceived / pos.tokensOwned;
         }
 
-        const profit = usdcReceived - pos.investedUSDC;
-        const profitPercent = (profit / pos.investedUSDC) * 100;
+        // Calculate profit in SOL
+        const profitSOL = solReceived - pos.investedSOL;
+        const profitPercent = (profitSOL / pos.investedSOL) * 100;
 
-        // Update trade record
+        // Create final trade record
         const trade = {
             ...pos,
-            exitPrice: currentPrice || (usdcReceived / pos.tokensOwned),
-            usdcReceived,
-            profit,
+            exitPrice: exitPriceSOL,           // SOL per token
+            solReceived,
+            profitSOL,
             profitPercent,
             reason,
             sellTxSignature: sellSignature,
-            solToUsdcSignature,
-            solReceived,
             holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1)
         };
 
+        // Update user state
         user.tradeHistory.push(trade);
         user.position = null;
-        user.currentBalance += usdcReceived;
-        user.dailyProfit += profit;
+        user.currentBalance += solReceived;  // Add SOL back
+        user.dailyProfit += profitSOL;
         user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
         user.totalTrades += 1;
-        if (profit > 0) user.successfulTrades += 1;
+        if (profitSOL > 0) user.successfulTrades += 1;
 
         this.portfolioManager.removePosition(pos.tokenAddress);
         await this.saveState();
 
-        // Use your custom message
+        // Sync with real wallet (native SOL)
         const updatedBalances = await this.getWalletBalance();
-        user.currentBalance = updatedBalances.trading;
+        user.currentBalance = updatedBalances.nativeSOL || updatedBalances.trading; // Use native SOL
 
-        await this.bot.sendMessage(userId, formatPumpFunSellMessage(trade, user, updatedBalances), {
+        // Send updated sell message (SOL version)
+        await this.bot.sendMessage(userId, this.formatSellMessageSOL(trade, user, updatedBalances), {
             parse_mode: 'HTML'
         });
 
         this.logger.info('Sell successful', {
             symbol: pos.symbol,
-            profit: profitPercent.toFixed(2) + '%',
-            method: onCurve ? 'pumpfun_direct' : 'jupiter'
+            method: onCurve ? 'pumpfun_direct' : 'jupiter',
+            received: solReceived.toFixed(6) + ' SOL',
+            profit: profitPercent.toFixed(2) + '%'
         });
 
         return true;
 
     } catch (error) {
-        this.logger.error('Sell failed', { error: error.message });
-        await this.bot.sendMessage(userId, `❌ <b>Sell Failed</b>\n${error.message}`, { parse_mode: 'HTML' });
+        this.logger.error('Sell failed', { error: error.message, symbol: pos?.symbol });
+        await this.bot.sendMessage(userId, `
+❌ <b>Sell Failed</b>
+<b>Token:</b> ${pos?.symbol || 'Unknown'}
+<b>Error:</b> ${error.message}
+Position safe. Bot continues monitoring.
+        `.trim(), { parse_mode: 'HTML' });
         return false;
     }
 }
@@ -3302,57 +3253,86 @@ shouldSendNotification(type, userId) {
     return true;
 }
 
-formatBuyMessage(pos, token, user) {
-  return `
-🚀 <b>BUY EXECUTED</b>
+formatBuyMessage(pos, token, user, options = {}) {
+    const method = options.method || 'Unknown';
+    const txUrl = `https://solscan.io/tx/${pos.txSignature}`;
+    const birdeyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
 
-<b>Token:</b> ${pos.symbol}
-<b>Entry Price:</b> $${pos.entryPrice.toFixed(8)}
-<b>Position Size:</b> ${pos.investedUSDC.toFixed(2)} USDC
-<b>Tokens:</b> ${pos.tokensOwned.toFixed(4)}
+    const strategy = this.getActiveStrategy();
 
-📊 <b>Market Data:</b>
-Bonding: ${token.bondingProgress.toFixed(1)}%
-Liquidity: $${token.liquidityUSD.toFixed(0)}
+    return `
+🚀 <b>BUY EXECUTED — ${method}</b>
+<b>${pos.symbol}</b>
+<code>${pos.tokenAddress.substring(0, 8)}...${pos.tokenAddress.slice(-6)}</code>
 
-🎯 <b>Targets:</b>
-Scalp: ${(this.getActiveStrategy().scalpMin * 100).toFixed(0)}-${(this.getActiveStrategy().scalpMax * 100).toFixed(0)}%
-Extended: ${(this.getActiveStrategy().extendedTarget * 100).toFixed(0)}%
-Stop: -${(this.getActiveStrategy().stopLoss * 100).toFixed(0)}%
+💰 <b>Trade Details</b>
+├ Invested: <b>${pos.investedSOL.toFixed(6)} SOL</b>
+├ Tokens Received: <b>${this.formatNumber(pos.tokensOwned, 2)}</b>
+└ Entry Price: <b>${pos.entryPrice.toFixed(10)} SOL/token</b>
 
-💼 <b>Balance:</b> ${user.currentBalance.toFixed(2)} USDC
+📊 <b>Market Context</b>
+├ Bonding Progress: <b>${token.bondingProgress.toFixed(1)}%</b>
+├ Liquidity: <b>$${this.formatNumber(token.liquidityUSD)}</b>
+└ Volume Spike: <b>${token.volumeSpike?.toFixed(2) || 'N/A'}x</b>
 
-📝 <b>TX:</b> <code>${pos.txSignature}</code>
-  `.trim();
+🎯 <b>Targets</b>
+├ Scalp: <b>${(strategy.scalpMin * 100).toFixed(0)}% – ${(strategy.scalpMax * 100).toFixed(0)}%</b>
+├ Extended Hold: <b>+${(strategy.extendedTarget * 100).toFixed(0)}%</b>
+└ Stop Loss: <b>-${(strategy.stopLoss * 100).toFixed(0)}%</b>
+
+💼 <b>Portfolio</b>
+├ Available Balance: <b>${user.currentBalance.toFixed(6)} SOL</b>
+├ In Position: <b>${pos.investedSOL.toFixed(6)} SOL</b>
+└ Active Positions: <b>${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}</b>
+
+🔗 <a href="${txUrl}">View TX on Solscan</a> • <a href="${birdeyeUrl}">Live Chart</a>
+
+<i>Direct execution • ${new Date().toLocaleTimeString()} UTC</i>
+    `.trim();
 }
 
 formatSellMessage(trade, user) {
-  const emoji = trade.profit > 0 ? '✅' : '❌';
-  const reasonLabels = {
-      'scalp_profit': '🎯 Scalp Profit',
-      'extended_profit': '💰 Extended Profit',
-      'stop_loss': '🛑 Stop Loss'
-  };
+    const emoji = trade.profitSOL > 0 ? '✅' : '❌';
+    const color = trade.profitSOL > 0 ? '🟢' : '🔴';
 
-  return `
-${emoji} <b>${reasonLabels[trade.reason] || trade.reason.toUpperCase()}</b>
+    const reasonLabels = {
+        'scalp_profit': '⚡ Scalp Profit',
+        'extended_profit': '🎯 Extended Target Hit',
+        'stop_loss': '🛡️ Stop Loss Triggered'
+    };
 
-<b>Token:</b> ${trade.symbol}
-<b>Entry:</b> $${trade.entryPrice.toFixed(8)}
-<b>Exit:</b> $${trade.exitPrice.toFixed(8)}
-<b>Hold:</b> ${trade.holdTimeMinutes}m
+    const reason = reasonLabels[trade.reason] || trade.reason.toUpperCase();
 
-💵 <b>Performance:</b>
-Invested: ${trade.investedUSDC.toFixed(2)} USDC
-Received: ${trade.usdcReceived.toFixed(2)} USDC
-P&L: ${emoji} ${trade.profit.toFixed(2)} (${trade.profitPercent.toFixed(2)}%)
+    const txUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+    const birdeyeUrl = `https://birdeye.so/token/${trade.tokenAddress}?chain=solana`;
 
-💼 <b>Account:</b>
-Balance: ${user.currentBalance.toFixed(2)} USDC
-Daily: ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+    return `
+${emoji} <b>POSITION CLOSED ${color}</b>
+<b>${trade.symbol}</b>
+└ ${reason}
 
-📝 <b>TX:</b> <code>${trade.sellTxSignature}</code>
-  `.trim();
+💰 <b>Trade Summary</b>
+├ Entry Price: <b>${trade.entryPrice.toFixed(10)} SOL/token</b>
+├ Exit Price: <b>${trade.exitPrice.toFixed(10)} SOL/token</b>
+├ Price Change: <b>${trade.profitPercent >= 0 ? '+' : ''}${trade.profitPercent.toFixed(2)}%</b>
+└ Hold Time: <b>${trade.holdTimeMinutes}m</b>
+
+📊 <b>Financial Result (SOL)</b>
+├ Invested: <b>${trade.investedSOL.toFixed(6)} SOL</b>
+├ Received: <b>${trade.solReceived.toFixed(6)} SOL</b>
+├ Net P&L: <b>${trade.profitSOL >= 0 ? '+' : ''}${trade.profitSOL.toFixed(6)} SOL</b>
+└ Return: <b>${trade.profitPercent >= 0 ? '+' : ''}${trade.profitPercent.toFixed(2)}%</b>
+
+💼 <b>Account Update</b>
+├ Current Balance: <b>${user.currentBalance.toFixed(6)} SOL</b>
+├ Daily P&L: <b>${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%</b>
+├ Total Trades: <b>${user.totalTrades}</b>
+└ Win Rate: <b>${((user.successfulTrades / user.totalTrades) * 100).toFixed(1)}%</b>
+
+🔗 <a href="${txUrl}">View Sell TX</a> • <a href="${birdeyeUrl}">Live Chart</a>
+
+<i>${new Date().toLocaleTimeString()} UTC</i>
+    `.trim();
 }
 
 formatDailyTargetMessage(user, target) {
