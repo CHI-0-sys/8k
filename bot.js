@@ -5,11 +5,11 @@ console.log('Forced DNS to Google + Cloudflare');
 
 const originalFetch = global.fetch;
 global.fetch = async (input, init) => {
-  let url = typeof input === 'string' ? input : input.url;
-  if (url.includes('quote-api.jup.ag')) {
-    url = url.replace('quote-api.jup.ag', '104.18.20.123');
-  }
-  return originalFetch(url, init);
+    let url = typeof input === 'string' ? input : input.url;
+    if (url.includes('quote-api.jup.ag')) {
+        url = url.replace('quote-api.jup.ag', '104.18.20.123');
+    }
+    return originalFetch(url, init);
 };
 
 const axios = require('axios');
@@ -33,7 +33,7 @@ process.on('unhandledRejection', (reason, promise) => {
     // Don't exit on rejection - just log it
 });
 
-require('dotenv').config(); 
+require('dotenv').config();
 
 if (global.gc) {
     console.log('✅ Garbage collection enabled');
@@ -49,6 +49,8 @@ console.log('USE_WEBHOOK:', process.env.USE_WEBHOOK);
 
 
 const path = require('path');
+const Mutex = require('./modules/mutex');
+const LRUCache = require('./modules/lru-cache');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const winston = require('winston');
@@ -62,15 +64,15 @@ const fs = require('fs');
 
 const requiredDirs = ['logs', 'data'];
 requiredDirs.forEach(dir => {
-  const dirPath = path.join(__dirname, dir);
-  if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
-      console.log(`✅ Created directory: ${dir}/`);
-  }
+    const dirPath = path.join(__dirname, dir);
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+        console.log(`✅ Created directory: ${dir}/`);
+    }
 });
 
 const logDir = path.join(__dirname, 'logs');
-const dataDir = path.join(__dirname, 'data'); 
+const dataDir = path.join(__dirname, 'data');
 const MIN_JUPITER_AMOUNT_LAMPORTS = Math.floor(0.0025 * LAMPORTS_PER_SOL);
 
 
@@ -81,8 +83,11 @@ const BacktestEngine = require('./modules/backtest');
 const DEXAggregator = require('./modules/dex-aggregator');
 const MEVProtection = require('./modules/mev-protection');
 const HealthMonitor = require('./modules/health-monitor');
-const AnomalyDetector = require('./modules/anomaly-detector'); 
+const AnomalyDetector = require('./modules/anomaly-detector');
+const PumpMonitor = require('./modules/pump-monitor');
+const TokenFilter = require('./modules/token-filter');
 
+const BondingCurveManager = require('./modules/bonding-curve');
 
 // ============ WINSTON LOGGING SETUP ============
 const logger = winston.createLogger({
@@ -114,10 +119,10 @@ axiosRetry(jupiterClient, {
     retryDelay: axiosRetry.exponentialDelay,
     retryCondition: (error) => {
         return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
-               (error.response && error.response.status >= 500) ||
-               error.code === 'ECONNRESET' ||
-               error.code === 'ETIMEDOUT' ||
-               error.code === 'ENOTFOUND';
+            (error.response && error.response.status >= 500) ||
+            error.code === 'ECONNRESET' ||
+            error.code === 'ETIMEDOUT' ||
+            error.code === 'ENOTFOUND';
     },
     onRetry: (retryCount, error) => {
         console.log(`🔄 Jupiter retry ${retryCount}/5: ${error.message}`);
@@ -160,27 +165,27 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const AUTHORIZED_USERS = process.env.AUTHORIZED_USERS?.split(',') || [];
 
 // RPC Configuration
-const SOLANA_RPC_URL = process.env.PRIMARY_RPC_URL || 
-                       process.env.SOLANA_RPC_URL || 
-                       'https://api.mainnet-beta.solana.com';
+const SOLANA_RPC_URL = process.env.PRIMARY_RPC_URL ||
+    process.env.SOLANA_RPC_URL ||
+    'https://api.mainnet-beta.solana.com';
 
-const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS || 
-  'https://api.mainnet-beta.solana.com,https://rpc.ankr.com/solana')
-  .split(',')
-  .filter(url => url.trim());
-  
+const RPC_FALLBACK_URLS = (process.env.RPC_FALLBACK_URLS ||
+    'https://api.mainnet-beta.solana.com,https://rpc.ankr.com/solana')
+    .split(',')
+    .filter(url => url.trim());
+
 // const PORT = process.env.PORT || 4002;
 const USE_WEBHOOK = process.env.USE_WEBHOOK === 'false';
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // Trading Parameters
-const DAILY_PROFIT_TARGET = parseFloat(process.env.DAILY_PROFIT_TARGET) || 0.32;
-const DAILY_STOP_LOSS = parseFloat(process.env.DAILY_STOP_LOSS) || 0.06;
-const PER_TRADE_PROFIT_TARGET = parseFloat(process.env.PER_TRADE_PROFIT_TARGET) || 0.13;
-const PER_TRADE_STOP_LOSS = parseFloat(process.env.PER_TRADE_STOP_LOSS) || 0.03;
-const SCALP_PROFIT_MIN = parseFloat(process.env.SCALP_PROFIT_MIN) || 0.07;
-const SCALP_PROFIT_MAX = parseFloat(process.env.SCALP_PROFIT_MAX) || 0.13;
-const EXTENDED_HOLD_MINUTES = parseInt(process.env.EXTENDED_HOLD_MINUTES) || 15;
+const DAILY_PROFIT_TARGET = parseFloat(process.env.DAILY_PROFIT_TARGET) || 0.20; // 20% daily
+const DAILY_STOP_LOSS = parseFloat(process.env.DAILY_STOP_LOSS) || 0.15;
+const PER_TRADE_PROFIT_TARGET = 0.20; // Increased to 20%
+const PER_TRADE_STOP_LOSS = 0.15; // Tightened to 15%
+const SCALP_PROFIT_MIN = 0.08;
+const SCALP_PROFIT_MAX = 0.15;
+const EXTENDED_HOLD_MINUTES = 5; // 5 minute max hold
 const EXTENDED_HOLD_TARGET = parseFloat(process.env.EXTENDED_HOLD_TARGET) || 0.28;
 const COOLDOWN_HOURS = parseInt(process.env.COOLDOWN_HOURS) || 24;
 const MIN_LIQUIDITY_USD = parseFloat(process.env.MIN_LIQUIDITY_USD) || 8000;
@@ -201,7 +206,7 @@ const MAX_POSITION_SIZE = parseFloat(process.env.MAX_POSITION_SIZE) || 120;
 const MIN_POSITION_SIZE = parseFloat(process.env.MIN_POSITION_SIZE) || 10;
 
 // Portfolio Settings
-const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS) || 3;
+const MAX_CONCURRENT_POSITIONS = 3;
 const MAX_POSITION_PER_TOKEN = parseFloat(process.env.MAX_POSITION_PER_TOKEN) || 0.4; // 40% max per token
 const ENABLE_PORTFOLIO_REBALANCING = process.env.ENABLE_PORTFOLIO_REBALANCING === 'true';
 
@@ -266,350 +271,344 @@ const CIRCUIT_BREAKER_COOLDOWN_MINUTES = parseInt(process.env.CIRCUIT_BREAKER_CO
 
 // ============ UTILITY FUNCTIONS ============
 async function fetchWithTimeout(url, options = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
-  try {
-      const response = await fetch(url, {
-          ...options,
-          signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      return response;
-  } catch (error) {
-      clearTimeout(timeoutId);
-      if (error.name === 'AbortError') {
-          throw new Error(`Request timeout after ${timeout}ms`);
-      }
-      throw error;
-  }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            throw new Error(`Request timeout after ${timeout}ms`);
+        }
+        throw error;
+    }
 }
 
 async function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ============ MUTEX FOR RACE CONDITION PREVENTION ============
-class Mutex {
-  constructor() {
-      this.locked = false;
-      this.queue = [];
-  }
-
-  async acquire() {
-      while (this.locked) {
-          await new Promise(resolve => this.queue.push(resolve));
-      }
-      this.locked = true;
-  }
-
-  release() {
-      this.locked = false;
-      const resolve = this.queue.shift();
-      if (resolve) resolve();
-  }
-
-  async runExclusive(callback) {
-      await this.acquire();
-      try {
-          return await callback();
-      } finally {
-          this.release();
-      }
-  }
-}
+// Mutex imported from modules/mutex.js
 
 // ============ CIRCUIT BREAKER ============
 class CircuitBreaker {
-  constructor() {
-      this.consecutiveLosses = 0;
-      this.dailyLosses = 0;
-      this.isTripped = false;
-      this.tripTime = null;
-      this.dailyResetTime = Date.now();
-  }
+    constructor() {
+        this.consecutiveLosses = 0;
+        this.dailyLosses = 0;
+        this.isTripped = false;
+        this.tripTime = null;
+        this.dailyResetTime = Date.now();
 
-  recordTrade(isWin) {
-      if (isWin) {
-          this.consecutiveLosses = 0;
-      } else {
-          this.consecutiveLosses++;
-          this.dailyLosses++;
-      }
+        // Escalation Logic
+        this.tripCount = 0;
+        this.cooldowns = [60, 360, 1440, Infinity]; // Minutes: 1h, 6h, 24h, Perm
+    }
 
-      if (this.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
-          this.trip('consecutive_losses');
-      }
+    recordTrade(isWin) {
+        if (isWin) {
+            this.consecutiveLosses = 0;
+        } else {
+            this.consecutiveLosses++;
+            this.dailyLosses++;
+        }
 
-      if (this.dailyLosses >= MAX_DAILY_LOSSES) {
-          this.trip('daily_losses');
-      }
-  }
+        if (this.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+            this.trip('consecutive_losses');
+        }
 
-  trip(reason) {
-      this.isTripped = true;
-      this.tripTime = Date.now();
-      logger.error('Circuit breaker tripped', { reason, consecutiveLosses: this.consecutiveLosses, dailyLosses: this.dailyLosses });
-  }
+        if (this.dailyLosses >= MAX_DAILY_LOSSES) {
+            this.trip('daily_losses');
+        }
+    }
 
-  reset() {
-      if (!this.isTripped) return false;
+    trip(reason) {
+        if (this.isTripped) return;
 
-      const cooldownMs = CIRCUIT_BREAKER_COOLDOWN_MINUTES * 60 * 1000;
-      if (Date.now() - this.tripTime >= cooldownMs) {
-          this.isTripped = false;
-          this.consecutiveLosses = 0;
-          this.tripTime = null;
-          logger.info('Circuit breaker reset');
-          return true;
-      }
-      return false;
-  }
+        this.isTripped = true;
+        this.tripTime = Date.now();
+        this.tripCount = Math.min(this.tripCount + 1, 4); // Cap at 4 (Permanent indices)
 
-  checkDailyReset() {
-      if (Date.now() - this.dailyResetTime >= 24 * 60 * 60 * 1000) {
-          this.dailyLosses = 0;
-          this.dailyResetTime = Date.now();
-          logger.info('Circuit breaker daily counters reset');
-      }
-  }
+        const cooldownMin = this.cooldowns[Math.min(this.tripCount - 1, 3)];
+        logger.error('💥 Circuit breaker tripped', {
+            reason,
+            tripCount: this.tripCount,
+            cooldown: cooldownMin === Infinity ? 'PERMANENT' : `${cooldownMin}m`
+        });
+    }
 
-  canTrade() {
-      this.checkDailyReset();
-      this.reset();
-      return !this.isTripped;
-  }
+    // Manual reset only via command
+    forceReset() {
+        this.isTripped = false;
+        this.consecutiveLosses = 0;
+        this.tripTime = null;
+        // tripCount persists to punish repeated failures
+        logger.info('Circuit breaker manually reset');
+    }
 
-  getStatus() {
-      return {
-          isTripped: this.isTripped,
-          consecutiveLosses: this.consecutiveLosses,
-          dailyLosses: this.dailyLosses,
-          cooldownRemaining: this.isTripped ? 
-              Math.max(0, CIRCUIT_BREAKER_COOLDOWN_MINUTES * 60 - (Date.now() - this.tripTime) / 1000) : 0
-      };
-  }
+    checkDailyReset() {
+        if (Date.now() - this.dailyResetTime >= 24 * 60 * 60 * 1000) {
+            this.dailyLosses = 0;
+            this.dailyResetTime = Date.now();
+            logger.info('Circuit breaker daily counters reset');
+        }
+    }
+
+    canTrade() {
+        if (!this.isTripped) return true;
+
+        // Auto-expiration check
+        const cooldownMin = this.cooldowns[Math.min(this.tripCount - 1, 3)];
+        if (cooldownMin === Infinity) return false;
+
+        if (Date.now() - this.tripTime >= cooldownMin * 60 * 1000) {
+            this.isTripped = false;
+            this.tripTime = null;
+            logger.info('Circuit breaker cooldown expired');
+            return true;
+        }
+        return false;
+    }
+
+    getStatus() {
+        return {
+            isTripped: this.isTripped,
+            consecutiveLosses: this.consecutiveLosses,
+            dailyLosses: this.dailyLosses,
+            cooldownRemaining: this.isTripped ?
+                Math.max(0, CIRCUIT_BREAKER_COOLDOWN_MINUTES * 60 - (Date.now() - this.tripTime) / 1000) : 0
+        };
+    }
 }
 
 // ============ DYNAMIC PRIORITY FEE CALCULATOR ============
 class PriorityFeeCalculator {
-  constructor(rpcConnection) {
-      this.rpcConnection = rpcConnection;
-      this.recentFees = [];
-      this.maxSamples = 20;
-  }
+    constructor(rpcConnection) {
+        this.rpcConnection = rpcConnection;
+        this.recentFees = [];
+        this.maxSamples = 20;
+    }
 
-  async getRecentPriorityFees() {
-      try {
-          const operation = async (conn) => {
-              const recentBlocks = await conn.getRecentPerformanceSamples(10);
-              return recentBlocks;
-          };
+    async getRecentPriorityFees() {
+        try {
+            const operation = async (conn) => {
+                const recentBlocks = await conn.getRecentPerformanceSamples(10);
+                return recentBlocks;
+            };
 
-          const blocks = await this.rpcConnection.executeWithFallback(operation, 'getRecentPriorityFees');
-          
-          if (!blocks || blocks.length === 0) return null;
+            const blocks = await this.rpcConnection.executeWithFallback(operation, 'getRecentPriorityFees');
 
-          // Calculate average fee from recent blocks
-          const avgFee = blocks.reduce((sum, block) => sum + (block.numTransactions || 0), 0) / blocks.length;
-          return avgFee;
-      } catch (error) {
-          logger.warn('Failed to get recent priority fees', { error: error.message });
-          return null;
-      }
-  }
+            if (!blocks || blocks.length === 0) return null;
 
-  async calculateOptimalFee(isHotLaunch = false, urgency = 'normal') {
-      const networkFee = await this.getRecentPriorityFees();
-      
-      let baseFee = isHotLaunch ? HOT_LAUNCH_PRIORITY_FEE_SOL : BASE_PRIORITY_FEE_SOL;
+            // Calculate average fee from recent blocks
+            const avgFee = blocks.reduce((sum, block) => sum + (block.numTransactions || 0), 0) / blocks.length;
+            return avgFee;
+        } catch (error) {
+            logger.warn('Failed to get recent priority fees', { error: error.message });
+            return null;
+        }
+    }
 
-      // Adjust based on network congestion
-      if (networkFee) {
-          if (networkFee > 3000) baseFee *= 2; // High congestion
-          else if (networkFee > 2000) baseFee *= 1.5; // Medium congestion
-      }
+    async calculateOptimalFee(isHotLaunch = false, urgency = 'normal') {
+        const networkFee = await this.getRecentPriorityFees();
 
-      // Adjust based on urgency
-      const urgencyMultiplier = {
-          'low': 0.5,
-          'normal': 1.0,
-          'high': 1.5,
-          'critical': 2.0
-      };
+        let baseFee = isHotLaunch ? HOT_LAUNCH_PRIORITY_FEE_SOL : BASE_PRIORITY_FEE_SOL;
 
-      baseFee *= urgencyMultiplier[urgency] || 1.0;
+        // Adjust based on network congestion
+        if (networkFee) {
+            if (networkFee > 3000) baseFee *= 2; // High congestion
+            else if (networkFee > 2000) baseFee *= 1.5; // Medium congestion
+        }
 
-      // Cap at maximum
-      baseFee = Math.min(baseFee, MAX_PRIORITY_FEE_SOL);
+        // Adjust based on urgency
+        const urgencyMultiplier = {
+            'low': 0.5,
+            'normal': 1.0,
+            'high': 1.5,
+            'critical': 2.0
+        };
 
-      const feeLamports = Math.floor(baseFee * LAMPORTS_PER_SOL);
-      
-      logger.debug('Calculated priority fee', { 
-          baseFee, 
-          feeLamports, 
-          isHotLaunch, 
-          urgency, 
-          networkFee 
-      });
+        baseFee *= urgencyMultiplier[urgency] || 1.0;
 
-      return feeLamports;
-  }
+        // Cap at maximum
+        baseFee = Math.min(baseFee, MAX_PRIORITY_FEE_SOL);
+
+        const feeLamports = Math.floor(baseFee * LAMPORTS_PER_SOL);
+
+        logger.debug('Calculated priority fee', {
+            baseFee,
+            feeLamports,
+            isHotLaunch,
+            urgency,
+            networkFee
+        });
+
+        return feeLamports;
+    }
 }
 
 // ============ RPC CONNECTION WITH PROPER FALLBACK ============
 class RobustConnection {
-  constructor(primaryUrl, fallbackUrls = []) {
-      this.primaryUrl = primaryUrl;
-      this.fallbackUrls = fallbackUrls;
-      this.currentIndex = 0;
-      this.allUrls = [primaryUrl, ...fallbackUrls];
-      this.connections = this.allUrls.map(url => new Connection(url, {
-          commitment: 'confirmed',
-          confirmTransactionInitialTimeout: TX_CONFIRMATION_TIMEOUT
-      }));
-      this.failureCounts = new Array(this.allUrls.length).fill(0);
-      this.lastFailureTime = new Array(this.allUrls.length).fill(0);
-      
-      logger.info('RPC initialized', { 
-          primary: primaryUrl, 
-          fallbacks: fallbackUrls.length 
-      });
-  }
+    constructor(primaryUrl, fallbackUrls = []) {
+        this.primaryUrl = primaryUrl;
+        this.fallbackUrls = fallbackUrls;
+        this.currentIndex = 0;
+        this.allUrls = [primaryUrl, ...fallbackUrls];
+        this.connections = this.allUrls.map(url => new Connection(url, {
+            commitment: 'confirmed',
+            confirmTransactionInitialTimeout: TX_CONFIRMATION_TIMEOUT
+        }));
+        this.failureCounts = new Array(this.allUrls.length).fill(0);
+        this.lastFailureTime = new Array(this.allUrls.length).fill(0);
 
-  getCurrentConnection() {
-      return this.connections[this.currentIndex];
-  }
+        logger.info('RPC initialized', {
+            primary: primaryUrl,
+            fallbacks: fallbackUrls.length
+        });
+    }
 
-  async executeWithFallback(operation, operationName = 'RPC call') {
-      const maxAttempts = this.allUrls.length;
-      let lastError;
+    getCurrentConnection() {
+        return this.connections[this.currentIndex];
+    }
 
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          const index = (this.currentIndex + attempt) % this.allUrls.length;
-          const conn = this.connections[index];
-          const url = this.allUrls[index];
+    async executeWithFallback(operation, operationName = 'RPC call') {
+        const maxAttempts = this.allUrls.length;
+        let lastError;
 
-          const timeSinceFailure = Date.now() - this.lastFailureTime[index];
-          if (this.failureCounts[index] > 5 && timeSinceFailure < 60000) {
-              logger.debug('Skipping recently failed RPC', { url: url.substring(0, 40) });
-              continue;
-          }
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const index = (this.currentIndex + attempt) % this.allUrls.length;
+            const conn = this.connections[index];
+            const url = this.allUrls[index];
 
-          try {
-              logger.debug(`${operationName} attempt ${attempt + 1}/${maxAttempts}`, { rpc: index });
-              const result = await operation(conn);
-              
-              this.failureCounts[index] = 0;
-              if (index !== this.currentIndex) {
-                  logger.info('Switched to fallback RPC', { index, url: url.substring(0, 40) });
-                  this.currentIndex = index;
-              }
-              
-              return result;
-          } catch (error) {
-              lastError = error;
-              this.failureCounts[index]++;
-              this.lastFailureTime[index] = Date.now();
-              logger.error(`RPC operation failed`, { 
-                  operation: operationName, 
-                  attempt, 
-                  error: error.message,
-                  rpc: url.substring(0, 40)
-              });
-              
-              if (attempt < maxAttempts - 1) {
-                  await sleep(1000 * (attempt + 1));
-              }
-          }
-      }
+            const timeSinceFailure = Date.now() - this.lastFailureTime[index];
+            if (this.failureCounts[index] > 5 && timeSinceFailure < 60000) {
+                logger.debug('Skipping recently failed RPC', { url: url.substring(0, 40) });
+                continue;
+            }
 
-      throw new Error(`All RPC endpoints failed. Last error: ${lastError?.message}`);
-  }
+            try {
+                logger.debug(`${operationName} attempt ${attempt + 1}/${maxAttempts}`, { rpc: index });
+                const result = await operation(conn);
 
-  getStatus() {
-      return {
-          currentUrl: this.allUrls[this.currentIndex],
-          currentIndex: this.currentIndex,
-          failureCounts: [...this.failureCounts],
-          isPrimary: this.currentIndex === 0,
-          totalEndpoints: this.allUrls.length
-      };
-  }
+                this.failureCounts[index] = 0;
+                if (index !== this.currentIndex) {
+                    logger.info('Switched to fallback RPC', { index, url: url.substring(0, 40) });
+                    this.currentIndex = index;
+                }
+
+                return result;
+            } catch (error) {
+                lastError = error;
+                this.failureCounts[index]++;
+                this.lastFailureTime[index] = Date.now();
+                logger.error(`RPC operation failed`, {
+                    operation: operationName,
+                    attempt,
+                    error: error.message,
+                    rpc: url.substring(0, 40)
+                });
+
+                if (attempt < maxAttempts - 1) {
+                    await sleep(1000 * (attempt + 1));
+                }
+            }
+        }
+
+        throw new Error(`All RPC endpoints failed. Last error: ${lastError?.message}`);
+    }
+
+    getStatus() {
+        return {
+            currentUrl: this.allUrls[this.currentIndex],
+            currentIndex: this.currentIndex,
+            failureCounts: [...this.failureCounts],
+            isPrimary: this.currentIndex === 0,
+            totalEndpoints: this.allUrls.length
+        };
+    }
 }
 
 // ============ PORTFOLIO MANAGER ============
 class PortfolioManager {
-  constructor() {
-      this.positions = new Map(); // tokenAddress -> position
-      this.maxPositions = MAX_CONCURRENT_POSITIONS;
-  }
+    constructor() {
+        this.positions = new Map(); // tokenAddress -> position
+        this.maxPositions = MAX_CONCURRENT_POSITIONS;
+    }
 
-  canAddPosition() {
-      return this.positions.size < this.maxPositions;
-  }
+    canAddPosition() {
+        return this.positions.size < this.maxPositions;
+    }
 
-  addPosition(tokenAddress, position) {
-      if (!this.canAddPosition()) {
-          throw new Error('Maximum concurrent positions reached');
-      }
-      this.positions.set(tokenAddress, position);
-      logger.info('Position added to portfolio', { 
-          token: position.symbol, 
-          totalPositions: this.positions.size 
-      });
-  }
+    hasPosition(tokenAddress) {
+        return this.positions.has(tokenAddress);
+    }
 
-  removePosition(tokenAddress) {
-      const position = this.positions.get(tokenAddress);
-      this.positions.delete(tokenAddress);
-      logger.info('Position removed from portfolio', { 
-          token: position?.symbol, 
-          totalPositions: this.positions.size 
-      });
-  }
+    addPosition(tokenAddress, position) {
+        if (!this.canAddPosition()) {
+            throw new Error('Maximum concurrent positions reached');
+        }
+        this.positions.set(tokenAddress, position);
+        logger.info('Position added to portfolio', {
+            token: position.symbol,
+            totalPositions: this.positions.size
+        });
+    }
 
-  getPosition(tokenAddress) {
-      return this.positions.get(tokenAddress);
-  }
+    removePosition(tokenAddress) {
+        const position = this.positions.get(tokenAddress);
+        this.positions.delete(tokenAddress);
+        logger.info('Position removed from portfolio', {
+            token: position?.symbol,
+            totalPositions: this.positions.size
+        });
+    }
 
-  getAllPositions() {
-      return Array.from(this.positions.values());
-  }
+    getPosition(tokenAddress) {
+        return this.positions.get(tokenAddress);
+    }
 
-  getTotalInvested() {
-      return Array.from(this.positions.values())
-          .reduce((sum, pos) => sum + pos.investedUSDC, 0);
-  }
+    getAllPositions() {
+        return Array.from(this.positions.values());
+    }
 
-  getPositionAllocation(tokenAddress) {
-      const total = this.getTotalInvested();
-      if (total === 0) return 0;
-      const position = this.positions.get(tokenAddress);
-      return position ? position.investedUSDC / total : 0;
-  }
+    getTotalInvested() {
+        return Array.from(this.positions.values())
+            .reduce((sum, pos) => sum + pos.investedUSDC, 0);
+    }
 
-  canIncreasePosition(tokenAddress, additionalAmount) {
-      const total = this.getTotalInvested() + additionalAmount;
-      const position = this.positions.get(tokenAddress);
-      const currentInvestment = position ? position.investedUSDC : 0;
-      const newAllocation = (currentInvestment + additionalAmount) / total;
-      
-      return newAllocation <= MAX_POSITION_PER_TOKEN;
-  }
+    getPositionAllocation(tokenAddress) {
+        const total = this.getTotalInvested();
+        if (total === 0) return 0;
+        const position = this.positions.get(tokenAddress);
+        return position ? position.investedUSDC / total : 0;
+    }
 
-  getStats() {
-      const positions = this.getAllPositions();
-      return {
-          totalPositions: positions.length,
-          totalInvested: this.getTotalInvested(),
-          positions: positions.map(p => ({
-              symbol: p.symbol,
-              invested: p.investedUSDC,
-              allocation: (p.investedUSDC / this.getTotalInvested() * 100).toFixed(2) + '%'
-          }))
-      };
-  }
+    canIncreasePosition(tokenAddress, additionalAmount) {
+        const total = this.getTotalInvested() + additionalAmount;
+        const position = this.positions.get(tokenAddress);
+        const currentInvestment = position ? position.investedUSDC : 0;
+        const newAllocation = (currentInvestment + additionalAmount) / total;
+
+        return newAllocation <= MAX_POSITION_PER_TOKEN;
+    }
+
+    getStats() {
+        const positions = this.getAllPositions();
+        return {
+            totalPositions: positions.length,
+            totalInvested: this.getTotalInvested(),
+            positions: positions.map(p => ({
+                symbol: p.symbol,
+                invested: p.investedUSDC,
+                allocation: (p.investedUSDC / this.getTotalInvested() * 100).toFixed(2) + '%'
+            }))
+        };
+    }
 }
 
 // Continue in next artifact due to length...  
@@ -620,770 +619,494 @@ class PortfolioManager {
 // ============ BITQUERY CLIENT (Enhanced) ============
 // ============ CORRECTED BITQUERY CLIENT ============
 // ============ BITQUERY CLIENT WITH PAYLOAD DEBUGGING ============
-class BitqueryClient {
-    constructor(apiKey, logger, database) {
-        this.apiKey = apiKey;
-        this.baseURL = "https://streaming.bitquery.io/graphql";
-        this.headers = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`
-        };
-        this.logger = logger;
-        this.database = database;
-        this.queryCount = 0;
-        this.estimatedPoints = 0;
-        this.cache = null;
-    }
+// BitqueryClient Removed
 
-    async init() {
-        if (SHARED_CACHE_ENABLED) {
-            this.cache = new Map();
-            this.logger.info('Bitquery cache initialized');
-        }
-
-        console.log('\n🔑 Testing BitQuery API Key...');
-        
-        const testQuery = `{
-            Solana {
-                DEXPools(limit: {count: 1}) {
-                    Pool {
-                        Market {
-                            BaseCurrency {
-                                Symbol
-                            }
-                        }
-                    }
-                }
-            }
-        }`;
-        
-        try {
-            const testResult = await this.query(testQuery);
-            if (testResult?.Solana?.DEXPools) {
-                console.log('✅ API Key Valid - BitQuery Connected');
-                console.log(`   Found ${testResult.Solana.DEXPools.length} pool(s)`);
-            } else {
-                console.log('⚠️  API Key Valid but Query Failed');
-                console.log('   Response:', JSON.stringify(testResult, null, 2));
-            }
-        } catch (err) {
-            console.log('❌ API Key Test Failed:', err.message);
-        }
-    }
-
-    async query(graphql, variables = {}) {
-        try {
-            this.queryCount++;
-            
-            // ===== BUILD THE PAYLOAD =====
-            const payload = {
-                query: graphql,
-                variables: variables
-            };
-            
-            // ===== DEBUG: LOG THE PAYLOAD =====
-            console.log('\n📦 BitQuery Request Payload:');
-            console.log('━'.repeat(60));
-            console.log('URL:', this.baseURL);
-            console.log('\nHeaders:');
-            console.log('  Content-Type:', this.headers['Content-Type']);
-            console.log('  Authorization: Bearer', this.apiKey.substring(0, 15) + '...');
-            console.log('\nPayload:');
-            console.log(JSON.stringify(payload, null, 2));
-            console.log('━'.repeat(60));
-            
-            const response = await axios.post(this.baseURL, payload, {
-                headers: this.headers,
-                timeout: 15000
-            });
-
-            // ===== DEBUG: LOG THE RESPONSE =====
-            console.log('\n📥 BitQuery Response:');
-            console.log('━'.repeat(60));
-            console.log('Status:', response.status, response.statusText);
-            console.log('Response Size:', JSON.stringify(response.data).length, 'bytes');
-            
-            if (response.data.errors) {
-                console.log('\n❌ ERRORS IN RESPONSE:');
-                console.log(JSON.stringify(response.data.errors, null, 2));
-                console.log('━'.repeat(60));
-            } else {
-                console.log('✅ No errors');
-            }
-            
-            if (response.data.data) {
-                console.log('\n📊 Data Preview:');
-                if (response.data.data.Solana?.DEXPools) {
-                    console.log(`   Found ${response.data.data.Solana.DEXPools.length} pools`);
-                    if (response.data.data.Solana.DEXPools.length > 0) {
-                        const sample = response.data.data.Solana.DEXPools[0];
-                        console.log('   Sample pool:', {
-                            symbol: sample.Pool?.Market?.BaseCurrency?.Symbol,
-                            bonding: sample.Bonding_Curve_Progress_precentage,
-                            liquidity: sample.Pool?.Quote?.PostAmountInUSD
-                        });
-                    }
-                }
-            }
-            console.log('━'.repeat(60));
-
-            // Track in database
-            if (this.database) {
-                await this.database.trackAPIUsage('bitquery', 'graphql', 150, true);
-            }
-
-            if (response.data.errors) {
-                this.logger.error('Bitquery errors', { errors: response.data.errors });
-                return null;
-            }
-
-            return response.data.data;
-        } catch (error) {
-            console.log('\n💥 BitQuery Request FAILED:');
-            console.log('━'.repeat(60));
-            console.log('Error:', error.message);
-            if (error.response) {
-                console.log('Status:', error.response.status, error.response.statusText);
-                console.log('Response:', JSON.stringify(error.response.data, null, 2));
-            }
-            console.log('━'.repeat(60));
-            
-            this.logger.error('Bitquery query failed', { error: error.message });
-            
-            if (this.database) {
-                await this.database.trackAPIUsage('bitquery', 'graphql', 0, false, error.message);
-            }
-            
-            return null;
-        }
-    }
-
-    async getGraduatingTokens() {
-        console.log('\n' + '='.repeat(60));
-        console.log('📡 BITQUERY API CALL - getGraduatingTokens()');
-        console.log('='.repeat(60));
-        
-        // Check cache first
-        if (this.cache && this.cache.has('graduating_tokens')) {
-            const cached = this.cache.get('graduating_tokens');
-            const cacheAge = (Date.now() - cached.timestamp) / 1000;
-            
-            if (Date.now() - cached.timestamp < CACHE_DURATION_MINUTES * 60 * 1000) {
-                console.log('✅ Using cached data');
-                console.log(`   Cache age: ${cacheAge.toFixed(0)}s / ${CACHE_DURATION_MINUTES * 60}s`);
-                console.log(`   Cached tokens: ${cached.data.length}`);
-                return cached.data;
-            }
-        }
-    
-        console.log('\n🌐 Making fresh BitQuery API call...');
-        
-        // 🔥 SIMPLIFIED QUERY - NO COMPLEX CALCULATION
-        const query = `{
-            Solana {
-                DEXPools(
-                    limitBy: {by: Pool_Market_BaseCurrency_MintAddress, count: 1}
-                    limit: {count: 50}
-                    orderBy: {descending: Pool_Quote_PostAmountInUSD}
-                    where: {
-                        Pool: {
-                            Base: {PostAmount: {gt: "206900000", lt: "246555000"}},
-                            Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}},
-                            Market: {QuoteCurrency: {MintAddress: {in: ["11111111111111111111111111111111","So11111111111111111111111111111111111111112"]}}}
-                        },
-                        Transaction: {Result: {Success: true}},
-                        Block: {Time: {since_relative: {minutes_ago: 10}}}
-                    }
-                ) {
-                    Bonding_Curve_Progress_precentage: calculate(expression:"100 - ((($Pool_Base_Balance - 206900000) * 100) / 793100000)")
-                    Pool {
-                        Market {
-                            BaseCurrency {
-                                MintAddress
-                                Name
-                                Symbol
-                            }
-                            MarketAddress
-                            QuoteCurrency {
-                                MintAddress
-                                Name
-                                Symbol
-                            }
-                        }
-                        Dex {
-                            ProtocolName
-                            ProtocolFamily
-                        }
-                        Base {
-                            Balance: PostAmount
-                        }
-                        Quote {
-                            PostAmount
-                            PriceInUSD
-                            PostAmountInUSD
-                        }
-                    }
-                }
-            }
-        }`;
-    
-        console.log('   Query parameters:');
-        console.log('   - Limit: 50 tokens');
-        console.log('   - Program: Pump.fun (6EF8...)');
-        console.log('   - Base range: 206.9M - 980M (graduating range)');
-        console.log('   - Order: By liquidity (descending)');
-    
-        this.estimatedPoints += 150;
-        
-        try {
-            console.log('\n⏳ Sending request...');
-            const startTime = Date.now();
-            
-            const data = await this.query(query);
-            
-            const duration = Date.now() - startTime;
-            console.log(`✅ Response received in ${duration}ms`);
-            
-            if (!data?.Solana?.DEXPools) {
-                console.log('❌ No pools returned');
-                return [];
-            }
-    
-            const rawTokenCount = data.Solana.DEXPools.length;
-            console.log(`\n📊 BitQuery returned: ${rawTokenCount} tokens`);
-    
-            if (rawTokenCount === 0) {
-                console.log('⚠️  No tokens in graduating range right now');
-                return [];
-            }
-    
-            // 🔥 FIX: Calculate bonding correctly
-            const allTokens = data.Solana.DEXPools.map(pool => {
-                const baseBalance = parseFloat(pool.Pool.Base.Balance) || 0;
-                const bondingProgress = parseFloat(pool.Bonding_Curve_Progress_precentage) || 0;  // BitQuery's official calc
-            
-                return {
-                    address: pool.Pool.Market.BaseCurrency.MintAddress,
-                    symbol: pool.Pool.Market.BaseCurrency.Symbol || 'UNKNOWN',
-                    name: pool.Pool.Market.BaseCurrency.Name || 'Unknown Token',
-                    bondingProgress: bondingProgress,
-                    liquidityUSD: parseFloat(pool.Pool.Quote.PostAmountInUSD) || 0,
-                    priceUSD: parseFloat(pool.Pool.Quote.PriceInUSD) || 0,
-                    baseBalance: baseBalance,
-                    marketAddress: pool.Pool.Market.MarketAddress,
-                    protocol: pool.Pool.Dex.ProtocolName || 'Pump.fun',
-                    lastUpdate: Date.now(),
-                    isHot: bondingProgress >= 96
-                };
-            });
-    
-            console.log('\n📋 Raw tokens (with FIXED bonding):');
-            allTokens.slice(0, 10).forEach((token, i) => {
-                console.log(`   ${i+1}. ${token.symbol.padEnd(15)} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liq`);
-            });
-            if (allTokens.length > 10) {
-                console.log(`   ... and ${allTokens.length - 10} more`);
-            }
-    
-            // Apply filters
-            console.log('\n🔍 Applying filters:');
-            console.log(`   Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%`);
-            console.log(`   Min Liquidity: $${MIN_LIQUIDITY_USD}`);
-            
-            const filtered = allTokens.filter(t => {
-                const passBonding = t.bondingProgress >= MIN_BONDING_PROGRESS && 
-                                   t.bondingProgress <= MAX_BONDING_PROGRESS;
-                const passLiquidity = t.liquidityUSD >= MIN_LIQUIDITY_USD;
-                
-                if (!passBonding) {
-                    console.log(`   ❌ ${t.symbol} - Bonding ${t.bondingProgress.toFixed(1)}% (need ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%)`);
-                } else if (!passLiquidity) {
-                    console.log(`   ❌ ${t.symbol} - Liquidity $${t.liquidityUSD.toFixed(0)} (need >$${MIN_LIQUIDITY_USD})`);
-                } else {
-                    console.log(`   ✅ ${t.symbol} - PASSED all filters!`);
-                }
-                
-                return passBonding && passLiquidity;
-            });
-    
-            console.log(`\n✅ Tokens after filtering: ${filtered.length} / ${rawTokenCount}`);
-    
-            if (filtered.length === 0) {
-                console.log('\n⚠️  NO TOKENS PASSED FILTERS');
-                console.log('   This is normal - tokens rarely stay in 93-98% range');
-                console.log('   Bot will keep scanning every 5 minutes');
-            } else {
-                console.log('\n🎯 FOUND QUALIFYING TOKENS:');
-                filtered.forEach(t => {
-                    console.log(`   ✅ ${t.symbol}: ${t.bondingProgress.toFixed(1)}% bonding, $${t.liquidityUSD.toFixed(0)} liq`);
-                });
-            }
-    
-            // Sort by hot tokens first
-            if (PRIORITIZE_HOT_TOKENS && filtered.length > 0) {
-                filtered.sort((a, b) => {
-                    if (a.isHot && !b.isHot) return -1;
-                    if (!a.isHot && b.isHot) return 1;
-                    return b.liquidityUSD - a.liquidityUSD;
-                });
-                console.log('   Sorted by: Hot tokens first, then liquidity');
-            }
-          
-            console.log('\n📋 DETAILED TOKEN ANALYSIS:');
-allTokens.forEach((token, i) => {
-    console.log(`\n${i+1}. ${token.symbol}`);
-    console.log(`   Address: ${token.address}`);
-    console.log(`   Bonding: ${token.bondingProgress.toFixed(2)}%`);
-    console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
-    console.log(`   Price: $${token.priceUSD.toExponential(4)}`);
-    console.log(`   In Range (93-98%)?: ${token.bondingProgress >= 93 && token.bondingProgress <= 98 ? '✅' : '❌'}`);
-    console.log(`   Enough Liquidity?: ${token.liquidityUSD >= 8000 ? '✅' : '❌'}`);
-});    
-
-
-            // Cache results
-            if (this.cache) {
-                this.cache.set('graduating_tokens', { data: filtered, timestamp: Date.now() });
-                console.log(`   ✅ Cached for ${CACHE_DURATION_MINUTES} minutes`);
-            }
-    
-            console.log('='.repeat(60) + '\n');
-            return filtered;
-            
-        } catch (error) {
-            console.log('\n❌ BitQuery API ERROR');
-            console.log('   Error:', error.message);
-            console.log('='.repeat(60) + '\n');
-            
-            this.logger.error('BitQuery API error', { 
-                error: error.message,
-                stack: error.stack 
-            });
-            
-            return [];
-        }
-    }
-      
-
-
-
-    
-    async getVolumeHistory(tokenAddress) {
-        if (!ENABLE_VOLUME_CHECK) {
-            return { recent: 0, previous: 0, spike: true };
-        }
-
-        const now = new Date();
-        const tenMinAgo = new Date(now.getTime() - 10 * 60000);
-        const twentyMinAgo = new Date(now.getTime() - 20 * 60000);
-    
-        const query = `{
-            Solana {
-                recent: DEXPools(
-                    where: {
-                        Pool: {
-                            Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                            Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}}
-                        }
-                        Block: {Time: {since: "${tenMinAgo.toISOString()}"}}
-                        Transaction: {Result: {Success: true}}
-                    }
-                ) {
-                    Pool { Quote { PostAmountInUSD } }
-                }
-                previous: DEXPools(
-                    where: {
-                        Pool: {
-                            Market: {BaseCurrency: {MintAddress: {is: "${tokenAddress}"}}}
-                            Dex: {ProgramAddress: {is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"}}
-                        }
-                        Block: {Time: {since: "${twentyMinAgo.toISOString()}", till: "${tenMinAgo.toISOString()}"}}
-                        Transaction: {Result: {Success: true}}
-                    }
-                ) {
-                    Pool { Quote { PostAmountInUSD } }
-                }
-            }
-        }`;
-    
-        this.estimatedPoints += 80;
-        const data = await this.query(query);
-        if (!data?.Solana) return { recent: 0, previous: 0, spike: false };
-    
-        const recentVol = (data.Solana.recent || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
-        const prevVol = (data.Solana.previous || []).reduce((sum, p) => sum + (Number(p?.Pool?.Quote?.PostAmountInUSD) || 0), 0);
-    
-        const ABS_SPIKE_THRESHOLD = 100;
-        let hasSpike = false;
-        if (prevVol > 0) {
-            hasSpike = (recentVol / prevVol) >= VOLUME_SPIKE_MULTIPLIER;
-        } else {
-            hasSpike = recentVol >= ABS_SPIKE_THRESHOLD;
-        }
-
-        this.logger.debug('Volume check', { 
-            token: tokenAddress.substring(0, 8), 
-            recentVol, 
-            prevVol, 
-            hasSpike 
-        });
-
-        return { recent: recentVol, previous: prevVol, spike: hasSpike };
-    }
-
-    async detectWhaleDumps(tokenAddress) {
-        if (!ENABLE_WHALE_CHECK) return false;
-    
-        const timeAgo = new Date(Date.now() - WHALE_DETECTION_WINDOW * 60 * 1000);
-    
-        const query = `{
-          Solana {
-            DEXTrades(
-              where: {
-                Trade: {
-                  Side: { Currency: { MintAddress: { is: "${tokenAddress}" } } }
-                  AmountInUSD: { gt: ${LARGE_SELL_THRESHOLD} }
-                }
-                Dex: { ProtocolName: { in: ["pump", "Pump.fun"] } }
-                Block: { Time: { since: "${timeAgo.toISOString()}" } }
-                Transaction: { Result: { Success: true } }
-              }
-              limit: { count: 10 }
-            ) {
-              Trade {
-                AmountInUSD
-                Side { Currency { Symbol } }
-              }
-            }
-          }
-        }`;
-    
-        try {
-            const data = await this.query(query);
-            const sells = (data?.Solana?.DEXTrades || []).filter(t => 
-                t.Trade.Side.Currency.MintAddress === tokenAddress
-            );
-            const hasWhale = sells.length > 0;
-    
-            this.logger.debug('Whale check result', {
-                token: tokenAddress.slice(0, 8),
-                largeSells: sells.length,
-                hasWhale
-            });
-    
-            return hasWhale;
-        } catch (error) {
-            this.logger.warn('Whale query failed - skipping check', { error: error.message });
-            return false; // Don't block good tokens
-        }
-    }
-
-    getStats() {
-        return {
-            queries: this.queryCount,
-            estimatedPoints: this.estimatedPoints,
-            pointsPerQuery: this.queryCount > 0 ? (this.estimatedPoints / this.queryCount).toFixed(0) : 0
-        };
-    }
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = BitqueryClient;
-}
-
-// Export for use in bot.js
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = BitqueryClient;
-}
 
 // ============ PERFORMANCE TRACKER (Enhanced) ============
 class PerformanceTracker {
-  constructor(logger, database) {
-      this.logger = logger;
-      this.database = database;
-      this.metrics = {
-          totalTrades: 0,
-          winningTrades: 0,
-          losingTrades: 0,
-          totalProfit: 0,
-          totalLoss: 0,
-          avgWinPercent: 0,
-          avgLossPercent: 0,
-          largestWin: 0,
-          largestLoss: 0,
-          consecutiveWins: 0,
-          consecutiveLosses: 0,
-          currentStreak: 0,
-          lastAdjustment: Date.now(),
-          strategyLevel: 'CONSERVATIVE'
-      };
-  }
+    constructor(logger, database) {
+        this.logger = logger;
+        this.database = database;
+        this.metrics = {
+            totalTrades: 0,
+            winningTrades: 0,
+            losingTrades: 0,
+            totalProfit: 0,
+            totalLoss: 0,
+            avgWinPercent: 0,
+            avgLossPercent: 0,
+            largestWin: 0,
+            largestLoss: 0,
+            consecutiveWins: 0,
+            consecutiveLosses: 0,
+            currentStreak: 0,
+            lastAdjustment: Date.now(),
+            strategyLevel: 'CONSERVATIVE'
+        };
+    }
 
-  recordTrade(profit, profitPercent) {
-      this.metrics.totalTrades++;
-      
-      if (profit > 0) {
-          this.metrics.winningTrades++;
-          this.metrics.totalProfit += profit;
-          this.metrics.avgWinPercent = (this.metrics.avgWinPercent * (this.metrics.winningTrades - 1) + profitPercent) / this.metrics.winningTrades;
-          this.metrics.largestWin = Math.max(this.metrics.largestWin, profitPercent);
-          this.metrics.currentStreak = this.metrics.currentStreak >= 0 ? this.metrics.currentStreak + 1 : 1;
-          this.metrics.consecutiveWins = Math.max(this.metrics.consecutiveWins, this.metrics.currentStreak);
-      } else {
-          this.metrics.losingTrades++;
-          this.metrics.totalLoss += Math.abs(profit);
-          this.metrics.avgLossPercent = (this.metrics.avgLossPercent * (this.metrics.losingTrades - 1) + Math.abs(profitPercent)) / this.metrics.losingTrades;
-          this.metrics.largestLoss = Math.max(this.metrics.largestLoss, Math.abs(profitPercent));
-          this.metrics.currentStreak = this.metrics.currentStreak <= 0 ? this.metrics.currentStreak - 1 : -1;
-          this.metrics.consecutiveLosses = Math.max(this.metrics.consecutiveLosses, Math.abs(this.metrics.currentStreak));
-      }
+    recordTrade(profit, profitPercent) {
+        this.metrics.totalTrades++;
 
-      this.logger.info('Trade recorded', { profit: profit.toFixed(2), profitPercent: profitPercent.toFixed(2), streak: this.metrics.currentStreak });
-  }
+        if (profit > 0) {
+            this.metrics.winningTrades++;
+            this.metrics.totalProfit += profit;
+            this.metrics.avgWinPercent = (this.metrics.avgWinPercent * (this.metrics.winningTrades - 1) + profitPercent) / this.metrics.winningTrades;
+            this.metrics.largestWin = Math.max(this.metrics.largestWin, profitPercent);
+            this.metrics.currentStreak = this.metrics.currentStreak >= 0 ? this.metrics.currentStreak + 1 : 1;
+            this.metrics.consecutiveWins = Math.max(this.metrics.consecutiveWins, this.metrics.currentStreak);
+        } else {
+            this.metrics.losingTrades++;
+            this.metrics.totalLoss += Math.abs(profit);
+            this.metrics.avgLossPercent = (this.metrics.avgLossPercent * (this.metrics.losingTrades - 1) + Math.abs(profitPercent)) / this.metrics.losingTrades;
+            this.metrics.largestLoss = Math.max(this.metrics.largestLoss, Math.abs(profitPercent));
+            this.metrics.currentStreak = this.metrics.currentStreak <= 0 ? this.metrics.currentStreak - 1 : -1;
+            this.metrics.consecutiveLosses = Math.max(this.metrics.consecutiveLosses, Math.abs(this.metrics.currentStreak));
+        }
 
-  getWinRate() {
-      if (this.metrics.totalTrades === 0) return 0;
-      return (this.metrics.winningTrades / this.metrics.totalTrades) * 100;
-  }
+        this.logger.info('Trade recorded', { profit: profit.toFixed(2), profitPercent: profitPercent.toFixed(2), streak: this.metrics.currentStreak });
+    }
 
-  getProfitFactor() {
-      if (this.metrics.totalLoss === 0) return this.metrics.totalProfit > 0 ? 999 : 0;
-      return this.metrics.totalProfit / this.metrics.totalLoss;
-  }
+    getWinRate() {
+        if (this.metrics.totalTrades === 0) return 0;
+        return (this.metrics.winningTrades / this.metrics.totalTrades) * 100;
+    }
 
-  getExpectancy() {
-      const winRate = this.getWinRate() / 100;
-      const lossRate = 1 - winRate;
-      return (winRate * this.metrics.avgWinPercent) - (lossRate * this.metrics.avgLossPercent);
-  }
+    getProfitFactor() {
+        if (this.metrics.totalLoss === 0) return this.metrics.totalProfit > 0 ? 999 : 0;
+        return this.metrics.totalProfit / this.metrics.totalLoss;
+    }
 
-  shouldAdjustStrategy() {
-      if (!ENABLE_AUTO_ADJUSTMENT) return false;
-      if (this.metrics.totalTrades < MIN_TRADES_FOR_ADJUSTMENT) return false;
-      
-      const daysSinceAdjustment = (Date.now() - this.metrics.lastAdjustment) / (1000 * 60 * 60 * 24);
-      return daysSinceAdjustment >= AUTO_ADJUST_INTERVAL;
-  }
+    getExpectancy() {
+        const winRate = this.getWinRate() / 100;
+        const lossRate = 1 - winRate;
+        return (winRate * this.metrics.avgWinPercent) - (lossRate * this.metrics.avgLossPercent);
+    }
 
-  getRecommendedStrategy() {
-      const winRate = this.getWinRate();
-      const profitFactor = this.getProfitFactor();
-      const expectancy = this.getExpectancy();
+    shouldAdjustStrategy() {
+        if (!ENABLE_AUTO_ADJUSTMENT) return false;
+        if (this.metrics.totalTrades < MIN_TRADES_FOR_ADJUSTMENT) return false;
 
-      if (winRate >= 65 && profitFactor >= 2.0 && expectancy >= 5) {
-          return {
-              level: 'AGGRESSIVE',
-              dailyTarget: 0.35,
-              perTradeTarget: 0.15,
-              scalpMin: 0.08,
-              scalpMax: 0.15,
-              extendedTarget: 0.30,
-              stopLoss: 0.03,
-              positionSize: 0.15,
-              profitTaking: 0.30
-          };
-      }
-      
-      if (winRate >= 58 && profitFactor >= 1.5 && expectancy >= 3) {
-          return {
-              level: 'MODERATE',
-              dailyTarget: 0.30,
-              perTradeTarget: 0.13,
-              scalpMin: 0.07,
-              scalpMax: 0.13,
-              extendedTarget: 0.28,
-              stopLoss: 0.03,
-              positionSize: 0.12,
-              profitTaking: 0.40
-          };
-      }
+        const daysSinceAdjustment = (Date.now() - this.metrics.lastAdjustment) / (1000 * 60 * 60 * 24);
+        return daysSinceAdjustment >= AUTO_ADJUST_INTERVAL;
+    }
 
-      return {
-          level: 'CONSERVATIVE',
-          dailyTarget: 0.25,
-          perTradeTarget: 0.10,
-          scalpMin: 0.05,
-          scalpMax: 0.10,
-          extendedTarget: 0.25,
-          stopLoss: 0.02,
-          positionSize: 0.10,
-          profitTaking: 0.50
-      };
-  }
+    getRecommendedStrategy() {
+        const winRate = this.getWinRate();
+        const profitFactor = this.getProfitFactor();
+        const expectancy = this.getExpectancy();
 
-  async saveMetrics(userId) {
-      if (!this.database) return;
+        if (winRate >= 65 && profitFactor >= 2.0 && expectancy >= 5) {
+            return {
+                level: 'AGGRESSIVE',
+                dailyTarget: 0.35,
+                perTradeTarget: 0.15,
+                scalpMin: 0.08,
+                scalpMax: 0.15,
+                extendedTarget: 0.30,
+                stopLoss: 0.03,
+                positionSize: 0.15,
+                profitTaking: 0.30
+            };
+        }
 
-      try {
-          await this.database.savePerformanceMetrics(userId, {
-              totalTrades: this.metrics.totalTrades,
-              winningTrades: this.metrics.winningTrades,
-              losingTrades: this.metrics.losingTrades,
-              totalProfit: this.metrics.totalProfit,
-              totalLoss: this.metrics.totalLoss,
-              winRate: this.getWinRate(),
-              profitFactor: this.getProfitFactor(),
-              expectancy: this.getExpectancy(),
-              largestWin: this.metrics.largestWin,
-              largestLoss: this.metrics.largestLoss,
-              strategyLevel: this.metrics.strategyLevel
-          });
-      } catch (error) {
-          this.logger.error('Failed to save performance metrics', { error: error.message });
-      }
-  }
+        if (winRate >= 58 && profitFactor >= 1.5 && expectancy >= 3) {
+            return {
+                level: 'MODERATE',
+                dailyTarget: 0.30,
+                perTradeTarget: 0.13,
+                scalpMin: 0.07,
+                scalpMax: 0.13,
+                extendedTarget: 0.28,
+                stopLoss: 0.03,
+                positionSize: 0.12,
+                profitTaking: 0.40
+            };
+        }
+
+        return {
+            level: 'CONSERVATIVE',
+            dailyTarget: 0.25,
+            perTradeTarget: 0.10,
+            scalpMin: 0.05,
+            scalpMax: 0.10,
+            extendedTarget: 0.25,
+            stopLoss: 0.02,
+            positionSize: 0.10,
+            profitTaking: 0.50
+        };
+    }
+
+    async saveMetrics(userId) {
+        if (!this.database) return;
+
+        try {
+            await this.database.savePerformanceMetrics(userId, {
+                totalTrades: this.metrics.totalTrades,
+                winningTrades: this.metrics.winningTrades,
+                losingTrades: this.metrics.losingTrades,
+                totalProfit: this.metrics.totalProfit,
+                totalLoss: this.metrics.totalLoss,
+                winRate: this.getWinRate(),
+                profitFactor: this.getProfitFactor(),
+                expectancy: this.getExpectancy(),
+                largestWin: this.metrics.largestWin,
+                largestLoss: this.metrics.largestLoss,
+                strategyLevel: this.metrics.strategyLevel
+            });
+        } catch (error) {
+            this.logger.error('Failed to save performance metrics', { error: error.message });
+        }
+    }
 }
 
 // ============ TRADING ENGINE (Enhanced) ============
 class TradingEngine {
-  constructor(bot, wallet, rpcConnection, bitquery, database) {
-      this.bot = bot;
-      this.wallet = wallet;
-      this.rpcConnection = rpcConnection;
-      this.bitquery = bitquery;
-      this.database = database;
-      this.logger = logger;
-      this.userStates = new Map();
-      this.isScanning = false;
-      this.tradeMutex = new Mutex();
-      this.performanceTracker = new PerformanceTracker(logger, database);
-      this.currentStrategy = null;
-      this.portfolioManager = new PortfolioManager();
-      this.circuitBreaker = new CircuitBreaker();
-      this.priorityFeeCalculator = new PriorityFeeCalculator(rpcConnection);
-      this.pumpDirect = new PumpFunDirect(this.rpcConnection.getCurrentConnection(), logger);
-      
-      // Initialize new modules
-      if (ENABLE_MULTI_DEX) {
-          this.dexAggregator = new DEXAggregator(logger);
-      }
-      
-      if (ENABLE_MEV_PROTECTION) {
-          this.mevProtection = new MEVProtection(logger);
-      }
-      
-      if (ENABLE_TECHNICAL_ANALYSIS) {
-          this.technicalIndicators = new TechnicalIndicators();
-      }
-      
-      if (ENABLE_ANOMALY_DETECTION) {
-          this.anomalyDetector = new AnomalyDetector(logger, database);
-      }
-  }
-  
-  async init() {
-    logger.info('Trading engine initializing...');
-    
-    try {
-        // Database init
-        console.log('📦 Step 1: Initializing database...');
-        await this.database.init();
-        logger.info('✅ Database initialized');
-        
-        // BitQuery init
-        console.log('📡 Step 2: Initializing BitQuery...');
-        await this.bitquery.init();
-        logger.info('✅ Bitquery initialized');
-        
-        // Load state from database
-        console.log('💾 Step 3: Loading user state...');
-        await this.loadState();
-        
-        // 🔥 FIX: Sync all users with wallet balance on startup
-        console.log('💰 Step 4: Syncing wallet balances...');
-        const balances = await this.getWalletBalance();
-        const tradingBalance = balances.trading;
-        
-        console.log(`   Wallet has: ${tradingBalance.toFixed(4)} available for trading`);
-        
-        for (const userId of AUTHORIZED_USERS) {
-            let user = this.userStates.get(userId);
-            
-            if (!user) {
-                console.log(`   Creating new user: ${userId}`);
-                user = this.getUserState(userId);
-            }
-            
-            // Get from database
-            let dbUser = null;
-            try {
-                dbUser = await this.database.getUser(userId.toString());
-            } catch (err) {
-                logger.warn('Failed to load user from DB', { userId, error: err.message });
-            }
-            
-            if (!dbUser) {
-                // New user - initialize with wallet balance
-                console.log(`   📝 New user ${userId} - initializing with wallet balance`);
-                user.startingBalance = tradingBalance;
-                user.currentBalance = tradingBalance;  // 🔥 SET THIS
-                user.dailyStartBalance = tradingBalance;
-                user.tradingCapital = tradingBalance;
-                user.isActive = false; // Will be activated by /start
-                
-                await this.database.createUser(userId.toString(), tradingBalance);
-                console.log(`   ✅ Created with balance: ${tradingBalance.toFixed(4)}`);
-            } else {
-                // Existing user - load from DB but sync balance with wallet
-                console.log(`   📝 Existing user ${userId}`);
-                console.log(`      DB balance: ${dbUser.current_balance?.toFixed(4) || '0'}`);
-                console.log(`      Wallet balance: ${tradingBalance.toFixed(4)}`);
-                
-                user.isActive = dbUser.is_active === 1;
-                user.startingBalance = dbUser.starting_balance || tradingBalance;
-                user.dailyStartBalance = dbUser.daily_start_balance || tradingBalance;
-                user.dailyProfit = dbUser.daily_profit || 0;
-                user.dailyProfitPercent = dbUser.daily_profit_percent || 0;
-                user.currentDay = dbUser.current_day || 1;
-                user.totalTrades = dbUser.total_trades || 0;
-                user.successfulTrades = dbUser.successful_trades || 0;
-                user.lastTradeAt = dbUser.last_trade_at || 0;
-                user.dailyResetAt = dbUser.daily_reset_at || Date.now();
-                user.totalProfitTaken = dbUser.total_profit_taken || 0;
-                
-                // 🔥 CRITICAL: Always use wallet balance as source of truth
-                user.currentBalance = tradingBalance;
-                user.tradingCapital = tradingBalance;
-                
-                console.log(`   ✅ Loaded and synced to wallet: ${user.currentBalance.toFixed(4)}`);
-            }
-            
-            // Store updated state
-            this.userStates.set(userId, user);
-            
-            console.log(`   Final state: active=${user.isActive}, balance=${user.currentBalance.toFixed(4)}`);
+    constructor(bot, wallet, rpcConnection, database) {
+        this.bot = bot;
+        this.wallet = wallet;
+        this.rpcConnection = rpcConnection;
+        // this.bitquery = bitquery; // REMOVED
+        this.database = database;
+        this.logger = logger;
+        this.userStates = new Map();
+        this.isScanning = false;
+        this.tradeMutex = new Mutex();
+        this.decisionCache = new LRUCache(1000); // Limit to 1000 items
+        this.performanceTracker = new PerformanceTracker(logger, database);
+        this.currentStrategy = null;
+        this.portfolioManager = new PortfolioManager();
+        this.circuitBreaker = new CircuitBreaker();
+        this.priorityFeeCalculator = new PriorityFeeCalculator(rpcConnection);
+        this.pumpDirect = new PumpFunDirect(this.rpcConnection.getCurrentConnection(), logger);
+
+        // Initialize new modules
+        if (ENABLE_MULTI_DEX) {
+            this.dexAggregator = new DEXAggregator(logger);
         }
-        
-        console.log('\n📊 Initialization Summary:');
-        console.log(`   Total users: ${this.userStates.size}`);
-        console.log(`   Active users: ${Array.from(this.userStates.values()).filter(u => u.isActive).length}`);
-        
-        logger.info('✅ Trading engine initialized');
 
-    } catch (error) {
-        console.error('❌ Initialization failed:', error.message);
-        logger.error('Initialization failed', { 
-            error: error.message, 
-            stack: error.stack 
-        });
-        throw error;
+        if (ENABLE_MEV_PROTECTION) {
+            this.mevProtection = new MEVProtection(logger);
+        }
+
+        if (ENABLE_TECHNICAL_ANALYSIS) {
+            this.technicalIndicators = new TechnicalIndicators();
+        }
+
+        if (ENABLE_ANOMALY_DETECTION) {
+            this.anomalyDetector = new AnomalyDetector(logger, database);
+        }
+
+        // New Sniper Modules (Pure RPC)
+        this.pumpMonitor = new PumpMonitor(rpcConnection.getCurrentConnection(), logger);
+        this.tokenFilter = new TokenFilter(rpcConnection.getCurrentConnection(), logger);
+        this.bondingCurve = new BondingCurveManager(rpcConnection.getCurrentConnection(), logger);
     }
-}
 
-formatSellMessageWithBalance(trade, user, updatedBalances) {
-    const emoji = trade.profit > 0 ? '✅' : '⚠️';
-    const color = trade.profit > 0 ? '🟢' : '🔴';
-    const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
-    
-    const reasonEmojis = {
-        'scalp_profit': '⚡ Quick Profit',
-        'extended_profit': '🎯 Target Hit',
-        'stop_loss': '🛡️ Stop Loss'
-    };
-    
-    const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
-    
-    return `
+    async startPositionMonitor() {
+        const runMonitor = async () => {
+            let minDelay = 15000; // Default 15s (reduced from 60s)
+
+            try {
+                // Check WS Staleness
+                const lastEvent = this.pumpMonitor ? this.pumpMonitor.getLastEventTime() : 0;
+                if (Date.now() - lastEvent > 60000) {
+                    logger.warn('⚠️ WebSocket stale (>60s). Forcing poll...');
+                }
+
+                for (const [userId, user] of this.userStates.entries()) {
+                    if (user.isActive && user.position) {
+                        try {
+                            await this.monitorPosition(userId);
+
+                            // Adaptive Interval Logic
+                            const pos = user.position;
+                            if (pos) {
+                                const currentPrice = await this.getCurrentPrice(pos.tokenAddress);
+                                if (currentPrice) {
+                                    const pnl = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+                                    if (pnl < -10) minDelay = Math.min(minDelay, 2000); // 2s panic mode
+                                    else if (pnl < -5) minDelay = Math.min(minDelay, 5000); // 5s concern mode
+                                }
+                            }
+                        } catch (err) { logger.error(`Monitor Pos Error ${userId}`, { error: err.message }); }
+                    }
+                }
+            } catch (error) {
+                logger.error('Monitor error', { error: error.message });
+            }
+
+            // Schedule next run
+            this.monitorTimeout = setTimeout(runMonitor, minDelay);
+        };
+
+        runMonitor();
+    }
+
+    async init() {
+        logger.info('Trading engine initializing...');
+
+        try {
+            // Database init
+            console.log('📦 Step 1: Initializing database...');
+            await this.database.init();
+            logger.info('✅ Database initialized');
+
+            // Event Router Setup
+            console.log('🎯 Step 2: Starting Pump.fun Monitor & Event Router...');
+
+            // Strategy A: Salary Snipe (New Tokens)
+            this.pumpMonitor.on('create', this.handleSalaryStrategy.bind(this));
+
+            // Strategy B: Graduation Snipe (Migration Play)
+            this.pumpMonitor.on('buy', this.handleGraduationStrategy.bind(this));
+
+            await this.pumpMonitor.start();
+            logger.info('✅ Event Router active');
+
+            // Load state from database
+            console.log('💾 Step 3: Loading user state...');
+            await this.loadState();
+
+            // 🔥 FIX: Sync all users with wallet balance on startup
+            console.log('💰 Step 4: Syncing wallet balances...');
+            const balances = await this.getWalletBalance();
+            const tradingBalance = balances.trading;
+
+            console.log(`   Wallet has: ${tradingBalance.toFixed(4)} available for trading`);
+
+            for (const userId of AUTHORIZED_USERS) {
+                let user = this.userStates.get(userId);
+
+                if (!user) {
+                    console.log(`   Creating new user: ${userId}`);
+                    user = this.getUserState(userId);
+                }
+
+                // Get from database
+                let dbUser = null;
+                try {
+                    dbUser = await this.database.getUser(userId.toString());
+                } catch (err) {
+                    logger.warn('Failed to load user from DB', { userId, error: err.message });
+                }
+
+                if (!dbUser) {
+                    // New user - initialize with wallet balance
+                    console.log(`   📝 New user ${userId} - initializing with wallet balance`);
+                    user.startingBalance = tradingBalance;
+                    user.currentBalance = tradingBalance;  // 🔥 SET THIS
+                    user.dailyStartBalance = tradingBalance;
+                    user.tradingCapital = tradingBalance;
+                    user.isActive = false; // Will be activated by /start
+
+                    await this.database.createUser(userId.toString(), tradingBalance);
+                    console.log(`   ✅ Created with balance: ${tradingBalance.toFixed(4)}`);
+                } else {
+                    // Existing user - load from DB but sync balance with wallet
+                    console.log(`   📝 Existing user ${userId}`);
+                    console.log(`      DB balance: ${dbUser.current_balance?.toFixed(4) || '0'}`);
+                    console.log(`      Wallet balance: ${tradingBalance.toFixed(4)}`);
+
+                    user.isActive = dbUser.is_active === 1;
+                    user.startingBalance = dbUser.starting_balance || tradingBalance;
+                    user.dailyStartBalance = dbUser.daily_start_balance || tradingBalance;
+                    user.dailyProfit = dbUser.daily_profit || 0;
+                    user.dailyProfitPercent = dbUser.daily_profit_percent || 0;
+                    user.currentDay = dbUser.current_day || 1;
+                    user.totalTrades = dbUser.total_trades || 0;
+                    user.successfulTrades = dbUser.successful_trades || 0;
+                    user.lastTradeAt = dbUser.last_trade_at || 0;
+                    user.dailyResetAt = dbUser.daily_reset_at || Date.now();
+                    user.totalProfitTaken = dbUser.total_profit_taken || 0;
+
+                    // 🔥 CRITICAL: Always use wallet balance as source of truth
+                    user.currentBalance = tradingBalance;
+                    user.tradingCapital = tradingBalance;
+
+                    console.log(`   ✅ Loaded and synced to wallet: ${user.currentBalance.toFixed(4)}`);
+                }
+
+                // Store updated state
+                this.userStates.set(userId, user);
+
+                console.log(`   Final state: active=${user.isActive}, balance=${user.currentBalance.toFixed(4)}`);
+            }
+
+            console.log('\n📊 Initialization Summary:');
+            console.log(`   Total users: ${this.userStates.size}`);
+            console.log(`   Active users: ${Array.from(this.userStates.values()).filter(u => u.isActive).length}`);
+
+            logger.info('✅ Trading engine initialized');
+
+        } catch (error) {
+            console.error('❌ Initialization failed:', error.message);
+            logger.error('Initialization failed', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error;
+        }
+    }
+
+    async handleSalaryStrategy(event) {
+        // STRATEGY A: "The Salary Snipe" (New Token Volatility)
+        if (this.portfolioManager.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) return;
+
+        // Use the TokenFilter to analyze the "Create" event
+        const tokenAnalysis = await this.tokenFilter.analyzeToken(event.signature);
+        if (!tokenAnalysis) return;
+
+        // Duplicate Check 1: Recently Processed
+        const now = Date.now();
+        if (this.decisionCache.has(tokenAnalysis.mint)) {
+            const lastTime = this.decisionCache.get(tokenAnalysis.mint);
+            if (now - lastTime < 60000) { // 60s cooldown
+                return;
+            }
+        }
+
+        // Duplicate Check 2: Active Position
+        if (this.portfolioManager.hasPosition(tokenAnalysis.mint)) {
+            return;
+        }
+
+        // Mark as processed
+        this.decisionCache.set(tokenAnalysis.mint, now);
+
+        logger.info(`Salary Snipe Candidate: ${tokenAnalysis.mint} (${tokenAnalysis.age}s)`);
+
+        // Jitter: 50-200ms delay to avoid exact block pulse (Sandwich Mitigation)
+        const jitter = Math.floor(Math.random() * 151) + 50;
+        await new Promise(r => setTimeout(r, jitter));
+
+        await this.executeStrategyTrade(tokenAnalysis.mint, 'SALARY_SNIPE', 0.5);
+        // Fixed 0.5 SOL for Salary Snipe checks
+    }
+
+    async handleGraduationStrategy(event) {
+        // STRATEGY B: "The 93% Graduation Sniper" (Migration Play)
+        if (this.portfolioManager.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) return;
+
+        // We need the mint address from the Buy transaction
+        // Since we don't have it in the event, we must fetch the tx
+        // Optimization: In a real HFT scenario, we might parse logs smarter, but here we fetch.
+        let mint = null;
+        try {
+            const tx = await this.rpcConnection.getCurrentConnection().getParsedTransaction(event.signature, {
+                maxSupportedTransactionVersion: 0,
+                commitment: 'confirmed'
+            });
+
+            if (!tx || !tx.meta || !tx.meta.postTokenBalances || tx.meta.postTokenBalances.length === 0) return;
+
+            // Find the token mint (not SOL)
+            const tokenBalance = tx.meta.postTokenBalances.find(b => b.mint !== 'So11111111111111111111111111111111111111112');
+            if (tokenBalance) {
+                mint = tokenBalance.mint;
+            }
+        } catch (e) {
+            return; // Failed to parse
+        }
+
+        if (!mint) return;
+
+        // Check Graduation Progress locally
+        const graduationCheck = await this.bondingCurve.checkGraduation(mint, 93); // 93% threshold
+
+        if (graduationCheck && graduationCheck.isGraduating && !graduationCheck.isComplete) {
+            logger.info(`🎓 Graduation Sniper Trigger: ${mint} @ ${graduationCheck.data.progress.toFixed(2)}%`);
+
+            // Dynamic position sizing for graduation (larger confidence)
+            await this.executeStrategyTrade(mint, 'GRADUATION_SNIPER', null); // null = use default calc
+        }
+    }
+
+    async executeStrategyTrade(mint, strategyName, fixedSizeOverride = null) {
+        const activeUser = Array.from(this.userStates.values()).find(u => u.isActive);
+        if (!activeUser) return;
+
+        // Circuit Breaker Check
+        if (!this.circuitBreaker.canTrade()) {
+            logger.warn('Circuit breaker active - skipping trade');
+            return;
+        }
+
+        try {
+            // Global Wallet Lock
+            await this.tradeMutex.runExclusive(async () => {
+                const currentBalance = activeUser.tradingCapital;
+                let tradeSize = fixedSizeOverride;
+
+                // Calculate Position Size if not overridden
+                if (!tradeSize) {
+                    if (POSITION_SIZE_MODE === 'PERCENTAGE') {
+                        tradeSize = currentBalance * PERCENTAGE_POSITION_SIZE;
+                    } else {
+                        tradeSize = FIXED_POSITION_SIZE; // Fallback
+                    }
+                }
+
+                // Sanity check bounds
+                tradeSize = Math.max(MIN_POSITION_SIZE, Math.min(tradeSize, MAX_POSITION_SIZE));
+                tradeSize = Math.max(0.01, Math.min(tradeSize, currentBalance * 0.4)); // Hard cap 40%
+
+                logger.info(`Executing ${strategyName} on ${mint} | Size: ${tradeSize.toFixed(4)} SOL`);
+
+                const result = ENABLE_PAPER_TRADING
+                    ? { success: true, signature: 'paper_trade_' + Date.now() }
+                    : await this.pumpDirect.executeBuy({
+                        wallet: this.wallet,
+                        mint: mint,
+                        amountSOL: tradeSize,
+                        priorityFeeLamports: 200000
+                    });
+
+                if (result.success) {
+                    logger.info(`Buy executed: ${result.signature}`);
+
+                    // Record Position
+                    this.portfolioManager.addPosition(mint, {
+                        symbol: 'PUMP-' + mint.substring(0, 4),
+                        mint: mint,
+                        entryPrice: 0,
+                        amountToken: 0,
+                        investedUSDC: tradeSize * 200, // Approx
+                        entryTime: Date.now(),
+                        strategy: strategyName,
+                        stopLoss: PER_TRADE_STOP_LOSS,
+                        takeProfit: PER_TRADE_PROFIT_TARGET
+                    });
+
+                    // Notify User
+                    this.bot.bot.sendMessage(activeUser.userId,
+                        `🎯 <b>${strategyName} EXECUTED</b>\n\n` +
+                        `CA: <code>${mint}</code>\n` +
+                        `Size: ${tradeSize.toFixed(4)} SOL\n` +
+                        `TX: https://solscan.io/tx/${result.signature}`,
+                        { parse_mode: 'HTML' }
+                    );
+                }
+            });
+        } catch (error) {
+            logger.error('Trade execution failed', { error: error.message });
+        }
+    }
+
+    formatSellMessageWithBalance(trade, user, updatedBalances) {
+        const emoji = trade.profit > 0 ? '✅' : '⚠️';
+        const color = trade.profit > 0 ? '🟢' : '🔴';
+        const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+
+        const reasonEmojis = {
+            'scalp_profit': '⚡ Quick Profit',
+            'extended_profit': '🎯 Target Hit',
+            'stop_loss': '🛡️ Stop Loss'
+        };
+
+        const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
+
+        return `
 ${emoji} <b>POSITION CLOSED</b> ${color}
 
 <b>${trade.symbol}</b>
@@ -1392,7 +1115,7 @@ ${emoji} <b>POSITION CLOSED</b> ${color}
 💰 <b>Trade Summary</b>
 ├ Entry: $${trade.entryPrice.toFixed(8)}
 ├ Exit: $${trade.exitPrice.toFixed(8)}
-├ Change: ${((trade.exitPrice/trade.entryPrice - 1) * 100).toFixed(2)}%
+├ Change: ${((trade.exitPrice / trade.entryPrice - 1) * 100).toFixed(2)}%
 └ Hold Time: ${trade.holdTimeMinutes}m
 
 📊 <b>Financial Result</b>
@@ -1412,584 +1135,503 @@ ${emoji} <b>POSITION CLOSED</b> ${color}
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
     `.trim();
-}
-
- 
-async getWalletBalance() {
-    try {
-        console.log('\n' + '='.repeat(60));
-        console.log('FETCHING WALLET BALANCE');
-        console.log('='.repeat(60));
-
-        const operation = async (conn) => await conn.getBalance(this.wallet.publicKey);
-        const lamports = await this.rpcConnection.executeWithFallback(operation, 'getBalance');
-        const nativeSOL = lamports / LAMPORTS_PER_SOL;
-
-        const tokenBalances = await this.getAllTokenBalances();
-
-        const usdcBalance = tokenBalances.find(t => t.mint === USDC_MINT)?.balance || 0;
-        const wsolBalance = tokenBalances.find(t => t.mint === SOL_MINT)?.balance || 0;
-
-        console.log(`\nNative SOL: ${nativeSOL.toFixed(6)}`);
-        console.log(`Wrapped SOL: ${wsolBalance.toFixed(6)}`);
-        console.log(`USDC: ${usdcBalance.toFixed(2)}`);
-
-        // Trading balance = native SOL (priority) or USDC if large
-        const tradingBalance = nativeSOL + wsolBalance; // Pure SOL focus
-
-        console.log(`\nTrading Balance: ${tradingBalance.toFixed(6)} SOL`);
-        console.log('='.repeat(60) + '\n');
-
-        return {
-            nativeSOL,
-            wsol: wsolBalance,
-            usdc: usdcBalance,
-            trading: tradingBalance, // This is now SOL
-            allTokens: tokenBalances
-        };
-    } catch (error) {
-        logger.error('Wallet balance fetch failed', { error: error.message });
-        return { nativeSOL: 0, trading: 0, usdc: 0, allTokens: [] };
     }
-}
 
-async getAllTokenBalances() {
-    try {
-        const operation = async (conn) => {
-            const accounts = await conn.getTokenAccountsByOwner(this.wallet.publicKey, {
-                programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
-            });
 
-            const balances = [];
-            const SOL_MINT = 'So11111111111111111111111111111111111111112';
-            const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    async getWalletBalance() {
+        try {
+            console.log('\n' + '='.repeat(60));
+            console.log('FETCHING WALLET BALANCE');
+            console.log('='.repeat(60));
 
-            for (const account of accounts.value) {
-                const data = account.account.data;
-                const raw = Buffer.from(data.parsed.info.tokenAmount.uiAmountString);
-                const mint = data.parsed.info.mint;
-                const amount = parseFloat(data.parsed.info.tokenAmount.uiAmountString || '0');
-                const decimals = data.parsed.info.tokenAmount.decimals;
+            const operation = async (conn) => await conn.getBalance(this.wallet.publicKey);
+            const lamports = await this.rpcConnection.executeWithFallback(operation, 'getBalance');
+            const nativeSOL = lamports / LAMPORTS_PER_SOL;
 
-                let symbol = 'UNKNOWN';
-                if (mint === SOL_MINT) symbol = 'WSOL';
-                else if (mint === USDC_MINT) symbol = 'USDC';
-                else {
-                    // Try to get symbol from known list or leave as first 4 chars
-                    const known = {
-                        'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'BONK',
-                        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK', // new
-                        'A8C3xuq779jnnJDKciP5i4rK2YMa8FLbL8E3oSn2uBjt': 'GME',
-                    };
-                    symbol = known[mint] || mint.substring(0, 4).toUpperCase();
+            const tokenBalances = await this.getAllTokenBalances();
+
+            const usdcBalance = tokenBalances.find(t => t.mint === USDC_MINT)?.balance || 0;
+            const wsolBalance = tokenBalances.find(t => t.mint === SOL_MINT)?.balance || 0;
+
+            console.log(`\nNative SOL: ${nativeSOL.toFixed(6)}`);
+            console.log(`Wrapped SOL: ${wsolBalance.toFixed(6)}`);
+            console.log(`USDC: ${usdcBalance.toFixed(2)}`);
+
+            // Trading balance = native SOL (priority) or USDC if large
+            const tradingBalance = nativeSOL + wsolBalance; // Pure SOL focus
+
+            console.log(`\nTrading Balance: ${tradingBalance.toFixed(6)} SOL`);
+            console.log('='.repeat(60) + '\n');
+
+            return {
+                nativeSOL,
+                wsol: wsolBalance,
+                usdc: usdcBalance,
+                trading: tradingBalance, // This is now SOL
+                allTokens: tokenBalances
+            };
+        } catch (error) {
+            logger.error('Wallet balance fetch failed', { error: error.message });
+            return { nativeSOL: 0, trading: 0, usdc: 0, allTokens: [] };
+        }
+    }
+
+    async getAllTokenBalances() {
+        try {
+            const operation = async (conn) => {
+                const accounts = await conn.getTokenAccountsByOwner(this.wallet.publicKey, {
+                    programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+                });
+
+                const balances = [];
+                const SOL_MINT = 'So11111111111111111111111111111111111111112';
+                const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+                for (const account of accounts.value) {
+                    const data = account.account.data;
+                    const raw = Buffer.from(data.parsed.info.tokenAmount.uiAmountString);
+                    const mint = data.parsed.info.mint;
+                    const amount = parseFloat(data.parsed.info.tokenAmount.uiAmountString || '0');
+                    const decimals = data.parsed.info.tokenAmount.decimals;
+
+                    let symbol = 'UNKNOWN';
+                    if (mint === SOL_MINT) symbol = 'WSOL';
+                    else if (mint === USDC_MINT) symbol = 'USDC';
+                    else {
+                        // Try to get symbol from known list or leave as first 4 chars
+                        const known = {
+                            'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'BONK',
+                            'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK', // new
+                            'A8C3xuq779jnnJDKciP5i4rK2YMa8FLbL8E3oSn2uBjt': 'GME',
+                        };
+                        symbol = known[mint] || mint.substring(0, 4).toUpperCase();
+                    }
+
+                    if (amount > 0.000001) { // filter dust
+                        balances.push({
+                            mint,
+                            symbol,
+                            balance: amount,
+                            decimals
+                        });
+                    }
                 }
 
-                if (amount > 0.000001) { // filter dust
+                return balances.sort((a, b) => b.balance - a.balance);
+            };
+
+            return await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
+
+        } catch (error) {
+            logger.error('Failed to fetch token balances', {
+                error: error.message,
+                stack: error.stack
+            });
+            return [];
+        }
+    }
+
+    getTokenSymbol(mintAddress) {
+        const knownTokens = {
+            'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+            'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+            'So11111111111111111111111111111111111111112': 'WSOL',
+            '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
+            'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+            '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj': 'stSOL',
+            'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 'mSOL',
+            '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': 'ETH',
+            '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh': 'WBTC'
+        };
+
+        return knownTokens[mintAddress] || `UNKNOWN (${mintAddress.slice(0, 4)}...${mintAddress.slice(-4)})`;
+    }
+
+
+
+
+    async getAllTokenBalances() {
+        try {
+            const operation = async (conn) => {
+                // Get all token accounts owned by this wallet
+                const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+
+                console.log('\n=== FETCHING ALL TOKEN ACCOUNTS ===');
+                console.log('Wallet:', this.wallet.publicKey.toString());
+
+                const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
+                    this.wallet.publicKey,
+                    { programId: TOKEN_PROGRAM_ID }
+                );
+
+                console.log('Total token accounts found:', tokenAccounts.value.length);
+
+                const balances = [];
+
+                for (const account of tokenAccounts.value) {
+                    const parsedInfo = account.account.data.parsed.info;
+                    const mintAddress = parsedInfo.mint;
+                    const balance = parsedInfo.tokenAmount.uiAmount || 0;
+                    const decimals = parsedInfo.tokenAmount.decimals;
+
+                    console.log('\nToken Account:');
+                    console.log('  Mint:', mintAddress);
+                    console.log('  Balance:', balance);
+                    console.log('  Decimals:', decimals);
+                    console.log('  Symbol:', this.getTokenSymbol(mintAddress));
+
+                    // Include ALL balances, even zero, for debugging
                     balances.push({
-                        mint,
-                        symbol,
-                        balance: amount,
-                        decimals
+                        mint: mintAddress,
+                        balance: balance,
+                        decimals: decimals,
+                        symbol: this.getTokenSymbol(mintAddress),
+                        hasBalance: balance > 0
                     });
                 }
+
+                console.log('\n=== SUMMARY ===');
+                console.log('Non-zero balances:', balances.filter(b => b.balance > 0).length);
+                console.log('Zero balances:', balances.filter(b => b.balance === 0).length);
+
+                return balances;
+            };
+
+            const balances = await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
+
+            this.logger.info('All token accounts fetched', {
+                count: balances.length,
+                nonZero: balances.filter(b => b.balance > 0).length,
+                tokens: balances.filter(b => b.balance > 0).map(b => `${b.symbol}: ${b.balance.toFixed(4)}`)
+            });
+
+            return balances;
+
+        } catch (error) {
+            console.error('ERROR fetching token balances:', error);
+            this.logger.error('Failed to get all token balances', {
+                error: error.message,
+                stack: error.stack
+            });
+            return [];
+        }
+    }
+
+    getUserState(userId) {
+        if (!this.userStates.has(userId)) {
+            // Create with placeholder - will be updated in init()
+            this.userStates.set(userId, {
+                isActive: false,
+                startingBalance: 0, // Will be set from wallet
+                currentBalance: 0,
+                dailyStartBalance: 0,
+                dailyProfit: 0,
+                dailyProfitPercent: 0,
+                currentDay: 1,
+                totalTrades: 0,
+                successfulTrades: 0,
+                position: null,
+                tradeHistory: [],
+                lastTradeAt: 0,
+                dailyResetAt: Date.now(),
+                totalProfitTaken: 0,
+                profitTakingHistory: [],
+                tradingCapital: 0
+            });
+        }
+        return this.userStates.get(userId);
+    }
+
+    hasActiveUsers() {
+        for (const [userId, user] of this.userStates.entries()) {
+            if (user.isActive) return true;
+        }
+        return false;
+    }
+
+    async tradingCycle() {
+        console.log('\n' + '🔄'.repeat(30));
+        console.log('🔄 TRADING CYCLE START');
+        console.log('🔄'.repeat(30));
+
+        return this.tradeMutex.runExclusive(async () => {
+            if (this.isScanning) {
+                console.log('⏭️  Already scanning, skipping');
+                return;
             }
 
-            return balances.sort((a, b) => b.balance - a.balance);
-        };
+            this.isScanning = true;
+            console.log('✅ Scan started\n');
 
-        return await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
+            try {
+                // Get ALL active users
+                const activeUsers = Array.from(this.userStates.entries())
+                    .filter(([_, u]) => u.isActive);
 
-    } catch (error) {
-        logger.error('Failed to fetch token balances', { 
-            error: error.message,
-            stack: error.stack 
+                console.log(`👥 Active users: ${activeUsers.length}`);
+
+                if (activeUsers.length === 0) {
+                    console.log('❌ No active users - Use /start in Telegram\n');
+                    return;
+                }
+
+                const [userId, user] = activeUsers[0];
+                console.log(`Trading for user: ${userId}`);
+                console.log(`Balance: ${user.currentBalance.toFixed(4)}`);
+                console.log(`Has position: ${user.position ? 'YES' : 'NO'}`);
+
+                // Check daily reset
+                await this.checkDailyReset(user, userId);
+
+                // Check daily target (only check, don't block if disabled)
+                const targetHit = this.isDailyTargetHit(user);
+                if (targetHit) {
+                    console.log('🎯 Daily target hit - in cooldown');
+                    return;
+                }
+
+                // Check max positions
+                const canAddPosition = this.portfolioManager.canAddPosition();
+                console.log(`💼 Can add position: ${canAddPosition}`);
+                console.log(`   Current: ${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}`);
+
+                if (!canAddPosition) {
+                    console.log('⚠️  Max positions reached');
+                    return;
+                }
+
+                // 🔥 FIND OPPORTUNITY - NO BLOCKS
+                console.log('\n🔍 SEARCHING FOR OPPORTUNITIES...\n');
+                const opportunity = await this.findTradingOpportunity(userId);
+
+                if (opportunity) {
+                    console.log('✅ OPPORTUNITY FOUND!');
+                    console.log('   Symbol:', opportunity.symbol);
+                    console.log('   Bonding:', opportunity.bondingProgress.toFixed(1) + '%');
+                    console.log('   Liquidity: $' + opportunity.liquidityUSD.toFixed(0));
+
+                    // 🚀 EXECUTE IMMEDIATELY
+                    await this.executeBuy(userId, opportunity);
+                } else {
+                    console.log('❌ No opportunity found');
+                }
+
+            } catch (err) {
+                console.error('💥 CYCLE ERROR:', err.message);
+                console.error('Stack:', err.stack);
+            } finally {
+                this.isScanning = false;
+                console.log('\n' + '🔄'.repeat(30));
+                console.log('🔄 CYCLE COMPLETE');
+                console.log('🔄'.repeat(30) + '\n');
+            }
         });
-        return [];
     }
-}
-
-getTokenSymbol(mintAddress) {
-    const knownTokens = {
-        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
-        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
-        'So11111111111111111111111111111111111111112': 'WSOL',
-        '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
-        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
-        '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj': 'stSOL',
-        'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 'mSOL',
-        '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': 'ETH',
-        '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh': 'WBTC'
-    };
-    
-    return knownTokens[mintAddress] || `UNKNOWN (${mintAddress.slice(0, 4)}...${mintAddress.slice(-4)})`;
-}
 
 
+    async saveState() {
+        try {
+            if (!this.database) {
+                this.logger.warn('No database, skipping state save');
+                return;
+            }
 
-
-async getAllTokenBalances() {
-    try {
-        const operation = async (conn) => {
-            // Get all token accounts owned by this wallet
-            const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-            
-            console.log('\n=== FETCHING ALL TOKEN ACCOUNTS ===');
-            console.log('Wallet:', this.wallet.publicKey.toString());
-            
-            const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
-                this.wallet.publicKey,
-                { programId: TOKEN_PROGRAM_ID }
-            );
-
-            console.log('Total token accounts found:', tokenAccounts.value.length);
-
-            const balances = [];
-            
-            for (const account of tokenAccounts.value) {
-                const parsedInfo = account.account.data.parsed.info;
-                const mintAddress = parsedInfo.mint;
-                const balance = parsedInfo.tokenAmount.uiAmount || 0;
-                const decimals = parsedInfo.tokenAmount.decimals;
-                
-                console.log('\nToken Account:');
-                console.log('  Mint:', mintAddress);
-                console.log('  Balance:', balance);
-                console.log('  Decimals:', decimals);
-                console.log('  Symbol:', this.getTokenSymbol(mintAddress));
-                
-                // Include ALL balances, even zero, for debugging
-                balances.push({
-                    mint: mintAddress,
-                    balance: balance,
-                    decimals: decimals,
-                    symbol: this.getTokenSymbol(mintAddress),
-                    hasBalance: balance > 0
+            for (const [userId, user] of this.userStates.entries()) {
+                await this.database.updateUser(userId, {
+                    is_active: user.isActive ? 1 : 0,
+                    current_balance: user.currentBalance,
+                    daily_start_balance: user.dailyStartBalance,
+                    daily_profit: user.dailyProfit,
+                    daily_profit_percent: user.dailyProfitPercent,
+                    current_day: user.currentDay,
+                    total_trades: user.totalTrades,
+                    successful_trades: user.successfulTrades,
+                    last_trade_at: user.lastTradeAt,
+                    daily_reset_at: user.dailyResetAt,
+                    total_profit_taken: user.totalProfitTaken,
+                    trading_capital: user.tradingCapital
                 });
             }
-            
-            console.log('\n=== SUMMARY ===');
-            console.log('Non-zero balances:', balances.filter(b => b.balance > 0).length);
-            console.log('Zero balances:', balances.filter(b => b.balance === 0).length);
-            
-            return balances;
-        };
 
-        const balances = await this.rpcConnection.executeWithFallback(operation, 'getAllTokenBalances');
-        
-        this.logger.info('All token accounts fetched', { 
-            count: balances.length,
-            nonZero: balances.filter(b => b.balance > 0).length,
-            tokens: balances.filter(b => b.balance > 0).map(b => `${b.symbol}: ${b.balance.toFixed(4)}`)
-        });
-        
-        return balances;
-        
-    } catch (error) {
-        console.error('ERROR fetching token balances:', error);
-        this.logger.error('Failed to get all token balances', { 
-            error: error.message,
-            stack: error.stack
-        });
-        return [];
-    }
-}
-
-getUserState(userId) {
-    if (!this.userStates.has(userId)) {
-        // Create with placeholder - will be updated in init()
-        this.userStates.set(userId, {
-            isActive: false,
-            startingBalance: 0, // Will be set from wallet
-            currentBalance: 0,
-            dailyStartBalance: 0,
-            dailyProfit: 0,
-            dailyProfitPercent: 0,
-            currentDay: 1,
-            totalTrades: 0,
-            successfulTrades: 0,
-            position: null,
-            tradeHistory: [],
-            lastTradeAt: 0,
-            dailyResetAt: Date.now(),
-            totalProfitTaken: 0,
-            profitTakingHistory: [],
-            tradingCapital: 0
-        });
-    }
-    return this.userStates.get(userId);
-}
-
-  hasActiveUsers() {
-      for (const [userId, user] of this.userStates.entries()) {
-          if (user.isActive) return true;
-      }
-      return false;
-  }
-
-  async tradingCycle() {
-    console.log('\n' + '🔄'.repeat(30));
-    console.log('🔄 TRADING CYCLE START');
-    console.log('🔄'.repeat(30));
-    
-    return this.tradeMutex.runExclusive(async () => {
-        if (this.isScanning) {
-            console.log('⏭️  Already scanning, skipping');
-            return;
+            this.logger.debug('State saved to database');
+        } catch (error) {
+            this.logger.error('Failed to save state', { error: error.message });
         }
+    }
 
-        this.isScanning = true;
-        console.log('✅ Scan started\n');
-
+    async loadState() {
         try {
-            // Get ALL active users
-            const activeUsers = Array.from(this.userStates.entries())
-                .filter(([_, u]) => u.isActive);
-            
-            console.log(`👥 Active users: ${activeUsers.length}`);
-            
-            if (activeUsers.length === 0) {
-                console.log('❌ No active users - Use /start in Telegram\n');
+            if (!this.database) {
+                this.logger.warn('No database, skipping state load');
                 return;
             }
 
-            const [userId, user] = activeUsers[0];
-            console.log(`Trading for user: ${userId}`);
-            console.log(`Balance: ${user.currentBalance.toFixed(4)}`);
-            console.log(`Has position: ${user.position ? 'YES' : 'NO'}`);
-            
-            // Check daily reset
-            await this.checkDailyReset(user, userId);
+            // Load active users
+            for (const userId of AUTHORIZED_USERS) {
+                const dbUser = await this.database.getUser(userId);
 
-            // Check daily target (only check, don't block if disabled)
-            const targetHit = this.isDailyTargetHit(user);
-            if (targetHit) {
-                console.log('🎯 Daily target hit - in cooldown');
-                return;
-            }
+                if (!dbUser) {
+                    await this.database.createUser(userId, 20);
+                    this.logger.info('Created new user', { userId });
+                } else {
+                    this.userStates.set(userId, {
+                        isActive: dbUser.is_active === 1,
+                        startingBalance: dbUser.starting_balance,
+                        currentBalance: dbUser.current_balance,
+                        dailyStartBalance: dbUser.daily_start_balance,
+                        dailyProfit: dbUser.daily_profit,
+                        dailyProfitPercent: dbUser.daily_profit_percent,
+                        currentDay: dbUser.current_day,
+                        totalTrades: dbUser.total_trades,
+                        successfulTrades: dbUser.successful_trades,
+                        position: null, // Positions loaded separately
+                        tradeHistory: [],
+                        lastTradeAt: dbUser.last_trade_at,
+                        dailyResetAt: dbUser.daily_reset_at,
+                        totalProfitTaken: dbUser.total_profit_taken,
+                        profitTakingHistory: [],
+                        tradingCapital: dbUser.trading_capital
+                    });
 
-            // Check max positions
-            const canAddPosition = this.portfolioManager.canAddPosition();
-            console.log(`💼 Can add position: ${canAddPosition}`);
-            console.log(`   Current: ${this.portfolioManager.positions.size}/${MAX_CONCURRENT_POSITIONS}`);
-            
-            if (!canAddPosition) {
-                console.log('⚠️  Max positions reached');
-                return;
-            }
+                    // Load active positions
+                    const activePositions = await this.database.getActivePositions(userId);
+                    if (activePositions.length > 0) {
+                        // Take the most recent one
+                        const pos = activePositions[0];
+                        this.userStates.get(userId).position = {
+                            tokenAddress: pos.token_address,
+                            symbol: pos.symbol,
+                            entryPrice: pos.entry_price,
+                            entryTime: pos.entry_time,
+                            tokensOwned: pos.tokens_owned,
+                            investedUSDC: pos.invested_usdc,
+                            targetPrice: pos.target_price,
+                            stopLossPrice: pos.stop_loss_price,
+                            scalpMode: pos.scalp_mode === 1,
+                            txSignature: pos.tx_signature,
+                            bondingProgress: pos.bonding_progress,
+                            liquidityUSD: pos.liquidity_usd,
+                            tokenDecimals: pos.token_decimals,
+                            positionSizeMode: pos.position_size_mode
+                        };
 
-            // 🔥 FIND OPPORTUNITY - NO BLOCKS
-            console.log('\n🔍 SEARCHING FOR OPPORTUNITIES...\n');
-            const opportunity = await this.findTradingOpportunity(userId);
-            
-            if (opportunity) {
-                console.log('✅ OPPORTUNITY FOUND!');
-                console.log('   Symbol:', opportunity.symbol);
-                console.log('   Bonding:', opportunity.bondingProgress.toFixed(1) + '%');
-                console.log('   Liquidity: $' + opportunity.liquidityUSD.toFixed(0));
-                
-                // 🚀 EXECUTE IMMEDIATELY
-                await this.executeBuy(userId, opportunity);
-            } else {
-                console.log('❌ No opportunity found');
-            }
-
-        } catch (err) {
-            console.error('💥 CYCLE ERROR:', err.message);
-            console.error('Stack:', err.stack);
-        } finally {
-            this.isScanning = false;
-            console.log('\n' + '🔄'.repeat(30));
-            console.log('🔄 CYCLE COMPLETE');
-            console.log('🔄'.repeat(30) + '\n');
-        }
-    });
-}
-
-
-  async saveState() {
-      try {
-          if (!this.database) {
-              this.logger.warn('No database, skipping state save');
-              return;
-          }
-
-          for (const [userId, user] of this.userStates.entries()) {
-              await this.database.updateUser(userId, {
-                  is_active: user.isActive ? 1 : 0,
-                  current_balance: user.currentBalance,
-                  daily_start_balance: user.dailyStartBalance,
-                  daily_profit: user.dailyProfit,
-                  daily_profit_percent: user.dailyProfitPercent,
-                  current_day: user.currentDay,
-                  total_trades: user.totalTrades,
-                  successful_trades: user.successfulTrades,
-                  last_trade_at: user.lastTradeAt,
-                  daily_reset_at: user.dailyResetAt,
-                  total_profit_taken: user.totalProfitTaken,
-                  trading_capital: user.tradingCapital
-              });
-          }
-
-          this.logger.debug('State saved to database');
-      } catch (error) {
-          this.logger.error('Failed to save state', { error: error.message });
-      }
-  }
-
-  async loadState() {
-      try {
-          if (!this.database) {
-              this.logger.warn('No database, skipping state load');
-              return;
-          }
-
-          // Load active users
-          for (const userId of AUTHORIZED_USERS) {
-              const dbUser = await this.database.getUser(userId);
-              
-              if (!dbUser) {
-                  await this.database.createUser(userId, 20);
-                  this.logger.info('Created new user', { userId });
-              } else {
-                  this.userStates.set(userId, {
-                      isActive: dbUser.is_active === 1,
-                      startingBalance: dbUser.starting_balance,
-                      currentBalance: dbUser.current_balance,
-                      dailyStartBalance: dbUser.daily_start_balance,
-                      dailyProfit: dbUser.daily_profit,
-                      dailyProfitPercent: dbUser.daily_profit_percent,
-                      currentDay: dbUser.current_day,
-                      totalTrades: dbUser.total_trades,
-                      successfulTrades: dbUser.successful_trades,
-                      position: null, // Positions loaded separately
-                      tradeHistory: [],
-                      lastTradeAt: dbUser.last_trade_at,
-                      dailyResetAt: dbUser.daily_reset_at,
-                      totalProfitTaken: dbUser.total_profit_taken,
-                      profitTakingHistory: [],
-                      tradingCapital: dbUser.trading_capital
-                  });
-
-                  // Load active positions
-                  const activePositions = await this.database.getActivePositions(userId);
-                  if (activePositions.length > 0) {
-                      // Take the most recent one
-                      const pos = activePositions[0];
-                      this.userStates.get(userId).position = {
-                          tokenAddress: pos.token_address,
-                          symbol: pos.symbol,
-                          entryPrice: pos.entry_price,
-                          entryTime: pos.entry_time,
-                          tokensOwned: pos.tokens_owned,
-                          investedUSDC: pos.invested_usdc,
-                          targetPrice: pos.target_price,
-                          stopLossPrice: pos.stop_loss_price,
-                          scalpMode: pos.scalp_mode === 1,
-                          txSignature: pos.tx_signature,
-                          bondingProgress: pos.bonding_progress,
-                          liquidityUSD: pos.liquidity_usd,
-                          tokenDecimals: pos.token_decimals,
-                          positionSizeMode: pos.position_size_mode
-                      };
-
-                      this.portfolioManager.addPosition(pos.token_address, this.userStates.get(userId).position);
-                  }
-
-                  this.logger.info('User state loaded', { userId, balance: dbUser.current_balance });
-              }
-          }
-      } catch (error) {
-          this.logger.error('Failed to load state', { error: error.message });
-      }
-  }
-
-  async checkDailyReset(user, userId) {
-      const now = Date.now();
-      const hoursSinceReset = (now - user.dailyResetAt) / 3600000;
-
-      if (hoursSinceReset >= COOLDOWN_HOURS) {
-          this.logger.info('Daily reset triggered', { day: user.currentDay });
-          
-          if (ENABLE_PROFIT_TAKING && user.currentBalance > PROFIT_TAKING_THRESHOLD && user.dailyProfit > 0) {
-              const profitToTake = user.dailyProfit * PROFIT_TAKING_PERCENTAGE;
-              const newBalance = user.currentBalance - profitToTake;
-              
-              this.logger.info('Profit taking', { amount: profitToTake.toFixed(2), percentage: PROFIT_TAKING_PERCENTAGE * 100 });
-              
-              user.totalProfitTaken += profitToTake;
-              user.profitTakingHistory.push({
-                  date: new Date().toISOString(),
-                  day: user.currentDay,
-                  profitTaken: profitToTake,
-                  dailyProfit: user.dailyProfit,
-                  balanceBefore: user.currentBalance,
-                  balanceAfter: newBalance
-              });
-              
-              user.currentBalance = newBalance;
-              user.tradingCapital = newBalance;
-              
-              await this.bot.sendMessage(userId, this.formatProfitTakingMessage(profitToTake, user), {
-                  parse_mode: 'HTML'
-              }).catch(err => this.logger.error('Failed to send profit taking message', { error: err.message }));
-          }
-          
-          // Save performance metrics
-          await this.performanceTracker.saveMetrics(userId);
-          
-          user.dailyStartBalance = user.currentBalance;
-          user.dailyProfit = 0;
-          user.dailyProfitPercent = 0;
-          user.dailyResetAt = now;
-          user.currentDay += 1;
-
-          await this.saveState();
-          return true;
-      }
-      return false;
-  }
-
-  isDailyTargetHit(user) {
-      return user.dailyProfitPercent >= DAILY_PROFIT_TARGET || 
-             user.dailyProfitPercent <= -DAILY_STOP_LOSS;
-  }
-
-  async findTradingOpportunity(userId) {
-    try {
-        console.log('\n' + '='.repeat(60));
-        console.log('🔍 TOKEN SCAN START');
-        console.log('='.repeat(60));
-
-        const candidates = await this.bitquery.getGraduatingTokens();
-        if (!candidates.length) {
-            console.log('❌ No candidates from BitQuery');
-            return null;
-        }
-        console.log(`✅ Found ${candidates.length} tokens`);
-
-        console.log('\n📊 Top Candidates:');
-        candidates.slice(0, 5).forEach((token, i) => {
-            console.log(` ${i+1}. ${token.symbol} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liq`);
-        });
-
-        const tokensToAnalyze = candidates.slice(0, MAX_CANDIDATES_TO_ANALYZE);
-
-        for (const token of tokensToAnalyze) {
-            console.log(`\n🔎 Analyzing: ${token.symbol}`);
-            console.log(` Bonding: ${token.bondingProgress.toFixed(1)}%`);
-            console.log(` Liquidity: $${token.liquidityUSD.toFixed(0)}`);
-
-            // Volume check
-            if (ENABLE_VOLUME_CHECK) {
-                try {
-                    const volume = await this.bitquery.getVolumeHistory(token.address);
-                    if (!volume.spike) {
-                        console.log(` ❌ No volume spike - SKIPPING`);
-                        continue;
+                        this.portfolioManager.addPosition(pos.token_address, this.userStates.get(userId).position);
                     }
-                    console.log(` ✅ Volume spike: ${(volume.recent / volume.previous).toFixed(2)}x`);
-                } catch (err) {
-                    console.log(` ⚠️ Volume check failed - continuing`);
+
+                    this.logger.info('User state loaded', { userId, balance: dbUser.current_balance });
                 }
             }
+        } catch (error) {
+            this.logger.error('Failed to load state', { error: error.message });
+        }
+    }
 
-            // Whale check
-            if (ENABLE_WHALE_CHECK) {
-                try {
-                    const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
-                    if (whaleDump) {
-                        console.log(` ❌ Whale dump detected - SKIPPING`);
-                        continue;
-                    }
-                } catch (err) {
-                    console.log(` ⚠️ Whale check failed - continuing`);
-                }
+    async checkDailyReset(user, userId) {
+        const now = Date.now();
+        const hoursSinceReset = (now - user.dailyResetAt) / 3600000;
+
+        if (hoursSinceReset >= COOLDOWN_HOURS) {
+            this.logger.info('Daily reset triggered', { day: user.currentDay });
+
+            if (ENABLE_PROFIT_TAKING && user.currentBalance > PROFIT_TAKING_THRESHOLD && user.dailyProfit > 0) {
+                const profitToTake = user.dailyProfit * PROFIT_TAKING_PERCENTAGE;
+                const newBalance = user.currentBalance - profitToTake;
+
+                this.logger.info('Profit taking', { amount: profitToTake.toFixed(2), percentage: PROFIT_TAKING_PERCENTAGE * 100 });
+
+                user.totalProfitTaken += profitToTake;
+                user.profitTakingHistory.push({
+                    date: new Date().toISOString(),
+                    day: user.currentDay,
+                    profitTaken: profitToTake,
+                    dailyProfit: user.dailyProfit,
+                    balanceBefore: user.currentBalance,
+                    balanceAfter: newBalance
+                });
+
+                user.currentBalance = newBalance;
+                user.tradingCapital = newBalance;
+
+                await this.bot.sendMessage(userId, this.formatProfitTakingMessage(profitToTake, user), {
+                    parse_mode: 'HTML'
+                }).catch(err => this.logger.error('Failed to send profit taking message', { error: err.message }));
             }
 
-            // Technical analysis
-            if (ENABLE_TECHNICAL_ANALYSIS && this.technicalIndicators) {
-                try {
-                    const analysis = this.technicalIndicators.analyzeToken(token.address);
-                    if (analysis && analysis.score < 60) continue;
-                } catch (err) { /* continue */ }
-            }
+            // Save performance metrics
+            await this.performanceTracker.saveMetrics(userId);
 
-            // Liquidity check
-            const minTradeableUSD = 10000;
-            if (token.liquidityUSD < minTradeableUSD) {
-                console.log(` ⚠️ Liquidity too low - skipping`);
-                continue;
-            }
+            user.dailyStartBalance = user.currentBalance;
+            user.dailyProfit = 0;
+            user.dailyProfitPercent = 0;
+            user.dailyResetAt = now;
+            user.currentDay += 1;
 
-            console.log('\n🎯 TRADE SIGNAL FOUND!');
+            await this.saveState();
+            return true;
+        }
+        return false;
+    }
+
+    isDailyTargetHit(user) {
+        return user.dailyProfitPercent >= DAILY_PROFIT_TARGET ||
+            user.dailyProfitPercent <= -DAILY_STOP_LOSS;
+    }
+
+    // findTradingOpportunity removed (Pure RPC Mode)
+
+
+
+    calculatePositionSize(user, tokenLiquidity) {
+        let positionSize;
+        const strategy = this.getActiveStrategy();
+
+        switch (POSITION_SIZE_MODE) {
+            case 'FIXED':
+                positionSize = FIXED_POSITION_SIZE;
+                break;
+
+            case 'PERCENTAGE':
+                positionSize = user.currentBalance * strategy.positionSize;
+                break;
+
+            case 'DYNAMIC':
+                const liquidityLimit = tokenLiquidity * 0.02;
+                const balanceLimit = user.currentBalance * strategy.positionSize;
+                positionSize = Math.min(liquidityLimit, balanceLimit);
+                break;
+
+            default:
+                positionSize = FIXED_POSITION_SIZE;
+        }
+
+        positionSize = Math.max(MIN_POSITION_SIZE, Math.min(MAX_POSITION_SIZE, positionSize));
+        positionSize = Math.min(positionSize, user.currentBalance);
+
+        this.logger.info('Position size calculated', { size: positionSize.toFixed(2), mode: POSITION_SIZE_MODE, strategy: this.performanceTracker.metrics.strategyLevel });
+        return positionSize;
+    }
+
+    getActiveStrategy() {
+        if (!ENABLE_AUTO_ADJUSTMENT) {
             return {
-                ...token,
-                volumeRecent: 0,
-                volumePrevious: 0,
-                volumeSpike: 1  // Fixed!
+                dailyTarget: DAILY_PROFIT_TARGET,
+                perTradeTarget: PER_TRADE_PROFIT_TARGET,
+                scalpMin: SCALP_PROFIT_MIN,
+                scalpMax: SCALP_PROFIT_MAX,
+                extendedTarget: EXTENDED_HOLD_TARGET,
+                stopLoss: PER_TRADE_STOP_LOSS,
+                positionSize: PERCENTAGE_POSITION_SIZE,
+                profitTaking: PROFIT_TAKING_PERCENTAGE
             };
         }
 
-        return null;
-    } catch (error) {
-        console.error('findTradingOpportunity error:', error);
-        return null;
+        if (this.currentStrategy) return this.currentStrategy;
+
+        return this.performanceTracker.getRecommendedStrategy();
     }
-}
 
-
-
-  calculatePositionSize(user, tokenLiquidity) {
-      let positionSize;
-      const strategy = this.getActiveStrategy();
-
-      switch (POSITION_SIZE_MODE) {
-          case 'FIXED':
-              positionSize = FIXED_POSITION_SIZE;
-              break;
-
-          case 'PERCENTAGE':
-              positionSize = user.currentBalance * strategy.positionSize;
-              break;
-
-          case 'DYNAMIC':
-              const liquidityLimit = tokenLiquidity * 0.02;
-              const balanceLimit = user.currentBalance * strategy.positionSize;
-              positionSize = Math.min(liquidityLimit, balanceLimit);
-              break;
-
-          default:
-              positionSize = FIXED_POSITION_SIZE;
-      }
-
-      positionSize = Math.max(MIN_POSITION_SIZE, Math.min(MAX_POSITION_SIZE, positionSize));
-      positionSize = Math.min(positionSize, user.currentBalance);
-
-      this.logger.info('Position size calculated', { size: positionSize.toFixed(2), mode: POSITION_SIZE_MODE, strategy: this.performanceTracker.metrics.strategyLevel });
-      return positionSize;
-  }
-
-  getActiveStrategy() {
-      if (!ENABLE_AUTO_ADJUSTMENT) {
-          return {
-              dailyTarget: DAILY_PROFIT_TARGET,
-              perTradeTarget: PER_TRADE_PROFIT_TARGET,
-              scalpMin: SCALP_PROFIT_MIN,
-              scalpMax: SCALP_PROFIT_MAX,
-              extendedTarget: EXTENDED_HOLD_TARGET,
-              stopLoss: PER_TRADE_STOP_LOSS,
-              positionSize: PERCENTAGE_POSITION_SIZE,
-              profitTaking: PROFIT_TAKING_PERCENTAGE
-          };
-      }
-
-      if (this.currentStrategy) return this.currentStrategy;
-
-      return this.performanceTracker.getRecommendedStrategy();
-  }
-
-  formatProfitTakingMessage(profitTaken, user) {
-      return `
+    formatProfitTakingMessage(profitTaken, user) {
+        return `
 💰 <b>PROFIT TAKING EXECUTED</b>
 
 <b>Daily Stats:</b>
@@ -2006,968 +1648,959 @@ Combined Value: ${(user.currentBalance + user.totalProfitTaken).toFixed(2)}
 
 🎯 Your profits are being secured!
       `.trim();
-  } 
+    }
 
-  // ============ COMPLETE TRADING ENGINE - ADD THESE METHODS ============
-// Add these methods to the TradingEngine class after formatProfitTakingMessage()
+    // ============ COMPLETE TRADING ENGINE - ADD THESE METHODS ============
+    // Add these methods to the TradingEngine class after formatProfitTakingMessage()
 
 
 
-async executeBuy(userId, token) {
-    const user = this.getUserState(userId);
-    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+    async executeBuy(userId, token) {
+        return this.tradeMutex.runExclusive(() => this._executeBuyInternal(userId, token));
+    }
 
-    try {
-        console.log('\n' + '💰'.repeat(40));
-        console.log('🔵 EXECUTING BUY:', token.symbol);
-        console.log('💰'.repeat(40));
+    async _executeBuyInternal(userId, token) {
+        const user = this.getUserState(userId);
+        const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
 
-        if (ENABLE_PAPER_TRADING) {
-            return await this.executePaperBuy(userId, token);
-        }
+        try {
+            console.log('\n' + '💰'.repeat(40));
+            console.log('🔵 EXECUTING BUY:', token.symbol);
+            console.log('💰'.repeat(40));
 
-        // Position size now in native SOL
-        const positionSizeSOL = this.calculatePositionSize(user, token.liquidityUSD); // Your existing function — now returns SOL amount
-        if (positionSizeSOL > user.currentBalance) {
-            throw new Error('Insufficient SOL balance');
-        }
+            if (ENABLE_PAPER_TRADING) {
+                return await this.executePaperBuy(userId, token);
+            }
 
-        const onCurve = token.bondingProgress < 100;
-        const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(
-            token.bondingProgress >= 96,
-            token.bondingProgress >= 96 ? 'critical' : 'high'
-        );
+            // 0. Graduation Check (Pre-Trade)
+            const graduationStatus = await this.bondingCurve.checkGraduation(token.address);
+            if (graduationStatus && (graduationStatus.isComplete || graduationStatus.data.progress > 99)) {
+                throw new Error(`Token graduating or complete (Progress: ${graduationStatus.data.progress.toFixed(2)}%). Aborting buy.`);
+            }
 
-        let tokensReceived;
-        let solSpent = positionSizeSOL;
-        let entryPrice; // Price in SOL per token
-        let buySignature;
+            // Position size now in native SOL
+            // 1. Capacity Check & Sizing
+            const maxSafeSOL = await this.bondingCurve.getMaxSafeTradeSize(token.address, true);
+            let positionSizeSOL = this.calculatePositionSize(user, token.liquidityUSD);
 
-        if (onCurve) {
-            console.log(`🎪 DIRECT PUMP.FUN CURVE BUY (${solSpent.toFixed(6)} SOL)`);
+            if (positionSizeSOL > maxSafeSOL) {
+                console.log(`⚠️ Clamping buy size: ${positionSizeSOL.toFixed(4)} -> ${maxSafeSOL.toFixed(4)} SOL (Liquidity Cap)`);
+                positionSizeSOL = maxSafeSOL;
+            }
 
-            // Direct buy with native SOL — no bridge needed
-            const directResult = await this.pumpDirect.executeBuy({
-                wallet,
-                mint: token.address,
-                amountSOL: solSpent * 0.995, // 0.5% buffer for fees/slippage
-                slippageBps: 1500, // 15%
-                priorityFeeLamports: priorityFee
+            if (positionSizeSOL < 0.01) {
+                throw new Error(`Insufficient liquidity for min trade (Max safe: ${maxSafeSOL.toFixed(4)} SOL)`);
+            }
+
+            if (positionSizeSOL > user.currentBalance) {
+                throw new Error('Insufficient SOL balance');
+            }
+
+            // 2. Dynamic Slippage Check
+            const slippagePct = await this.bondingCurve.calculateSlippage(token.address, positionSizeSOL, true);
+            if (slippagePct < 0 || slippagePct > 25.0) {
+                throw new Error(`Slippage too high: ${slippagePct === -1 ? 'REJECTED' : slippagePct.toFixed(2) + '%'}`);
+            }
+            console.log(`📉 Slippage Approved: ${slippagePct.toFixed(2)}%`);
+
+            const onCurve = token.bondingProgress < 100;
+            const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(
+                token.bondingProgress >= 96,
+                token.bondingProgress >= 96 ? 'critical' : 'high'
+            );
+
+            let tokensReceived;
+            let solSpent = positionSizeSOL;
+            let entryPrice; // Price in SOL per token
+            let buySignature;
+
+            if (onCurve) {
+                console.log(`🎪 DIRECT PUMP.FUN CURVE BUY (${solSpent.toFixed(6)} SOL)`);
+
+                // Direct buy with native SOL — no bridge needed
+                const directResult = await this.pumpDirect.executeBuy({
+                    wallet,
+                    mint: token.address,
+                    amountSOL: solSpent * 0.995, // 0.5% buffer for fees/slippage
+                    slippageBps: 1500, // 15%
+                    priorityFeeLamports: priorityFee
+                });
+
+                if (!directResult.success) {
+                    throw new Error(`Direct curve buy failed: ${directResult.error}`);
+                }
+
+                buySignature = directResult.signature;
+                console.log(`✅ Direct curve buy success! Sig: ${buySignature}`);
+
+                // Get tokens received (from post-tx balance or estimation)
+                tokensReceived = await this.getTokenBalanceAfterTx(token.address, buySignature) ||
+                    this.pumpDirect.estimateTokensFromSOL(solSpent * 1e9);
+
+                entryPrice = solSpent / tokensReceived;
+
+            } else {
+                // Post-migration: Jupiter swap SOL → Token
+                console.log(`🔄 Jupiter buy (migrated token) — ${solSpent.toFixed(6)} SOL`);
+
+                const amountSOLLamports = Math.floor(solSpent * 1e9);
+
+                let quote = null;
+                for (let i = 0; i < 5; i++) {
+                    const slippageBps = this.calculateSlippage(token.liquidityUSD);
+                    quote = await this.getJupiterQuote(SOL_MINT, token.address, amountSOLLamports, slippageBps);
+                    if (quote) break;
+                    await sleep(2000);
+                }
+                if (!quote) throw new Error('No Jupiter quote available (SOL → Token)');
+
+                const swapTx = await this.executeSwap(quote, priorityFee);
+                if (!swapTx.success) throw new Error('Jupiter swap failed');
+
+                buySignature = swapTx.signature;
+                tokensReceived = parseFloat(quote.outAmount) / 1e9;
+                entryPrice = solSpent / tokensReceived;
+            }
+
+            // Create position (now in SOL)
+            const position = {
+                tokenAddress: token.address,
+                symbol: token.symbol,
+                entryPrice, // SOL per token
+                entryTime: Date.now(),
+                tokensOwned: tokensReceived,
+                investedSOL: solSpent,        // ← Changed from investedUSDC
+                targetPrice: entryPrice * (1 + this.getActiveStrategy().perTradeTarget),
+                stopLossPrice: entryPrice * (1 - this.getActiveStrategy().stopLoss),
+                scalpMode: true,
+                txSignature: buySignature,
+                bondingProgress: token.bondingProgress,
+                liquidityUSD: token.liquidityUSD,
+                tokenDecimals: 9
+            };
+
+            user.position = position;
+            user.currentBalance -= solSpent;  // Subtract SOL
+            this.portfolioManager.addPosition(token.address, position);
+            await this.saveState();
+
+            // Updated message — now shows SOL
+            await this.bot.sendMessage(userId, this.formatBuyMessageSOL(position, token, user, { method: onCurve ? 'Pump.fun Direct' : 'Jupiter' }), {
+                parse_mode: 'HTML'
             });
 
-            if (!directResult.success) {
-                throw new Error(`Direct curve buy failed: ${directResult.error}`);
-            }
+            this.logger.info('Buy successful', {
+                symbol: token.symbol,
+                method: onCurve ? 'pumpfun_direct' : 'jupiter',
+                invested: solSpent.toFixed(6) + ' SOL',
+                tokens: tokensReceived.toFixed(4),
+                entry: entryPrice.toFixed(10) + ' SOL/token',
+                tx: buySignature
+            });
 
-            buySignature = directResult.signature;
-            console.log(`✅ Direct curve buy success! Sig: ${buySignature}`);
+            return true;
 
-            // Get tokens received (from post-tx balance or estimation)
-            tokensReceived = await this.getTokenBalanceAfterTx(token.address, buySignature) || 
-                             this.pumpDirect.estimateTokensFromSOL(solSpent * 1e9);
+        } catch (error) {
+            console.log('❌ BUY FAILED:', error.message);
+            this.logger.error('Buy failed', { error: error.message, token: token.symbol });
 
-            entryPrice = solSpent / tokensReceived;
-
-        } else {
-            // Post-migration: Jupiter swap SOL → Token
-            console.log(`🔄 Jupiter buy (migrated token) — ${solSpent.toFixed(6)} SOL`);
-
-            const amountSOLLamports = Math.floor(solSpent * 1e9);
-
-            let quote = null;
-            for (let i = 0; i < 5; i++) {
-                const slippageBps = this.calculateSlippage(token.liquidityUSD);
-                quote = await this.getJupiterQuote(SOL_MINT, token.address, amountSOLLamports, slippageBps);
-                if (quote) break;
-                await sleep(2000);
-            }
-            if (!quote) throw new Error('No Jupiter quote available (SOL → Token)');
-
-            const swapTx = await this.executeSwap(quote, priorityFee);
-            if (!swapTx.success) throw new Error('Jupiter swap failed');
-
-            buySignature = swapTx.signature;
-            tokensReceived = parseFloat(quote.outAmount) / 1e9;
-            entryPrice = solSpent / tokensReceived;
-        }
-
-        // Create position (now in SOL)
-        const position = {
-            tokenAddress: token.address,
-            symbol: token.symbol,
-            entryPrice, // SOL per token
-            entryTime: Date.now(),
-            tokensOwned: tokensReceived,
-            investedSOL: solSpent,        // ← Changed from investedUSDC
-            targetPrice: entryPrice * (1 + this.getActiveStrategy().perTradeTarget),
-            stopLossPrice: entryPrice * (1 - this.getActiveStrategy().stopLoss),
-            scalpMode: true,
-            txSignature: buySignature,
-            bondingProgress: token.bondingProgress,
-            liquidityUSD: token.liquidityUSD,
-            tokenDecimals: 9
-        };
-
-        user.position = position;
-        user.currentBalance -= solSpent;  // Subtract SOL
-        this.portfolioManager.addPosition(token.address, position);
-        await this.saveState();
-
-        // Updated message — now shows SOL
-        await this.bot.sendMessage(userId, this.formatBuyMessageSOL(position, token, user, { method: onCurve ? 'Pump.fun Direct' : 'Jupiter' }), {
-            parse_mode: 'HTML'
-        });
-
-        this.logger.info('Buy successful', {
-            symbol: token.symbol,
-            method: onCurve ? 'pumpfun_direct' : 'jupiter',
-            invested: solSpent.toFixed(6) + ' SOL',
-            tokens: tokensReceived.toFixed(4),
-            entry: entryPrice.toFixed(10) + ' SOL/token',
-            tx: buySignature
-        });
-
-        return true;
-
-    } catch (error) {
-        console.log('❌ BUY FAILED:', error.message);
-        this.logger.error('Buy failed', { error: error.message, token: token.symbol });
-
-        await this.bot.sendMessage(userId, `
+            await this.bot.sendMessage(userId, `
 ❌ <b>Buy Failed</b>
 <b>Token:</b> ${token.symbol}
 <b>Error:</b> ${error.message}
 Balance safe. Bot continues scanning.
         `.trim(), { parse_mode: 'HTML' });
 
-        return false;
-    }
-}
-
-async executeDirectPumpFunBuy(mintStr, usdcAmountLamports, priorityFeeLamports) {
-    const connection = this.rpcConnection.getCurrentConnection(); // or your robust one
-    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
-
-    const mint = new PublicKey(mintStr);
-
-    // PDAs
-    const [bondingCurve] = PublicKey.findProgramAddressSync(
-        [Buffer.from("bonding-curve"), mint.toBuffer()],
-        new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
-    );
-
-    const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
-    const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
-
-    const global = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
-    const feeRecipient = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ");
-    const eventAuthority = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
-    const program = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
-
-    // Buy discriminator (updated 2025)
-    const buyDiscriminator = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
-
-    // Min tokens out (slippage: e.g., 15% less)
-    const minTokensOut = 0n; // Or calculate properly for tight slippage
-
-    const data = Buffer.alloc(16);
-    data.writeBigUInt64LE(BigInt(usdcAmountLamports), 0); // Amount in (USDC lamports? Wait — pump.fun curve is SOL-based!)
-    data.writeBigUInt64LE(minTokensOut, 8);
-
-    const ixData = Buffer.concat([buyDiscriminator, data]);
-
-    const keys = [
-        { pubkey: global, isSigner: false, isWritable: false },
-        { pubkey: feeRecipient, isSigner: false, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
-        { pubkey: bondingCurve, isSigner: false, isWritable: true },
-        { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
-        { pubkey: userTokenATA, isSigner: false, isWritable: true },
-        { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: eventAuthority, isSigner: false, isWritable: false },
-        { pubkey: program, isSigner: false, isWritable: false },
-    ];
-
-    const buyIx = new TransactionInstruction({
-        keys,
-        programId: program,
-        data: ixData
-    });
-
-    // Add ATA creation if not exists
-    const instructions = [];
-    const ataAccount = await connection.getAccountInfo(userTokenATA);
-    if (!ataAccount) {
-        instructions.push(createAssociatedTokenAccountInstruction(
-            wallet.publicKey,
-            userTokenATA,
-            wallet.publicKey,
-            mint
-        ));
+            return false;
+        }
     }
 
-    // Priority fee
-    instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: Math.ceil(priorityFeeLamports / 100_000) // adjust
-    }));
+    async verifyTransaction(signature) {
+        console.log(`🔍 Verifying tx: ${signature}...`);
+        const connection = this.rpcConnection.getCurrentConnection();
+        let retries = 30; // 30 seconds
+        while (retries > 0) {
+            try {
+                const status = await connection.getSignatureStatus(signature);
+                if (status && status.value) {
+                    if (status.value.err) {
+                        throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`);
+                    }
+                    // We accept 'confirmed' for speed, users can change to 'finalized' if paranoid
+                    if (status.value.confirmationStatus === 'finalized' || status.value.confirmationStatus === 'confirmed') {
+                        console.log(`✅ Tx confirmed: ${status.value.confirmationStatus}`);
+                        return true;
+                    }
+                }
+            } catch (err) {
+                console.log(`⚠️ Verify retry error: ${err.message}`);
+            }
+            await new Promise(r => setTimeout(r, 1000));
+            retries--;
+        }
+        throw new Error('Transaction confirmation timed out');
+    }
 
-    instructions.push(buyIx);
+    async executeDirectPumpFunBuy(mintStr, usdcAmountLamports, priorityFeeLamports) {
+        const connection = this.rpcConnection.getCurrentConnection(); // or your robust one
+        const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
 
-    const tx = new VersionedTransaction(await connection.getLatestBlockhash());
-    tx.message = new TransactionMessage({
-        payerKey: wallet.publicKey,
-        instructions,
-        recentBlockhash: (await connection.getLatestBlockhash()).blockhash
-    }).compileToV0Message();
+        const mint = new PublicKey(mintStr);
 
-    tx.sign([wallet]);
+        // PDAs
+        const [bondingCurve] = PublicKey.findProgramAddressSync(
+            [Buffer.from("bonding-curve"), mint.toBuffer()],
+            new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+        );
 
-    const sig = await connection.sendTransaction(tx, { skipPreflight: false });
-    await connection.confirmTransaction(sig);
+        const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
+        const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
 
-    return { success: true, signature: sig };
-}
+        const global = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+        const feeRecipient = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ");
+        const eventAuthority = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
+        const program = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 
+        // Buy discriminator (updated 2025)
+        const buyDiscriminator = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
 
+        // Min tokens out (slippage: e.g., 15% less)
+        const minTokensOut = 0n; // Or calculate properly for tight slippage
 
-async executePaperBuy(userId, token) {
-  const user = this.getUserState(userId);
-  const positionSize = this.calculatePositionSize(user, token.liquidityUSD);
-  const entryPrice = token.priceUSD;
-  const tokensReceived = positionSize / entryPrice;
-  
-  const strategy = this.getActiveStrategy();
-  
-  const position = {
-      tokenAddress: token.address,
-      symbol: token.symbol,
-      entryPrice,
-      entryTime: Date.now(),
-      tokensOwned: tokensReceived,
-      investedUSDC: positionSize,
-      targetPrice: entryPrice * (1 + strategy.perTradeTarget),
-      stopLossPrice: entryPrice * (1 - strategy.stopLoss),
-      scalpMode: true,
-      txSignature: 'PAPER_TRADE_' + Date.now(),
-      bondingProgress: token.bondingProgress,
-      liquidityUSD: token.liquidityUSD,
-      tokenDecimals: 9,
-      positionSizeMode: POSITION_SIZE_MODE,
-      isPaperTrade: true
-  };
-  
-  user.position = position;
-  user.currentBalance -= positionSize;
-  
-  await this.saveState();
-  
-  await this.bot.sendMessage(userId, '📝 <b>PAPER TRADE</b>\n\n' + this.formatBuyMessage(position, token, user), {
-      parse_mode: 'HTML'
-  });
+        const data = Buffer.alloc(16);
+        data.writeBigUInt64LE(BigInt(usdcAmountLamports), 0); // Amount in (USDC lamports? Wait — pump.fun curve is SOL-based!)
+        data.writeBigUInt64LE(minTokensOut, 8);
 
-  this.logger.info('Paper buy executed', { symbol: token.symbol });
-  return true;
-}
+        const ixData = Buffer.concat([buyDiscriminator, data]);
 
-async executeSell(userId, reason, currentPrice) {
-    const user = this.getUserState(userId);
-    const pos = user.position;
-    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+        const keys = [
+            { pubkey: global, isSigner: false, isWritable: false },
+            { pubkey: feeRecipient, isSigner: false, isWritable: true },
+            { pubkey: mint, isSigner: false, isWritable: false },
+            { pubkey: bondingCurve, isSigner: false, isWritable: true },
+            { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+            { pubkey: userTokenATA, isSigner: false, isWritable: true },
+            { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: eventAuthority, isSigner: false, isWritable: false },
+            { pubkey: program, isSigner: false, isWritable: false },
+        ];
 
-    try {
-        console.log('\n' + '🔴'.repeat(40));
-        console.log('🔴 EXECUTING SELL:', pos.symbol, reason);
-        console.log('🔴'.repeat(40));
+        const buyIx = new TransactionInstruction({
+            keys,
+            programId: program,
+            data: ixData
+        });
 
-        if (ENABLE_PAPER_TRADING) {
-            return await this.executePaperSell(userId, reason, currentPrice);
+        // Add ATA creation if not exists
+        const instructions = [];
+        const ataAccount = await connection.getAccountInfo(userTokenATA);
+        if (!ataAccount) {
+            instructions.push(createAssociatedTokenAccountInstruction(
+                wallet.publicKey,
+                userTokenATA,
+                wallet.publicKey,
+                mint
+            ));
         }
 
-        const tokenAmountRaw = Math.floor(pos.tokensOwned * 1e9);
-        const onCurve = pos.bondingProgress < 100;
-        const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(false, 'normal');
+        // Priority fee
+        instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: Math.ceil(priorityFeeLamports / 100_000) // adjust
+        }));
 
-        let solReceived;
-        let sellSignature;
-        let entryPriceSOL = pos.entryPrice; // Already in SOL/token from buy
-        let exitPriceSOL;
+        instructions.push(buyIx);
 
-        if (onCurve) {
-            console.log(`🎪 DIRECT CURVE SELL → native SOL back`);
+        const tx = new VersionedTransaction(await connection.getLatestBlockhash());
+        tx.message = new TransactionMessage({
+            payerKey: wallet.publicKey,
+            instructions,
+            recentBlockhash: (await connection.getLatestBlockhash()).blockhash
+        }).compileToV0Message();
 
-            const directResult = await this.pumpDirect.executeSell({
-                wallet,
-                mint: pos.tokenAddress,
-                tokenAmount: tokenAmountRaw,
-                slippageBps: 1500,
-                priorityFeeLamports: priorityFee
-            });
+        tx.sign([wallet]);
 
-            if (!directResult.success) {
-                throw new Error(`Direct curve sell failed: ${directResult.error}`);
-            }
+        const sig = await connection.sendTransaction(tx, { skipPreflight: false });
+        // Use robust verification loop
+        await this.verifyTransaction(sig);
 
-            sellSignature = directResult.signature;
-            console.log(`✅ Curve sell success! Sig: ${sellSignature}`);
+        return { success: true, signature: sig };
+    }
 
-            // Get SOL received (post-tx native balance delta or estimation)
-            solReceived = await this.estimateSOLReceivedAfterTx(wallet.publicKey, sellSignature);
-            if (solReceived < 0.001) {
-                throw new Error('No meaningful SOL received from sell');
-            }
 
-            exitPriceSOL = solReceived / pos.tokensOwned;
 
-        } else {
-            // Post-migration: Jupiter token → SOL
-            console.log(`🔄 Jupiter sell (migrated token) → SOL`);
+    async executePaperBuy(userId, token) {
+        const user = this.getUserState(userId);
+        const positionSize = this.calculatePositionSize(user, token.liquidityUSD);
+        const entryPrice = token.priceUSD;
+        const tokensReceived = positionSize / entryPrice;
 
-            let quote = null;
-            for (let i = 0; i < 5; i++) {
-                const slippageBps = this.calculateSlippage(pos.liquidityUSD);
-                quote = await this.getJupiterQuote(pos.tokenAddress, SOL_MINT, tokenAmountRaw, slippageBps);
-                if (quote) break;
-                await sleep(2000);
-            }
-            if (!quote) throw new Error('No Jupiter quote available (Token → SOL)');
+        const strategy = this.getActiveStrategy();
 
-            const swapTx = await this.executeSwap(quote, priorityFee);
-            if (!swapTx.success) throw new Error('Jupiter swap failed');
-
-            sellSignature = swapTx.signature;
-            solReceived = parseFloat(quote.outAmount) / 1e9;
-            exitPriceSOL = solReceived / pos.tokensOwned;
-        }
-
-        // Calculate profit in SOL
-        const profitSOL = solReceived - pos.investedSOL;
-        const profitPercent = (profitSOL / pos.investedSOL) * 100;
-
-        // Create final trade record
-        const trade = {
-            ...pos,
-            exitPrice: exitPriceSOL,           // SOL per token
-            solReceived,
-            profitSOL,
-            profitPercent,
-            reason,
-            sellTxSignature: sellSignature,
-            holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1)
+        const position = {
+            tokenAddress: token.address,
+            symbol: token.symbol,
+            entryPrice,
+            entryTime: Date.now(),
+            tokensOwned: tokensReceived,
+            investedUSDC: positionSize,
+            targetPrice: entryPrice * (1 + strategy.perTradeTarget),
+            stopLossPrice: entryPrice * (1 - strategy.stopLoss),
+            scalpMode: true,
+            txSignature: 'PAPER_TRADE_' + Date.now(),
+            bondingProgress: token.bondingProgress,
+            liquidityUSD: token.liquidityUSD,
+            tokenDecimals: 9,
+            positionSizeMode: POSITION_SIZE_MODE,
+            isPaperTrade: true
         };
 
-        // Update user state
-        user.tradeHistory.push(trade);
-        user.position = null;
-        user.currentBalance += solReceived;  // Add SOL back
-        user.dailyProfit += profitSOL;
-        user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
-        user.totalTrades += 1;
-        if (profitSOL > 0) user.successfulTrades += 1;
+        user.position = position;
+        user.currentBalance -= positionSize;
 
-        this.portfolioManager.removePosition(pos.tokenAddress);
         await this.saveState();
 
-        // Sync with real wallet (native SOL)
-        const updatedBalances = await this.getWalletBalance();
-        user.currentBalance = updatedBalances.nativeSOL || updatedBalances.trading; // Use native SOL
-
-        // Send updated sell message (SOL version)
-        await this.bot.sendMessage(userId, this.formatSellMessageSOL(trade, user, updatedBalances), {
+        await this.bot.sendMessage(userId, '📝 <b>PAPER TRADE</b>\n\n' + this.formatBuyMessage(position, token, user), {
             parse_mode: 'HTML'
         });
 
-        this.logger.info('Sell successful', {
-            symbol: pos.symbol,
-            method: onCurve ? 'pumpfun_direct' : 'jupiter',
-            received: solReceived.toFixed(6) + ' SOL',
-            profit: profitPercent.toFixed(2) + '%'
-        });
-
+        this.logger.info('Paper buy executed', { symbol: token.symbol });
         return true;
+    }
 
-    } catch (error) {
-        this.logger.error('Sell failed', { error: error.message, symbol: pos?.symbol });
-        await this.bot.sendMessage(userId, `
+    async executeSell(userId, reason, currentPrice) {
+        return this.tradeMutex.runExclusive(() => this._executeSellInternal(userId, reason, currentPrice));
+    }
+
+    async _executeSellInternal(userId, reason, currentPrice) {
+        const user = this.getUserState(userId);
+        const pos = user.position;
+        const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+
+        try {
+            console.log('\n' + '🔴'.repeat(40));
+            console.log('🔴 EXECUTING SELL:', pos.symbol, reason);
+            console.log('🔴'.repeat(40));
+
+            if (ENABLE_PAPER_TRADING) {
+                return await this.executePaperSell(userId, reason, currentPrice);
+            }
+
+            const tokenAmountRaw = Math.floor(pos.tokensOwned * 1e9);
+            const onCurve = pos.bondingProgress < 100;
+            const priorityFee = await this.priorityFeeCalculator.calculateOptimalFee(false, 'normal');
+
+            let solReceived;
+            let sellSignature;
+            let entryPriceSOL = pos.entryPrice; // Already in SOL/token from buy
+            let exitPriceSOL;
+
+            if (onCurve) {
+                console.log(`🎪 DIRECT CURVE SELL → native SOL back`);
+
+                const directResult = await this.pumpDirect.executeSell({
+                    wallet,
+                    mint: pos.tokenAddress,
+                    tokenAmount: tokenAmountRaw,
+                    slippageBps: 1500,
+                    priorityFeeLamports: priorityFee
+                });
+
+                if (!directResult.success) {
+                    throw new Error(`Direct curve sell failed: ${directResult.error}`);
+                }
+
+                sellSignature = directResult.signature;
+                console.log(`✅ Curve sell success! Sig: ${sellSignature}`);
+
+                // Get SOL received (post-tx native balance delta or estimation)
+                solReceived = await this.estimateSOLReceivedAfterTx(wallet.publicKey, sellSignature);
+                if (solReceived < 0.001) {
+                    throw new Error('No meaningful SOL received from sell');
+                }
+
+                exitPriceSOL = solReceived / pos.tokensOwned;
+
+            } else {
+                // Post-migration: Jupiter token → SOL
+                console.log(`🔄 Jupiter sell (migrated token) → SOL`);
+
+                let quote = null;
+                for (let i = 0; i < 5; i++) {
+                    const slippageBps = this.calculateSlippage(pos.liquidityUSD);
+                    quote = await this.getJupiterQuote(pos.tokenAddress, SOL_MINT, tokenAmountRaw, slippageBps);
+                    if (quote) break;
+                    await sleep(2000);
+                }
+                if (!quote) throw new Error('No Jupiter quote available (Token → SOL)');
+
+                const swapTx = await this.executeSwap(quote, priorityFee);
+                if (!swapTx.success) throw new Error('Jupiter swap failed');
+
+                sellSignature = swapTx.signature;
+                solReceived = parseFloat(quote.outAmount) / 1e9;
+                exitPriceSOL = solReceived / pos.tokensOwned;
+            }
+
+            // Calculate profit in SOL
+            const profitSOL = solReceived - pos.investedSOL;
+            const profitPercent = (profitSOL / pos.investedSOL) * 100;
+
+            // Create final trade record
+            const trade = {
+                ...pos,
+                exitPrice: exitPriceSOL,           // SOL per token
+                solReceived,
+                profitSOL,
+                profitPercent,
+                reason,
+                sellTxSignature: sellSignature,
+                holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1)
+            };
+
+            // Update user state
+            user.tradeHistory.push(trade);
+            user.position = null;
+            user.currentBalance += solReceived;  // Add SOL back
+            user.dailyProfit += profitSOL;
+            user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
+            user.totalTrades += 1;
+            if (profitSOL > 0) user.successfulTrades += 1;
+
+            this.portfolioManager.removePosition(pos.tokenAddress);
+            await this.saveState();
+
+            // Sync with real wallet (native SOL)
+            const updatedBalances = await this.getWalletBalance();
+            user.currentBalance = updatedBalances.nativeSOL || updatedBalances.trading; // Use native SOL
+
+            // Send updated sell message (SOL version)
+            await this.bot.sendMessage(userId, this.formatSellMessageSOL(trade, user, updatedBalances), {
+                parse_mode: 'HTML'
+            });
+
+            this.logger.info('Sell successful', {
+                symbol: pos.symbol,
+                method: onCurve ? 'pumpfun_direct' : 'jupiter',
+                received: solReceived.toFixed(6) + ' SOL',
+                profit: profitPercent.toFixed(2) + '%'
+            });
+
+            return true;
+
+        } catch (error) {
+            this.logger.error('Sell failed', { error: error.message, symbol: pos?.symbol });
+            await this.bot.sendMessage(userId, `
 ❌ <b>Sell Failed</b>
 <b>Token:</b> ${pos?.symbol || 'Unknown'}
 <b>Error:</b> ${error.message}
 Position safe. Bot continues monitoring.
         `.trim(), { parse_mode: 'HTML' });
-        return false;
-    }
-}
-
-async executePaperSell(userId, reason, currentPrice) {
-  const user = this.getUserState(userId);
-  const pos = user.position;
-
-  const usdcReceived = pos.tokensOwned * currentPrice;
-  const profit = usdcReceived - pos.investedUSDC;
-  const profitPercent = (profit / pos.investedUSDC) * 100;
-
-  user.currentBalance += usdcReceived;
-  user.dailyProfit += profit;
-  user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
-  user.totalTrades += 1;
-  if (profit > 0) user.successfulTrades += 1;
-
-  const trade = {
-      ...pos,
-      exitPrice: currentPrice,
-      exitTime: Date.now(),
-      usdcReceived,
-      profit,
-      profitPercent,
-      reason,
-      sellTxSignature: 'PAPER_TRADE_SELL_' + Date.now(),
-      holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1),
-      wasPaperTrade: true
-  };
-
-  user.position = null;
-  
-  if (this.database) {
-      await this.database.recordTrade(userId, { ...trade, wasPaperTrade: true });
-  }
-
-  await this.saveState();
-
-  await this.bot.sendMessage(userId, '📝 <b>PAPER TRADE</b>\n\n' + this.formatSellMessage(trade, user), {
-      parse_mode: 'HTML'
-  });
-
-  this.logger.info('Paper sell executed', { symbol: pos.symbol, profit: profitPercent.toFixed(2) + '%' });
-  return true;
-}
-
-async monitorPosition(userId) {
-  return this.tradeMutex.runExclusive(async () => {
-      const user = this.getUserState(userId);
-      if (!user.position) return;
-
-      const pos = user.position;
-      const currentPrice = await this.getCurrentPrice(pos.tokenAddress);
-      
-      if (!currentPrice) {
-          this.logger.warn('No price for position', { symbol: pos.symbol });
-          return;
-      }
-
-      const priceChange = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-      const holdTimeMin = (Date.now() - pos.entryTime) / 60000;
-
-      this.logger.info('Monitoring position', { 
-          symbol: pos.symbol, 
-          price: currentPrice.toFixed(8),
-          change: priceChange.toFixed(2) + '%',
-          holdTime: holdTimeMin.toFixed(1) + 'm'
-      });
-
-      // Update technical indicators
-      if (this.technicalIndicators) {
-          this.technicalIndicators.addPriceData(pos.tokenAddress, currentPrice);
-      }
-
-      const strategy = this.getActiveStrategy();
-
-      if (pos.scalpMode && holdTimeMin < EXTENDED_HOLD_MINUTES) {
-          if (priceChange >= strategy.scalpMin * 100 && priceChange <= strategy.scalpMax * 100) {
-              await this.executeSell(userId, 'scalp_profit', currentPrice);
-              return;
-          }
-      }
-
-      if (pos.scalpMode && holdTimeMin >= EXTENDED_HOLD_MINUTES) {
-          this.logger.info('Switching to extended hold mode', { symbol: pos.symbol });
-          pos.scalpMode = false;
-          pos.targetPrice = pos.entryPrice * (1 + strategy.extendedTarget);
-          await this.saveState();
-      }
-
-      if (!pos.scalpMode) {
-          if (currentPrice >= pos.targetPrice) {
-              await this.executeSell(userId, 'extended_profit', currentPrice);
-              return;
-          }
-      }
-      
-      if (currentPrice <= pos.stopLossPrice) {
-          await this.executeSell(userId, 'stop_loss', currentPrice);
-          return;
-      }
-  });
-}
-
-async executeDirectPumpFunSell(mintStr, tokenAmountRaw, priorityFeeLamports) {
-    const connection = this.rpcConnection.getCurrentConnection();
-    const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
-
-    const mint = new PublicKey(mintStr);
-
-    const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-    const GLOBAL = new PublicKey('4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf');
-    const FEE_RECIPIENT = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ');
-    const EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
-
-    const [bondingCurve] = PublicKey.findProgramAddressSync(
-        [Buffer.from('bonding-curve'), mint.toBuffer()],
-        PUMP_FUN_PROGRAM
-    );
-
-    const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
-    const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
-
-    // Sell discriminator (confirmed 2025)
-    const sellDiscriminator = Buffer.from([51, 230, 237, 178, 9, 198, 242, 6]);
-
-    const minSolOut = 0n; // Set proper slippage here if needed
-
-    const data = Buffer.alloc(16);
-    data.writeBigUInt64LE(BigInt(tokenAmountRaw), 0);
-    data.writeBigUInt64LE(minSolOut, 8);
-
-    const ixData = Buffer.concat([sellDiscriminator, data]);
-
-    const keys = [
-        { pubkey: GLOBAL, isSigner: false, isWritable: false },
-        { pubkey: FEE_RECIPIENT, isSigner: false, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
-        { pubkey: bondingCurve, isSigner: false, isWritable: true },
-        { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
-        { pubkey: userTokenATA, isSigner: false, isWritable: true },
-        { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: EVENT_AUTHORITY, isSigner: false, isWritable: false },
-        { pubkey: PUMP_FUN_PROGRAM, isSigner: false, isWritable: false },
-    ];
-
-    const sellIx = new TransactionInstruction({
-        keys,
-        programId: PUMP_FUN_PROGRAM,
-        data: ixData
-    });
-
-    const instructions = [];
-
-    // Priority fee
-    instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: Math.ceil(priorityFeeLamports * 10) // adjust multiplier as needed
-    }));
-
-    instructions.push(sellIx);
-
-    // Build & send VersionedTransaction
-    const { blockhash } = await connection.getLatestBlockhash();
-    const messageV0 = new TransactionMessage({
-        payerKey: wallet.publicKey,
-        instructions,
-        recentBlockhash: blockhash
-    }).compileToV0Message();
-
-    const tx = new VersionedTransaction(messageV0);
-    tx.sign([wallet]);
-
-    const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
-    await connection.confirmTransaction(sig, 'confirmed');
-
-    return { success: true, signature: sig };
-}
-
-
-// Add to TradingEngine.findTradingOpportunity() - around line 1150
-async findTradingOpportunity(userId) {
-    try {
-        console.log('\n' + '='.repeat(60));
-        console.log('🔍 SCANNING FOR OPPORTUNITIES');
-        console.log('='.repeat(60));
-        
-        this.logger.info('=== Token Scan Start ===');
-        const candidates = await this.bitquery.getGraduatingTokens();
-
-        if (!candidates.length) {
-            console.log('❌ No candidates found');
-            this.logger.info('No candidates found');
-            return null;
+            return false;
         }
-
-        console.log(`✅ Found ${candidates.length} graduating tokens`);
-        console.log('\nTop Candidates:');
-        candidates.slice(0, 5).forEach((token, i) => {
-            console.log(`  ${i+1}. ${token.symbol} - ${token.bondingProgress.toFixed(1)}% bonding, $${token.liquidityUSD.toFixed(0)} liquidity`);
-        });
-        console.log('');
-
-        this.logger.info('Analyzing candidates', { count: Math.min(candidates.length, MAX_CANDIDATES_TO_ANALYZE) });
-
-        const tokensToAnalyze = candidates.slice(0, MAX_CANDIDATES_TO_ANALYZE);
-
-        for (const token of tokensToAnalyze) {
-            console.log(`\n🔍 Analyzing: ${token.symbol}`);
-            console.log(`   Bonding: ${token.bondingProgress.toFixed(1)}%`);
-            console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
-            
-            this.logger.debug('Checking token', { symbol: token.symbol, bonding: token.bondingProgress.toFixed(1) });
-
-            // Volume check
-            console.log(`   Checking volume...`);
-            const volume = await this.bitquery.getVolumeHistory(token.address);
-            console.log(`   Recent: $${volume.recent.toFixed(0)}, Previous: $${volume.previous.toFixed(0)}`);
-            console.log(`   Volume Spike: ${volume.spike ? '✅ YES' : '❌ NO'}`);
-            
-            if (!volume.spike) {
-                console.log(`   ❌ Rejected: No volume spike`);
-                this.logger.debug('No volume spike', { symbol: token.symbol });
-                continue;
-            }
-
-            // Whale check
-            console.log(`   Checking for whale dumps...`);
-            const whaleDump = await this.bitquery.detectWhaleDumps(token.address);
-            console.log(`   Whale Dump: ${whaleDump ? '❌ YES' : '✅ NO'}`);
-            
-            if (whaleDump) {
-                console.log(`   ❌ Rejected: Whale dump detected`);
-                this.logger.debug('Whale dump detected', { symbol: token.symbol });
-                continue;
-            }
-
-            // Technical analysis
-            if (ENABLE_TECHNICAL_ANALYSIS && this.technicalIndicators) {
-                console.log(`   Running technical analysis...`);
-                const analysis = this.technicalIndicators.analyzeToken(token.address);
-                if (analysis && analysis.score < 60) {
-                    console.log(`   ❌ Rejected: Technical score too low (${analysis.score})`);
-                    this.logger.debug('Technical score too low', { symbol: token.symbol, score: analysis.score });
-                    continue;
-                }
-                console.log(`   ✅ Technical score: ${analysis?.score || 'N/A'}`);
-            }
-
-            console.log('\n🎯 ✅ TRADE SIGNAL FOUND!');
-            console.log(`   Token: ${token.symbol}`);
-            console.log(`   Bonding: ${token.bondingProgress.toFixed(1)}%`);
-            console.log(`   Liquidity: $${token.liquidityUSD.toFixed(0)}`);
-            console.log(`   Volume Spike: ${(volume.recent / volume.previous).toFixed(2)}x`);
-            console.log('='.repeat(60) + '\n');
-
-            this.logger.info('🎯 SIGNAL FOUND', { symbol: token.symbol, bonding: token.bondingProgress.toFixed(1) });
-
-            return {
-                ...token,
-                volumeRecent: volume.recent,
-                volumePrevious: volume.previous,
-                volumeSpike: volume.previous > 0 ? (volume.recent / volume.previous) : Infinity
-            };
-        }
-
-        console.log('❌ No tokens passed all filters');
-        console.log('='.repeat(60) + '\n');
-        this.logger.info('No tokens passed filters');
-        return null;
-    } catch (err) {
-        console.error('❌ Scanner error:', err.message);
-        this.logger.error('Scanner error', { error: err.message });
-        return null;
     }
-}
-async getCurrentPrice(tokenAddress) {
-  try {
-      const quote = await this.getJupiterQuote(tokenAddress, USDC_MINT, 1000000000, 300);
-      if (!quote || !quote.outAmount) return null;
-      return parseFloat(quote.outAmount) / 1000000;
-  } catch (error) {
-      this.logger.error('Get current price failed', { error: error.message });
-      return null;
-  }
-}
 
-async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-          const url = `${JUPITER_API_URL}/quote?inputMint=${encodeURIComponent(inputMint)}&outputMint=${encodeURIComponent(outputMint)}&amount=${amount}&slippageBps=${slippageBps}`;
-          
-          const res = await fetchWithTimeout(url, {
-              headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
-          }, JUPITER_QUOTE_TIMEOUT);
-          
-          if (!res.ok) {
-              throw new Error(`Quote failed: ${res.status}`);
-          }
-          
-          const data = await res.json();
-          if (!data || !data.inAmount || !data.outAmount) return null;
-          
-          return { ...data, inAmount: data.inAmount, outAmount: data.outAmount, route: data };
-      } catch (err) {
-          this.logger.error('Jupiter quote error', { attempt, error: err.message });
-          if (attempt < MAX_RETRIES) await sleep(1000 * attempt);
-      }
-  }
-  return null;
-}
+    async executePaperSell(userId, reason, currentPrice) {
+        const user = this.getUserState(userId);
+        const pos = user.position;
 
-async executeSwap(quoteResponse, priorityFeeLamports = 0) {
-    try {
-        const baseUrl = getJupiterEndpoint();
-        const url = `${baseUrl}/swap`;
-        
-        console.log(`\n🔄 Jupiter Swap Request`);
-        console.log(`   Endpoint: ${url}`);
-        
-        const payload = {
-            quoteResponse: quoteResponse.route || quoteResponse,
-            userPublicKey: this.wallet.publicKey.toString(),
-            wrapAndUnwrapSol: true,
-            dynamicComputeUnitLimit: true,
-            prioritizationFeeLamports: priorityFeeLamports
+        const usdcReceived = pos.tokensOwned * currentPrice;
+        const profit = usdcReceived - pos.investedUSDC;
+        const profitPercent = (profit / pos.investedUSDC) * 100;
+
+        user.currentBalance += usdcReceived;
+        user.dailyProfit += profit;
+        user.dailyProfitPercent = ((user.currentBalance - user.dailyStartBalance) / user.dailyStartBalance) * 100;
+        user.totalTrades += 1;
+        if (profit > 0) user.successfulTrades += 1;
+
+        const trade = {
+            ...pos,
+            exitPrice: currentPrice,
+            exitTime: Date.now(),
+            usdcReceived,
+            profit,
+            profitPercent,
+            reason,
+            sellTxSignature: 'PAPER_TRADE_SELL_' + Date.now(),
+            holdTimeMinutes: ((Date.now() - pos.entryTime) / 60000).toFixed(1),
+            wasPaperTrade: true
         };
 
-        const response = await jupiterClient.post(url, payload);
+        user.position = null;
 
-        if (!response.data || !response.data.swapTransaction) {
-            throw new Error('No swapTransaction in response');
+        if (this.database) {
+            await this.database.recordTrade(userId, { ...trade, wasPaperTrade: true });
         }
 
-        console.log(`✅ Swap transaction received\n`);
-        
-        recordJupiterSuccess();
+        await this.saveState();
 
-        const txBuffer = Buffer.from(response.data.swapTransaction, 'base64');
-        let transaction = VersionedTransaction.deserialize(txBuffer);
-        
-        // Apply MEV protection if enabled
-        if (ENABLE_MEV_PROTECTION && this.mevProtection) {
-            const protectedTx = await this.mevProtection.protectTransaction(transaction);
-            transaction = protectedTx.transaction;
-        }
+        await this.bot.sendMessage(userId, '📝 <b>PAPER TRADE</b>\n\n' + this.formatSellMessage(trade, user), {
+            parse_mode: 'HTML'
+        });
 
-        transaction.sign([this.wallet]);
+        this.logger.info('Paper sell executed', { symbol: pos.symbol, profit: profitPercent.toFixed(2) + '%' });
+        return true;
+    }
 
-        const operation = async (conn) => {
-            const rawSigned = transaction.serialize();
-            const signature = await conn.sendRawTransaction(rawSigned, { 
-                skipPreflight: false, 
-                maxRetries: 2
+    async monitorPosition(userId) {
+        return this.tradeMutex.runExclusive(async () => {
+            const user = this.getUserState(userId);
+            if (!user.position) return;
+
+            const pos = user.position;
+            const currentPrice = await this.getCurrentPrice(pos.tokenAddress);
+
+            if (!currentPrice) {
+                this.logger.warn('No price for position', { symbol: pos.symbol });
+                return;
+            }
+
+            // --- GRADUATION CHECK ---
+            const gradStatus = await this.bondingCurve.checkGraduation(pos.tokenAddress);
+            if (gradStatus && (gradStatus.isComplete || gradStatus.data.progress > 99)) {
+                this.logger.warn(`🚨 GRADUATION DETECTED: ${pos.symbol} (${gradStatus.data.progress.toFixed(1)}%)`);
+                await this.executeSell(userId, 'GRADUATION_MIGRATION', currentPrice);
+                return;
+            }
+
+            const priceChange = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+            const holdTimeMin = (Date.now() - pos.entryTime) / 60000;
+
+            this.logger.info('Monitoring position', {
+                symbol: pos.symbol,
+                price: currentPrice.toFixed(8),
+                change: priceChange.toFixed(2) + '%',
+                holdTime: holdTimeMin.toFixed(1) + 'm'
             });
 
-            const confirmation = await conn.confirmTransaction(signature, 'confirmed');
-            if (confirmation.value.err) {
-                throw new Error(`TX failed: ${JSON.stringify(confirmation.value.err)}`);
+            // Update technical indicators
+            if (this.technicalIndicators) {
+                this.technicalIndicators.addPriceData(pos.tokenAddress, currentPrice);
             }
 
-            return signature;
-        };
+            const strategy = this.getActiveStrategy();
 
-        const signature = await this.rpcConnection.executeWithFallback(operation, 'executeSwap');
-        
-        this.logger.info('Swap successful', { signature, endpoint: baseUrl });
-        
-        return { success: true, signature };
+            if (pos.scalpMode && holdTimeMin < EXTENDED_HOLD_MINUTES) {
+                if (priceChange >= strategy.scalpMin * 100 && priceChange <= strategy.scalpMax * 100) {
+                    await this.executeSell(userId, 'scalp_profit', currentPrice);
+                    return;
+                }
+            }
 
-    } catch (error) {
-        recordJupiterFailure();
-        
-        this.logger.error('Swap execution error', { 
-            error: error.message, 
-            stack: error.stack,
-            endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint]
+            if (pos.scalpMode && holdTimeMin >= EXTENDED_HOLD_MINUTES) {
+                this.logger.info('Switching to extended hold mode', { symbol: pos.symbol });
+                pos.scalpMode = false;
+                pos.targetPrice = pos.entryPrice * (1 + strategy.extendedTarget);
+                await this.saveState();
+            }
+
+            if (!pos.scalpMode) {
+                if (currentPrice >= pos.targetPrice) {
+                    await this.executeSell(userId, 'extended_profit', currentPrice);
+                    return;
+                }
+            }
+
+            if (currentPrice <= pos.stopLossPrice) {
+                await this.executeSell(userId, 'stop_loss', currentPrice);
+                return;
+            }
         });
-        
-        return { success: false, error: error.message };
     }
-}
 
-calculateSlippage(liquidityUSD) {
-    let slippageBps;
-    
-    if (liquidityUSD >= 100000) {
-        slippageBps = 200;  // 2% - very liquid
-    } else if (liquidityUSD >= 50000) {
-        slippageBps = 300;  // 3% - good liquidity
-    } else if (liquidityUSD >= 20000) {
-        slippageBps = 500;  // 5% - medium liquidity
-    } else if (liquidityUSD >= 10000) {
-        slippageBps = 800;  // 8% - low liquidity
-    } else if (liquidityUSD >= 5000) {
-        slippageBps = 1200; // 12% - very low liquidity
-    } else {
-        slippageBps = 1500; // 15% - extremely low liquidity
+    async executeDirectPumpFunSell(mintStr, tokenAmountRaw, priorityFeeLamports) {
+        const connection = this.rpcConnection.getCurrentConnection();
+        const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+
+        const mint = new PublicKey(mintStr);
+
+        const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+        const GLOBAL = new PublicKey('4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf');
+        const FEE_RECIPIENT = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ');
+        const EVENT_AUTHORITY = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+
+        const [bondingCurve] = PublicKey.findProgramAddressSync(
+            [Buffer.from('bonding-curve'), mint.toBuffer()],
+            PUMP_FUN_PROGRAM
+        );
+
+        const associatedBondingCurve = getAssociatedTokenAddressSync(mint, bondingCurve, true);
+        const userTokenATA = getAssociatedTokenAddressSync(mint, wallet.publicKey);
+
+        // Sell discriminator (confirmed 2025)
+        const sellDiscriminator = Buffer.from([51, 230, 237, 178, 9, 198, 242, 6]);
+
+        const minSolOut = 0n; // Set proper slippage here if needed
+
+        const data = Buffer.alloc(16);
+        data.writeBigUInt64LE(BigInt(tokenAmountRaw), 0);
+        data.writeBigUInt64LE(minSolOut, 8);
+
+        const ixData = Buffer.concat([sellDiscriminator, data]);
+
+        const keys = [
+            { pubkey: GLOBAL, isSigner: false, isWritable: false },
+            { pubkey: FEE_RECIPIENT, isSigner: false, isWritable: true },
+            { pubkey: mint, isSigner: false, isWritable: false },
+            { pubkey: bondingCurve, isSigner: false, isWritable: true },
+            { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+            { pubkey: userTokenATA, isSigner: false, isWritable: true },
+            { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: EVENT_AUTHORITY, isSigner: false, isWritable: false },
+            { pubkey: PUMP_FUN_PROGRAM, isSigner: false, isWritable: false },
+        ];
+
+        const sellIx = new TransactionInstruction({
+            keys,
+            programId: PUMP_FUN_PROGRAM,
+            data: ixData
+        });
+
+        const instructions = [];
+
+        // Priority fee
+        instructions.push(ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: Math.ceil(priorityFeeLamports * 10) // adjust multiplier as needed
+        }));
+
+        instructions.push(sellIx);
+
+        // Build & send VersionedTransaction
+        const { blockhash } = await connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+            payerKey: wallet.publicKey,
+            instructions,
+            recentBlockhash: blockhash
+        }).compileToV0Message();
+
+        const tx = new VersionedTransaction(messageV0);
+        tx.sign([wallet]);
+
+        const sig = await connection.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+        // Use robust verification loop
+        await this.verifyTransaction(sig);
+
+        return { success: true, signature: sig };
     }
-    
-    this.logger.debug('Slippage calculated', {
-        liquidityUSD: liquidityUSD.toFixed(0),
-        slippageBps: slippageBps,
-        slippagePercent: (slippageBps / 100).toFixed(1) + '%'
-    });
-    
-    return slippageBps;
-}
 
-validateQuote(quote, requestedAmount, token) {
-    try {
-        const inAmount = parseInt(quote.inAmount);
-        const outAmount = parseInt(quote.outAmount);
-        
-        // Check 1: Required fields exist
-        if (!quote.inAmount || !quote.outAmount) {
-            return { 
-                valid: false, 
-                reason: 'Missing required fields (inAmount or outAmount)' 
-            };
+
+    // Add to TradingEngine.findTradingOpportunity() - around line 1150
+    // Duplicate findTradingOpportunity removed
+    // Helper: Random Jitter for Sandwich Mitigation
+    randomJitter(minMs, maxMs) {
+        return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+    }
+
+    async analyzeTokenForSnipe(token, source) {
+        try {
+            const quote = await this.getJupiterQuote(tokenAddress, USDC_MINT, 1000000000, 300);
+            if (!quote || !quote.outAmount) return null;
+            return parseFloat(quote.outAmount) / 1000000;
+        } catch (error) {
+            this.logger.error('Get current price failed', { error: error.message });
+            return null;
         }
-        
-        // Check 2: Amounts are valid numbers
-        if (isNaN(inAmount) || isNaN(outAmount)) {
-            return { 
-                valid: false, 
-                reason: 'Invalid amount values' 
-            };
+    }
+
+    async getCurrentPrice(tokenAddress) {
+        try {
+            const quote = await this.getJupiterQuote(tokenAddress, USDC_MINT, 1000000000, 300);
+            if (!quote || !quote.outAmount) return null;
+            return parseFloat(quote.outAmount) / 1000000;
+        } catch (error) {
+            this.logger.error('Get current price failed', { error: error.message });
+            return null;
         }
-        
-        // Check 3: Output is positive
-        if (outAmount <= 0) {
-            return { 
-                valid: false, 
-                reason: 'Output amount is zero or negative' 
-            };
+    }
+
+    async getJupiterQuote(inputMint, outputMint, amount, slippageBps = 300) {
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                const url = `${JUPITER_API_URL}/quote?inputMint=${encodeURIComponent(inputMint)}&outputMint=${encodeURIComponent(outputMint)}&amount=${amount}&slippageBps=${slippageBps}`;
+
+                const res = await fetchWithTimeout(url, {
+                    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
+                }, JUPITER_QUOTE_TIMEOUT);
+
+                if (!res.ok) {
+                    throw new Error(`Quote failed: ${res.status}`);
+                }
+
+                const data = await res.json();
+                if (!data || !data.inAmount || !data.outAmount) return null;
+
+                return { ...data, inAmount: data.inAmount, outAmount: data.outAmount, route: data };
+            } catch (err) {
+                this.logger.error('Jupiter quote error', { attempt, error: err.message });
+                if (attempt < MAX_RETRIES) await sleep(1000 * attempt);
+            }
         }
-        
-        // Check 4: Input matches request (within 2%)
-        const inputDiff = Math.abs(inAmount - requestedAmount) / requestedAmount;
-        if (inputDiff > 0.02) {
-            return { 
-                valid: false, 
-                reason: `Input mismatch: requested ${requestedAmount}, got ${inAmount} (${(inputDiff * 100).toFixed(1)}% diff)` 
+        return null;
+    }
+
+    async executeSwap(quoteResponse, priorityFeeLamports = 0) {
+        try {
+            const baseUrl = getJupiterEndpoint();
+            const url = `${baseUrl}/swap`;
+
+            console.log(`\n🔄 Jupiter Swap Request`);
+            console.log(`   Endpoint: ${url}`);
+
+            const payload = {
+                quoteResponse: quoteResponse.route || quoteResponse,
+                userPublicKey: this.wallet.publicKey.toString(),
+                wrapAndUnwrapSol: true,
+                dynamicComputeUnitLimit: true,
+                prioritizationFeeLamports: priorityFeeLamports
             };
+
+            const response = await jupiterClient.post(url, payload);
+
+            if (!response.data || !response.data.swapTransaction) {
+                throw new Error('No swapTransaction in response');
+            }
+
+            console.log(`✅ Swap transaction received\n`);
+
+            recordJupiterSuccess();
+
+            const txBuffer = Buffer.from(response.data.swapTransaction, 'base64');
+            let transaction = VersionedTransaction.deserialize(txBuffer);
+
+            // Apply MEV protection if enabled
+            if (ENABLE_MEV_PROTECTION && this.mevProtection) {
+                const protectedTx = await this.mevProtection.protectTransaction(transaction);
+                transaction = protectedTx.transaction;
+            }
+
+            transaction.sign([this.wallet]);
+
+            const operation = async (conn) => {
+                const rawSigned = transaction.serialize();
+                const signature = await conn.sendRawTransaction(rawSigned, {
+                    skipPreflight: false,
+                    maxRetries: 2
+                });
+
+                const confirmation = await conn.confirmTransaction(signature, 'confirmed');
+                if (confirmation.value.err) {
+                    throw new Error(`TX failed: ${JSON.stringify(confirmation.value.err)}`);
+                }
+
+                return signature;
+            };
+
+            const signature = await this.rpcConnection.executeWithFallback(operation, 'executeSwap');
+
+            this.logger.info('Swap successful', { signature, endpoint: baseUrl });
+
+            return { success: true, signature };
+
+        } catch (error) {
+            recordJupiterFailure();
+
+            this.logger.error('Swap execution error', {
+                error: error.message,
+                stack: error.stack,
+                endpoint: JUPITER_ENDPOINTS[currentJupiterEndpoint]
+            });
+
+            return { success: false, error: error.message };
         }
-        
-        // Check 5: Price impact not extreme (>25% is very suspicious)
-        if (quote.priceImpactPct) {
-            const impact = parseFloat(quote.priceImpactPct);
-            if (impact > 25) {
-                return { 
-                    valid: false, 
-                    reason: `Extreme price impact: ${impact.toFixed(2)}% (max 25%)` 
+    }
+
+    calculateSlippage(liquidityUSD) {
+        let slippageBps;
+
+        if (liquidityUSD >= 100000) {
+            slippageBps = 200;  // 2% - very liquid
+        } else if (liquidityUSD >= 50000) {
+            slippageBps = 300;  // 3% - good liquidity
+        } else if (liquidityUSD >= 20000) {
+            slippageBps = 500;  // 5% - medium liquidity
+        } else if (liquidityUSD >= 10000) {
+            slippageBps = 800;  // 8% - low liquidity
+        } else if (liquidityUSD >= 5000) {
+            slippageBps = 1200; // 12% - very low liquidity
+        } else {
+            slippageBps = 1500; // 15% - extremely low liquidity
+        }
+
+        this.logger.debug('Slippage calculated', {
+            liquidityUSD: liquidityUSD.toFixed(0),
+            slippageBps: slippageBps,
+            slippagePercent: (slippageBps / 100).toFixed(1) + '%'
+        });
+
+        return slippageBps;
+    }
+
+    validateQuote(quote, requestedAmount, token) {
+        try {
+            const inAmount = parseInt(quote.inAmount);
+            const outAmount = parseInt(quote.outAmount);
+
+            // Check 1: Required fields exist
+            if (!quote.inAmount || !quote.outAmount) {
+                return {
+                    valid: false,
+                    reason: 'Missing required fields (inAmount or outAmount)'
                 };
             }
-        }
-        
-        // Check 6: Output amount is reasonable
-        const minExpectedOutput = 100; // At least 100 lamports
-        if (outAmount < minExpectedOutput) {
-            return { 
-                valid: false, 
-                reason: `Output too small: ${outAmount} lamports (min ${minExpectedOutput})` 
+
+            // Check 2: Amounts are valid numbers
+            if (isNaN(inAmount) || isNaN(outAmount)) {
+                return {
+                    valid: false,
+                    reason: 'Invalid amount values'
+                };
+            }
+
+            // Check 3: Output is positive
+            if (outAmount <= 0) {
+                return {
+                    valid: false,
+                    reason: 'Output amount is zero or negative'
+                };
+            }
+
+            // Check 4: Input matches request (within 2%)
+            const inputDiff = Math.abs(inAmount - requestedAmount) / requestedAmount;
+            if (inputDiff > 0.02) {
+                return {
+                    valid: false,
+                    reason: `Input mismatch: requested ${requestedAmount}, got ${inAmount} (${(inputDiff * 100).toFixed(1)}% diff)`
+                };
+            }
+
+            // Check 5: Price impact not extreme (>25% is very suspicious)
+            if (quote.priceImpactPct) {
+                const impact = parseFloat(quote.priceImpactPct);
+                if (impact > 25) {
+                    return {
+                        valid: false,
+                        reason: `Extreme price impact: ${impact.toFixed(2)}% (max 25%)`
+                    };
+                }
+            }
+
+            // Check 6: Output amount is reasonable
+            const minExpectedOutput = 100; // At least 100 lamports
+            if (outAmount < minExpectedOutput) {
+                return {
+                    valid: false,
+                    reason: `Output too small: ${outAmount} lamports (min ${minExpectedOutput})`
+                };
+            }
+
+            this.logger.info('Quote validation passed', {
+                inAmount: inAmount,
+                outAmount: outAmount,
+                priceImpact: quote.priceImpactPct || 'N/A'
+            });
+
+            return { valid: true };
+
+        } catch (error) {
+            return {
+                valid: false,
+                reason: `Validation error: ${error.message}`
             };
         }
-        
-        this.logger.info('Quote validation passed', {
-            inAmount: inAmount,
-            outAmount: outAmount,
-            priceImpact: quote.priceImpactPct || 'N/A'
-        });
-        
-        return { valid: true };
-        
-    } catch (error) {
-        return { 
-            valid: false, 
-            reason: `Validation error: ${error.message}` 
+    }
+
+
+
+
+    async checkStrategyAdjustment(userId) {
+        if (!this.performanceTracker.shouldAdjustStrategy()) return;
+
+        const recommended = this.performanceTracker.getRecommendedStrategy();
+        const currentLevel = this.performanceTracker.metrics.strategyLevel;
+
+        if (currentLevel === recommended.level) {
+            this.logger.info('Maintaining current strategy', { level: currentLevel });
+            this.performanceTracker.metrics.lastAdjustment = Date.now();
+            await this.saveState();
+            return;
+        }
+
+        this.logger.info('Strategy adjustment', { from: currentLevel, to: recommended.level });
+        this.performanceTracker.metrics.strategyLevel = recommended.level;
+        this.performanceTracker.metrics.lastAdjustment = Date.now();
+        this.currentStrategy = recommended;
+
+        const stats = this.performanceTracker.getStats();
+        await this.bot.sendMessage(userId, this.formatStrategyAdjustmentMessage(currentLevel, recommended, stats), {
+            parse_mode: 'HTML'
+        }).catch(err => this.logger.error('Failed to send adjustment message', { error: err.message }));
+
+        await this.saveState();
+    }
+
+    getStats() {
+        return {
+            totalTrades: this.performanceTracker.metrics.totalTrades,
+            winRate: this.performanceTracker.getWinRate().toFixed(1),
+            profitFactor: this.performanceTracker.getProfitFactor().toFixed(2),
+            expectancy: this.performanceTracker.getExpectancy().toFixed(2),
+            avgWin: this.performanceTracker.metrics.avgWinPercent.toFixed(2),
+            avgLoss: this.performanceTracker.metrics.avgLossPercent.toFixed(2),
+            largestWin: this.performanceTracker.metrics.largestWin.toFixed(2),
+            largestLoss: this.performanceTracker.metrics.largestLoss.toFixed(2),
+            currentStreak: this.performanceTracker.metrics.currentStreak,
+            strategyLevel: this.performanceTracker.metrics.strategyLevel
         };
     }
-}
 
+    getDetailedReport() {
+        const winRate = this.performanceTracker.getWinRate();
+        const profitFactor = this.performanceTracker.getProfitFactor();
+        const expectancy = this.performanceTracker.getExpectancy();
 
+        return {
+            summary: {
+                totalTrades: this.performanceTracker.metrics.totalTrades,
+                winningTrades: this.performanceTracker.metrics.winningTrades,
+                losingTrades: this.performanceTracker.metrics.losingTrades,
+                winRate: winRate.toFixed(1) + '%',
+                profitFactor: profitFactor.toFixed(2),
+                expectancy: expectancy.toFixed(2) + '%'
+            },
+            profitMetrics: {
+                totalProfit: this.performanceTracker.metrics.totalProfit.toFixed(2),
+                totalLoss: this.performanceTracker.metrics.totalLoss.toFixed(2),
+                netProfit: (this.performanceTracker.metrics.totalProfit - this.performanceTracker.metrics.totalLoss).toFixed(2),
+                avgWinPercent: this.performanceTracker.metrics.avgWinPercent.toFixed(2) + '%',
+                avgLossPercent: this.performanceTracker.metrics.avgLossPercent.toFixed(2) + '%'
+            },
+            extremes: {
+                largestWin: this.performanceTracker.metrics.largestWin.toFixed(2) + '%',
+                largestLoss: this.performanceTracker.metrics.largestLoss.toFixed(2) + '%',
+                consecutiveWins: this.performanceTracker.metrics.consecutiveWins,
+                consecutiveLosses: this.performanceTracker.metrics.consecutiveLosses,
+                currentStreak: this.performanceTracker.metrics.currentStreak
+            },
+            strategy: {
+                currentLevel: this.performanceTracker.metrics.strategyLevel,
+                lastAdjustment: new Date(this.performanceTracker.metrics.lastAdjustment).toISOString(),
+                nextReview: new Date(this.performanceTracker.metrics.lastAdjustment + (AUTO_ADJUST_INTERVAL * 24 * 60 * 60 * 1000)).toISOString()
+            }
+        };
+    }
 
+    async sendScanNotification(userId, scanData) {
+        const { tokensFound, tokensAnalyzed, signalFound, signal } = scanData;
 
-async checkStrategyAdjustment(userId) {
-  if (!this.performanceTracker.shouldAdjustStrategy()) return;
-
-  const recommended = this.performanceTracker.getRecommendedStrategy();
-  const currentLevel = this.performanceTracker.metrics.strategyLevel;
-
-  if (currentLevel === recommended.level) {
-      this.logger.info('Maintaining current strategy', { level: currentLevel });
-      this.performanceTracker.metrics.lastAdjustment = Date.now();
-      await this.saveState();
-      return;
-  }
-
-  this.logger.info('Strategy adjustment', { from: currentLevel, to: recommended.level });
-  this.performanceTracker.metrics.strategyLevel = recommended.level;
-  this.performanceTracker.metrics.lastAdjustment = Date.now();
-  this.currentStrategy = recommended;
-
-  const stats = this.performanceTracker.getStats();
-  await this.bot.sendMessage(userId, this.formatStrategyAdjustmentMessage(currentLevel, recommended, stats), {
-      parse_mode: 'HTML'
-  }).catch(err => this.logger.error('Failed to send adjustment message', { error: err.message }));
-
-  await this.saveState();
-}
-
-getStats() {
-  return {
-      totalTrades: this.performanceTracker.metrics.totalTrades,
-      winRate: this.performanceTracker.getWinRate().toFixed(1),
-      profitFactor: this.performanceTracker.getProfitFactor().toFixed(2),
-      expectancy: this.performanceTracker.getExpectancy().toFixed(2),
-      avgWin: this.performanceTracker.metrics.avgWinPercent.toFixed(2),
-      avgLoss: this.performanceTracker.metrics.avgLossPercent.toFixed(2),
-      largestWin: this.performanceTracker.metrics.largestWin.toFixed(2),
-      largestLoss: this.performanceTracker.metrics.largestLoss.toFixed(2),
-      currentStreak: this.performanceTracker.metrics.currentStreak,
-      strategyLevel: this.performanceTracker.metrics.strategyLevel
-  };
-}
-
-getDetailedReport() {
-  const winRate = this.performanceTracker.getWinRate();
-  const profitFactor = this.performanceTracker.getProfitFactor();
-  const expectancy = this.performanceTracker.getExpectancy();
-
-  return {
-      summary: {
-          totalTrades: this.performanceTracker.metrics.totalTrades,
-          winningTrades: this.performanceTracker.metrics.winningTrades,
-          losingTrades: this.performanceTracker.metrics.losingTrades,
-          winRate: winRate.toFixed(1) + '%',
-          profitFactor: profitFactor.toFixed(2),
-          expectancy: expectancy.toFixed(2) + '%'
-      },
-      profitMetrics: {
-          totalProfit: this.performanceTracker.metrics.totalProfit.toFixed(2),
-          totalLoss: this.performanceTracker.metrics.totalLoss.toFixed(2),
-          netProfit: (this.performanceTracker.metrics.totalProfit - this.performanceTracker.metrics.totalLoss).toFixed(2),
-          avgWinPercent: this.performanceTracker.metrics.avgWinPercent.toFixed(2) + '%',
-          avgLossPercent: this.performanceTracker.metrics.avgLossPercent.toFixed(2) + '%'
-      },
-      extremes: {
-          largestWin: this.performanceTracker.metrics.largestWin.toFixed(2) + '%',
-          largestLoss: this.performanceTracker.metrics.largestLoss.toFixed(2) + '%',
-          consecutiveWins: this.performanceTracker.metrics.consecutiveWins,
-          consecutiveLosses: this.performanceTracker.metrics.consecutiveLosses,
-          currentStreak: this.performanceTracker.metrics.currentStreak
-      },
-      strategy: {
-          currentLevel: this.performanceTracker.metrics.strategyLevel,
-          lastAdjustment: new Date(this.performanceTracker.metrics.lastAdjustment).toISOString(),
-          nextReview: new Date(this.performanceTracker.metrics.lastAdjustment + (AUTO_ADJUST_INTERVAL * 24 * 60 * 60 * 1000)).toISOString()
-      }
-  };
-}
-
-async sendScanNotification(userId, scanData) {
-    const { tokensFound, tokensAnalyzed, signalFound, signal } = scanData;
-    
-    if (signalFound) {
-        // Only notify when signal found (reduce noise)
-        await this.bot.sendMessage(userId, `
+        if (signalFound) {
+            // Only notify when signal found (reduce noise)
+            await this.bot.sendMessage(userId, `
 🎯 <b>TRADING SIGNAL DETECTED</b>
 
 <b>Token:</b> ${signal.symbol}
@@ -2984,16 +2617,16 @@ async sendScanNotification(userId, scanData) {
 
 <i>Executing trade in 5 seconds...</i>
         `.trim(), { parse_mode: 'HTML' });
+        }
     }
-}
 
 
 
-formatBuyMessage(pos, token, user) {
-    const solscanUrl = `https://solscan.io/tx/${pos.txSignature}`;
-    const birdseyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
-    
-    return `
+    formatBuyMessage(pos, token, user) {
+        const solscanUrl = `https://solscan.io/tx/${pos.txSignature}`;
+        const birdseyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
+
+        return `
 ✅ <b>POSITION OPENED</b>
 
 <b>${pos.symbol}</b>
@@ -3006,8 +2639,8 @@ formatBuyMessage(pos, token, user) {
 └ Mode: ${pos.scalpMode ? 'Scalp (Quick Exit)' : 'Extended Hold'}
 
 🎯 <b>Targets</b>
-├ Take Profit: $${pos.targetPrice.toFixed(8)} (+${((pos.targetPrice/pos.entryPrice - 1) * 100).toFixed(1)}%)
-└ Stop Loss: $${pos.stopLossPrice.toFixed(8)} (${((pos.stopLossPrice/pos.entryPrice - 1) * 100).toFixed(1)}%)
+├ Take Profit: $${pos.targetPrice.toFixed(8)} (+${((pos.targetPrice / pos.entryPrice - 1) * 100).toFixed(1)}%)
+└ Stop Loss: $${pos.stopLossPrice.toFixed(8)} (${((pos.stopLossPrice / pos.entryPrice - 1) * 100).toFixed(1)}%)
 
 📊 <b>Market Context</b>
 ├ Bonding: ${token.bondingProgress.toFixed(1)}%
@@ -3023,25 +2656,25 @@ formatBuyMessage(pos, token, user) {
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
     `.trim();
-}
+    }
 
-async sendPositionUpdate(userId, position, currentPrice, priceChange) {
-    // Only send if change is significant (>3% move or approaching targets)
-    const isSignificant = Math.abs(priceChange) > 3 || 
-                         currentPrice >= position.targetPrice * 0.95 ||
-                         currentPrice <= position.stopLossPrice * 1.05;
-    
-    if (!isSignificant) return;
-    
-    const emoji = priceChange > 0 ? '📈' : '📉';
-    const unrealizedPnL = (position.tokensOwned * currentPrice) - position.investedUSDC;
-    const unrealizedPct = (unrealizedPnL / position.investedUSDC) * 100;
-    const holdTime = ((Date.now() - position.entryTime) / 60000).toFixed(0);
-    
-    const targetDistance = ((position.targetPrice / currentPrice - 1) * 100).toFixed(1);
-    const stopDistance = ((currentPrice / position.stopLossPrice - 1) * 100).toFixed(1);
-    
-    await this.bot.sendMessage(userId, `
+    async sendPositionUpdate(userId, position, currentPrice, priceChange) {
+        // Only send if change is significant (>3% move or approaching targets)
+        const isSignificant = Math.abs(priceChange) > 3 ||
+            currentPrice >= position.targetPrice * 0.95 ||
+            currentPrice <= position.stopLossPrice * 1.05;
+
+        if (!isSignificant) return;
+
+        const emoji = priceChange > 0 ? '📈' : '📉';
+        const unrealizedPnL = (position.tokensOwned * currentPrice) - position.investedUSDC;
+        const unrealizedPct = (unrealizedPnL / position.investedUSDC) * 100;
+        const holdTime = ((Date.now() - position.entryTime) / 60000).toFixed(0);
+
+        const targetDistance = ((position.targetPrice / currentPrice - 1) * 100).toFixed(1);
+        const stopDistance = ((currentPrice / position.stopLossPrice - 1) * 100).toFixed(1);
+
+        await this.bot.sendMessage(userId, `
 ${emoji} <b>POSITION UPDATE</b>
 
 <b>${position.symbol}</b>
@@ -3058,26 +2691,26 @@ ${emoji} <b>POSITION UPDATE</b>
 └ Stop: ${stopDistance > 0 ? '↑' : '↓'} ${Math.abs(parseFloat(stopDistance))}%
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
-    `.trim(), { 
-        parse_mode: 'HTML',
-        disable_web_page_preview: true 
-    });
-}
+    `.trim(), {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+        });
+    }
 
-formatSellMessage(trade, user) {
-    const emoji = trade.profit > 0 ? '✅' : '⚠️';
-    const color = trade.profit > 0 ? '🟢' : '🔴';
-    const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
-    
-    const reasonEmojis = {
-        'scalp_profit': '⚡ Quick Profit',
-        'extended_profit': '🎯 Target Hit',
-        'stop_loss': '🛡️ Stop Loss'
-    };
-    
-    const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
-    
-    return `
+    formatSellMessage(trade, user) {
+        const emoji = trade.profit > 0 ? '✅' : '⚠️';
+        const color = trade.profit > 0 ? '🟢' : '🔴';
+        const solscanUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+
+        const reasonEmojis = {
+            'scalp_profit': '⚡ Quick Profit',
+            'extended_profit': '🎯 Target Hit',
+            'stop_loss': '🛡️ Stop Loss'
+        };
+
+        const reason = reasonEmojis[trade.reason] || trade.reason.toUpperCase();
+
+        return `
 ${emoji} <b>POSITION CLOSED</b> ${color}
 
 <b>${trade.symbol}</b>
@@ -3086,7 +2719,7 @@ ${emoji} <b>POSITION CLOSED</b> ${color}
 💰 <b>Trade Summary</b>
 ├ Entry: $${trade.entryPrice.toFixed(8)}
 ├ Exit: $${trade.exitPrice.toFixed(8)}
-├ Change: ${((trade.exitPrice/trade.entryPrice - 1) * 100).toFixed(2)}%
+├ Change: ${((trade.exitPrice / trade.entryPrice - 1) * 100).toFixed(2)}%
 └ Hold Time: ${trade.holdTimeMinutes}m
 
 📊 <b>Financial Result</b>
@@ -3105,27 +2738,27 @@ ${emoji} <b>POSITION CLOSED</b> ${color}
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
     `.trim();
-}
+    }
 
-async sendDailySummary(userId) {
-    const user = this.getUserState(userId);
-    const todayTrades = user.tradeHistory.filter(t => 
-        t.exitTime > user.dailyResetAt
-    );
-    
-    if (todayTrades.length === 0) return; // No trades today
-    
-    const wins = todayTrades.filter(t => t.profit > 0).length;
-    const losses = todayTrades.length - wins;
-    const totalProfit = todayTrades.reduce((sum, t) => sum + t.profit, 0);
-    const bestTrade = todayTrades.reduce((best, t) => 
-        t.profitPercent > best.profitPercent ? t : best
-    );
-    const worstTrade = todayTrades.reduce((worst, t) => 
-        t.profitPercent < worst.profitPercent ? t : worst
-    );
-    
-    await this.bot.sendMessage(userId, `
+    async sendDailySummary(userId) {
+        const user = this.getUserState(userId);
+        const todayTrades = user.tradeHistory.filter(t =>
+            t.exitTime > user.dailyResetAt
+        );
+
+        if (todayTrades.length === 0) return; // No trades today
+
+        const wins = todayTrades.filter(t => t.profit > 0).length;
+        const losses = todayTrades.length - wins;
+        const totalProfit = todayTrades.reduce((sum, t) => sum + t.profit, 0);
+        const bestTrade = todayTrades.reduce((best, t) =>
+            t.profitPercent > best.profitPercent ? t : best
+        );
+        const worstTrade = todayTrades.reduce((worst, t) =>
+            t.profitPercent < worst.profitPercent ? t : worst
+        );
+
+        await this.bot.sendMessage(userId, `
 📊 <b>DAILY TRADING SUMMARY</b>
 
 <b>Performance</b>
@@ -3151,14 +2784,14 @@ ${user.dailyProfitPercent <= -DAILY_STOP_LOSS * 100 ? '🛑 <b>Daily Stop Loss H
 
 <i>${new Date().toLocaleDateString()} UTC</i>
     `.trim(), { parse_mode: 'HTML' });
-}
+    }
 
-async sendScanSummary(userId, stats) {
-    // Only send if user hasn't been notified in 6+ hours
-    const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
-    if (this.lastNotification && this.lastNotification > sixHoursAgo) return;
-    
-    await this.bot.sendMessage(userId, `
+    async sendScanSummary(userId, stats) {
+        // Only send if user hasn't been notified in 6+ hours
+        const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
+        if (this.lastNotification && this.lastNotification > sixHoursAgo) return;
+
+        await this.bot.sendMessage(userId, `
 🔍 <b>SCANNING STATUS</b>
 
 <b>Activity (Last 6 Hours)</b>
@@ -3175,12 +2808,12 @@ async sendScanSummary(userId, stats) {
 
 <i>You'll be notified when signals are detected</i>
     `.trim(), { parse_mode: 'HTML' });
-    
-    this.lastNotification = Date.now();
-} 
 
-async sendCriticalError(userId, error, context) {
-    await this.bot.sendMessage(userId, `
+        this.lastNotification = Date.now();
+    }
+
+    async sendCriticalError(userId, error, context) {
+        await this.bot.sendMessage(userId, `
 ⚠️ <b>ALERT: ACTION REQUIRED</b>
 
 <b>Issue:</b> ${error.message}
@@ -3197,70 +2830,70 @@ ${this.getErrorRecommendations(error)}
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
     `.trim(), { parse_mode: 'HTML' });
-} 
-
-
-getErrorRecommendations(error) {
-    if (error.message.includes('balance')) {
-        return '└ Check wallet balance and add funds';
-    } else if (error.message.includes('RPC') || error.message.includes('connection')) {
-        return '└ RPC connection issue - automatic retry in progress';
-    } else if (error.message.includes('slippage')) {
-        return '└ High slippage detected - waiting for better conditions';
-    } else {
-        return '└ Check /status and contact support if persists';
     }
-} 
 
-formatNumber(num, decimals = 0) {
-    if (num >= 1000000) {
-        return (num / 1000000).toFixed(1) + 'M';
-    } else if (num >= 1000) {
-        return (num / 1000).toFixed(1) + 'K';
-    } else {
-        return num.toFixed(decimals);
+
+    getErrorRecommendations(error) {
+        if (error.message.includes('balance')) {
+            return '└ Check wallet balance and add funds';
+        } else if (error.message.includes('RPC') || error.message.includes('connection')) {
+            return '└ RPC connection issue - automatic retry in progress';
+        } else if (error.message.includes('slippage')) {
+            return '└ High slippage detected - waiting for better conditions';
+        } else {
+            return '└ Check /status and contact support if persists';
+        }
     }
-}
 
-initializeNotificationSettings(user) {
-    user.notifications = {
-        scanResults: false,        
-        positionUpdates: true,     
-        tradeExecutions: true,     
-        dailySummary: true,        
-        criticalErrors: true       
-    };
-}
-
-
-shouldSendNotification(type, userId) {
-    const lastSent = this.lastNotificationTime.get(`${userId}-${type}`) || 0;
-    const now = Date.now();
-    
-    const throttleLimits = {
-        positionUpdate: 5 * 60 * 1000,    
-        scanSummary: 6 * 60 * 60 * 1000,  
-        error: 15 * 60 * 1000             
-    };
-    
-    const limit = throttleLimits[type] || 0;
-    
-    if (now - lastSent < limit) {
-        return false;
+    formatNumber(num, decimals = 0) {
+        if (num >= 1000000) {
+            return (num / 1000000).toFixed(1) + 'M';
+        } else if (num >= 1000) {
+            return (num / 1000).toFixed(1) + 'K';
+        } else {
+            return num.toFixed(decimals);
+        }
     }
-    
-    this.lastNotificationTime.set(`${userId}-${type}`, now);
-    return true;
-}
 
-formatBuyMessage(pos, token, user, options = {}) {
-    const method = options.method || 'Unknown';
-    const txUrl = `https://solscan.io/tx/${pos.txSignature}`;
-    const birdeyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
+    initializeNotificationSettings(user) {
+        user.notifications = {
+            scanResults: false,
+            positionUpdates: true,
+            tradeExecutions: true,
+            dailySummary: true,
+            criticalErrors: true
+        };
+    }
 
-    const strategy = this.getActiveStrategy();
 
-    return `
+    shouldSendNotification(type, userId) {
+        const lastSent = this.lastNotificationTime.get(`${userId}-${type}`) || 0;
+        const now = Date.now();
+
+        const throttleLimits = {
+            positionUpdate: 5 * 60 * 1000,
+            scanSummary: 6 * 60 * 60 * 1000,
+            error: 15 * 60 * 1000
+        };
+
+        const limit = throttleLimits[type] || 0;
+
+        if (now - lastSent < limit) {
+            return false;
+        }
+
+        this.lastNotificationTime.set(`${userId}-${type}`, now);
+        return true;
+    }
+
+    formatBuyMessage(pos, token, user, options = {}) {
+        const method = options.method || 'Unknown';
+        const txUrl = `https://solscan.io/tx/${pos.txSignature}`;
+        const birdeyeUrl = `https://birdeye.so/token/${pos.tokenAddress}?chain=solana`;
+
+        const strategy = this.getActiveStrategy();
+
+        return `
 🚀 <b>BUY EXECUTED — ${method}</b>
 <b>${pos.symbol}</b>
 <code>${pos.tokenAddress.substring(0, 8)}...${pos.tokenAddress.slice(-6)}</code>
@@ -3289,24 +2922,24 @@ formatBuyMessage(pos, token, user, options = {}) {
 
 <i>Direct execution • ${new Date().toLocaleTimeString()} UTC</i>
     `.trim();
-}
+    }
 
-formatSellMessage(trade, user) {
-    const emoji = trade.profitSOL > 0 ? '✅' : '❌';
-    const color = trade.profitSOL > 0 ? '🟢' : '🔴';
+    formatSellMessage(trade, user) {
+        const emoji = trade.profitSOL > 0 ? '✅' : '❌';
+        const color = trade.profitSOL > 0 ? '🟢' : '🔴';
 
-    const reasonLabels = {
-        'scalp_profit': '⚡ Scalp Profit',
-        'extended_profit': '🎯 Extended Target Hit',
-        'stop_loss': '🛡️ Stop Loss Triggered'
-    };
+        const reasonLabels = {
+            'scalp_profit': '⚡ Scalp Profit',
+            'extended_profit': '🎯 Extended Target Hit',
+            'stop_loss': '🛡️ Stop Loss Triggered'
+        };
 
-    const reason = reasonLabels[trade.reason] || trade.reason.toUpperCase();
+        const reason = reasonLabels[trade.reason] || trade.reason.toUpperCase();
 
-    const txUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
-    const birdeyeUrl = `https://birdeye.so/token/${trade.tokenAddress}?chain=solana`;
+        const txUrl = `https://solscan.io/tx/${trade.sellTxSignature}`;
+        const birdeyeUrl = `https://birdeye.so/token/${trade.tokenAddress}?chain=solana`;
 
-    return `
+        return `
 ${emoji} <b>POSITION CLOSED ${color}</b>
 <b>${trade.symbol}</b>
 └ ${reason}
@@ -3333,10 +2966,10 @@ ${emoji} <b>POSITION CLOSED ${color}</b>
 
 <i>${new Date().toLocaleTimeString()} UTC</i>
     `.trim();
-}
+    }
 
-formatDailyTargetMessage(user, target) {
-  return `
+    formatDailyTargetMessage(user, target) {
+        return `
 🎯 <b>DAILY ${target} HIT</b>
 
 Daily P&L: ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
@@ -3347,11 +2980,11 @@ ${ENABLE_PROFIT_TAKING && user.totalProfitTaken > 0 ? `💰 Total Secured: ${use
 Bot entering 24h cooldown.
 Next: Day ${user.currentDay + 1}
   `.trim();
-}
+    }
 
-formatStrategyAdjustmentMessage(oldLevel, newStrategy, stats) {
-  const levelEmojis = { 'CONSERVATIVE': '🛡️', 'MODERATE': '⚖️', 'AGGRESSIVE': '🚀' };
-  return `
+    formatStrategyAdjustmentMessage(oldLevel, newStrategy, stats) {
+        const levelEmojis = { 'CONSERVATIVE': '🛡️', 'MODERATE': '⚖️', 'AGGRESSIVE': '🚀' };
+        return `
 📊 <b>STRATEGY ADJUSTMENT</b>
 
 <b>Performance:</b>
@@ -3369,10 +3002,10 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 
 🎯 Bot optimized!
   `.trim();
-}
+    }
 
-// End of TradingEngine class methods
-} 
+    // End of TradingEngine class methods
+}
 
 
 // ============ COMPLETE TRADING BOT CLASS ============
@@ -3381,9 +3014,9 @@ Position: ${(newStrategy.positionSize * 100).toFixed(0)}%
 class TradingBot {
     constructor() {
         console.log('🤖 TradingBot Constructor Starting...');
-        
+
         this.ownerId = AUTHORIZED_USERS.length > 0 ? AUTHORIZED_USERS[0] : null;
-    
+
         // ===== TELEGRAM BOT SETUP =====
         console.log('📱 Initializing Telegram bot...');
         logger.info('🔵 Starting in POLLING MODE (Production)');
@@ -3398,89 +3031,89 @@ class TradingBot {
                 }
             },
             filepath: false,
-            request:{
-              agentOptions:{
-                keepAlive : false ,
-                family: 4
-              }
+            request: {
+                agentOptions: {
+                    keepAlive: false,
+                    family: 4
+                }
             }
         });
-        
+
         // Polling error handler
         let pollingErrorCount = 0;
         let lastPollingError = 0;
 
-      this.bot.on('polling_error', async (error) => {
-      const now = Date.now();
-    
-    // Reset counter if no errors for 5 minutes
-      if (now - lastPollingError > 300000) {
-        pollingErrorCount = 0;
-      }
-    
-       lastPollingError = now;
-        pollingErrorCount++;
-    
-    // ECONNRESET is normal on Railway - just log and continue
-      if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
-        console.log(`⚠️  Telegram connection reset (normal on Railway) - retry ${pollingErrorCount}`);
-        
-        // Only log to Winston every 10 resets (reduce spam)
-        if (pollingErrorCount % 10 === 0) {
-            logger.warn('Telegram connection resets', { 
-                count: pollingErrorCount,
-                error: error.message 
+        this.bot.on('polling_error', async (error) => {
+            const now = Date.now();
+
+            // Reset counter if no errors for 5 minutes
+            if (now - lastPollingError > 300000) {
+                pollingErrorCount = 0;
+            }
+
+            lastPollingError = now;
+            pollingErrorCount++;
+
+            // ECONNRESET is normal on Railway - just log and continue
+            if (error.code === 'EFATAL' && error.message.includes('ECONNRESET')) {
+                console.log(`⚠️  Telegram connection reset (normal on Railway) - retry ${pollingErrorCount}`);
+
+                // Only log to Winston every 10 resets (reduce spam)
+                if (pollingErrorCount % 10 === 0) {
+                    logger.warn('Telegram connection resets', {
+                        count: pollingErrorCount,
+                        error: error.message
+                    });
+                }
+
+                // If too many resets in short time, restart polling
+                if (pollingErrorCount > 20) {
+                    console.log('🔄 Too many resets, restarting polling...');
+                    await this.restartPolling();
+                    pollingErrorCount = 0;
+                }
+
+                return; // Don't crash, let it auto-retry
+            }
+
+            // Multiple bot instances = critical error
+            if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+                logger.error('❌ Multiple bot instances detected - SHUTTING DOWN');
+                console.error('❌ CRITICAL: Another instance is running!');
+                process.exit(1);
+            }
+
+            // ETIMEDOUT is common on Railway
+            if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+                console.log(`⏳ Telegram timeout (will retry) - ${error.code}`);
+                return;
+            }
+
+            // Unknown errors
+            console.error('❌ Telegram polling error:', error.code, error.message);
+            logger.error('Telegram polling error', {
+                code: error.code,
+                message: error.message
             });
-        }
-        
-        // If too many resets in short time, restart polling
-        if (pollingErrorCount > 20) {
-            console.log('🔄 Too many resets, restarting polling...');
-            await this.restartPolling();
-            pollingErrorCount = 0;
-        }
-        
-        return; // Don't crash, let it auto-retry
-    }
-    
-    // Multiple bot instances = critical error
-    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-        logger.error('❌ Multiple bot instances detected - SHUTTING DOWN');
-        console.error('❌ CRITICAL: Another instance is running!');
-        process.exit(1);
-    }
-    
-    // ETIMEDOUT is common on Railway
-    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
-        console.log(`⏳ Telegram timeout (will retry) - ${error.code}`);
-        return;
-    }
-    
-    // Unknown errors
-    console.error('❌ Telegram polling error:', error.code, error.message);
-    logger.error('Telegram polling error', { 
-        code: error.code, 
-        message: error.message 
-    });
-});
+        });
 
-// General bot error handler
-this.bot.on('error', (error) => {
-    console.error('❌ Bot error:', error.message);
-    logger.error('Bot error', { error: error.message });
-});
+        // General bot error handler
+        this.bot.on('error', (error) => {
+            console.error('❌ Bot error:', error.message);
+            logger.error('Bot error', { error: error.message });
+        });
 
-    
+
         this.bot.on('error', (error) => {
             logger.error('Bot error', { error: error.message });
         });
-    
+
         // Verify connection
         this.bot.getMe()
             .then(info => {
                 console.log('✅ Connected to Telegram:', info.username);
-                logger.info('Bot connected to Telegram', { 
-                    username: info.username, 
+                logger.info('Bot connected to Telegram', {
+                    username: info.username,
                     id: info.id,
                     mode: 'POLLING'
                 });
@@ -3490,21 +3123,21 @@ this.bot.on('error', (error) => {
                 logger.error('Bot connection failed', { error: err.message });
                 process.exit(1);
             });
-    
+
         // ===== INITIALIZE COMPONENTS =====
         console.log('⚙️  Initializing components...');
-        
+
         try {
             // RPC Connection
             console.log('   - RPC Connection...');
             this.rpcConnection = new RobustConnection(SOLANA_RPC_URL, RPC_FALLBACK_URLS);
             console.log('     ✅ RPC initialized');
-            
+
             // Wallet
             console.log('   - Wallet...');
             this.wallet = this.loadWallet(PRIVATE_KEY);
             console.log('     ✅ Wallet loaded:', this.wallet.publicKey.toString().substring(0, 8) + '...');
-            
+
             // Database
             console.log('   - Database...');
             this.database = new DatabaseManager('./data/trading.db');
@@ -3512,23 +3145,23 @@ this.bot.on('error', (error) => {
                 throw new Error('DatabaseManager failed to instantiate');
             }
             console.log('     ✅ Database instantiated');
-            
-            // BitQuery
-            console.log('   - BitQuery Client...');
-            this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
-            if (!this.bitquery) {
-                throw new Error('BitqueryClient failed to instantiate');
-            }
-            console.log('     ✅ BitQuery instantiated');
-            
+
+            // BitQuery Removed
+            // console.log('   - BitQuery Client...');
+            // this.bitquery = new BitqueryClient(BITQUERY_API_KEY, logger, this.database);
+            // if (!this.bitquery) {
+            //     throw new Error('BitqueryClient failed to instantiate');
+            // }
+            // console.log('     ✅ BitQuery instantiated');
+
             // Trading Engine
             console.log('   - Trading Engine...');
-            this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.bitquery, this.database);
+            this.engine = new TradingEngine(this.bot, this.wallet, this.rpcConnection, this.database);
             if (!this.engine) {
                 throw new Error('TradingEngine failed to instantiate');
             }
             console.log('     ✅ Trading Engine instantiated');
-            
+
             // Optional: Health Monitor
             if (ENABLE_HEALTH_MONITORING) {
                 console.log('   - Health Monitor...');
@@ -3538,216 +3171,205 @@ this.bot.on('error', (error) => {
                 console.log('   - Health Monitor: DISABLED');
                 this.healthMonitor = null;
             }
-            
+
             console.log('✅ All components instantiated successfully\n');
-            
+
         } catch (error) {
             console.error('❌ Component initialization failed:', error.message);
             console.error('Stack:', error.stack);
             logger.error('Constructor failed', { error: error.message, stack: error.stack });
             throw error;
         }
-    
+
         // Setup memory management
         this.setupMemoryManagement();
     }
-    
+
 
     async restartPolling() {
         try {
             console.log('🔄 Restarting Telegram polling...');
             logger.info('Attempting to restart polling');
-            
+
             await this.bot.stopPolling();
             await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5s
             await this.bot.startPolling();
-            
+
             console.log('✅ Polling restarted successfully');
             logger.info('Polling restarted successfully');
         } catch (error) {
             console.error('❌ Failed to restart polling:', error.message);
             logger.error('Failed to restart polling', { error: error.message });
-            
+
             // If restart fails, exit and let Railway restart the whole bot
             console.log('🔄 Exiting for Railway restart...');
             process.exit(1);
         }
     }
-    
 
 
-performMemoryCleanup() {
-    let cleaned = 0;
 
-    // 1. Clear BitQuery cache
-    if (this.bitquery && this.bitquery.cache) {
-        const size = this.bitquery.cache.size;
-        this.bitquery.cache.clear();
-        cleaned += size;
-        if (size > 0) console.log(`   🧹 Cleared ${size} BitQuery cache entries`);
+    performMemoryCleanup() {
+        let cleaned = 0;
+
+        // 1. Clear BitQuery cache
+
+
+        // 2. Trim trade history to last 10 trades per user
+        for (const [userId, user] of this.engine.userStates.entries()) {
+            if (user.tradeHistory && user.tradeHistory.length > 10) {
+                const removed = user.tradeHistory.length - 10;
+                user.tradeHistory = user.tradeHistory.slice(-10);
+                cleaned += removed;
+                console.log(`   🧹 Trimmed ${removed} old trades for user ${userId}`);
+            }
+
+            // 3. Trim profit taking history
+            if (user.profitTakingHistory && user.profitTakingHistory.length > 5) {
+                const removed = user.profitTakingHistory.length - 5;
+                user.profitTakingHistory = user.profitTakingHistory.slice(-5);
+                cleaned += removed;
+            }
+        }
+
+        // 4. Clear RPC failure tracking (reset counts)
+        if (this.rpcConnection) {
+            this.rpcConnection.failureCounts.fill(0);
+            this.rpcConnection.lastFailureTime.fill(0);
+        }
+
+        // 5. Clear performance tracker averages (keep totals)
+        if (this.engine && this.engine.performanceTracker) {
+            // Don't clear everything, just reset some calculated fields
+            this.engine.performanceTracker.recentFees = [];
+        }
+
+        // 6. Clear priority fee calculator history
+        if (this.engine && this.engine.priorityFeeCalculator) {
+            this.engine.priorityFeeCalculator.recentFees = [];
+        }
+
+        return cleaned;
     }
 
-    // 2. Trim trade history to last 10 trades per user
-    for (const [userId, user] of this.engine.userStates.entries()) {
-        if (user.tradeHistory && user.tradeHistory.length > 10) {
-            const removed = user.tradeHistory.length - 10;
-            user.tradeHistory = user.tradeHistory.slice(-10);
-            cleaned += removed;
-            console.log(`   🧹 Trimmed ${removed} old trades for user ${userId}`);
-        }
-        
-        // 3. Trim profit taking history
-        if (user.profitTakingHistory && user.profitTakingHistory.length > 5) {
-            const removed = user.profitTakingHistory.length - 5;
-            user.profitTakingHistory = user.profitTakingHistory.slice(-5);
-            cleaned += removed;
+    async init() {
+        logger.info('Trading bot initializing...');
+
+        try {
+            // ===== STEP 1: DATABASE INIT =====
+            console.log('📦 Step 1: Initializing database...');
+            if (!this.database) {
+                throw new Error('Database is undefined! Check DatabaseManager initialization in constructor.');
+            }
+            await this.database.init();
+            logger.info('✅ Database initialized');
+
+            // ===== STEP 2: BITQUERY INIT =====
+
+            // ===== STEP 3: TRADING ENGINE INIT =====
+            console.log('⚙️  Step 3: Initializing trading engine...');
+            if (!this.engine) {
+                throw new Error('Trading engine is undefined! Check TradingEngine initialization in constructor.');
+            }
+            await this.engine.init();
+            logger.info('✅ Trading engine initialized');
+
+            // ===== STEP 4: TELEGRAM COMMANDS =====
+            console.log('📱 Step 4: Setting up Telegram commands...');
+            this.setupCommands();
+            logger.info('✅ Telegram commands setup');
+
+            // ===== STEP 5: HEALTH MONITORING (OPTIONAL) =====
+            if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
+                console.log('🏥 Step 5: Starting health monitoring...');
+                this.healthMonitor.start(5);
+                logger.info('✅ Health monitoring started');
+            } else {
+                console.log('⏭️  Step 5: Health monitoring disabled');
+            }
+
+            // ===== STEP 6: TRADING CYCLES =====
+            console.log('🚀 Step 6: Starting trading cycles...');
+            this.startTrading();
+            logger.info('✅ Trading cycles started');
+
+            console.log('='.repeat(50));
+            console.log('✅ BOT FULLY OPERATIONAL');
+            console.log('='.repeat(50));
+
+            logger.info('✅ Trading bot fully operational');
+
+        } catch (error) {
+            console.error('❌ Initialization failed:', error.message);
+            console.error('Stack:', error.stack);
+            logger.error('Initialization failed', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw error; // Re-throw to stop startup
         }
     }
 
-    // 4. Clear RPC failure tracking (reset counts)
-    if (this.rpcConnection) {
-        this.rpcConnection.failureCounts.fill(0);
-        this.rpcConnection.lastFailureTime.fill(0);
+
+    loadWallet(privateKey) {
+        if (!privateKey) {
+            throw new Error('PRIVATE_KEY not set in environment');
+        }
+
+        try {
+            const decoded = bs58.decode(privateKey);
+            if (decoded.length === 64) {
+                logger.info('Wallet loaded (64-byte keypair)');
+                return Keypair.fromSecretKey(decoded);
+            } else if (decoded.length === 32) {
+                logger.info('Wallet loaded (32-byte seed)');
+                return Keypair.fromSeed(decoded);
+            } else {
+                throw new Error(`Invalid private key length: ${decoded.length}`);
+            }
+        } catch (err) {
+            logger.error('Failed to load wallet', { error: err.message });
+            throw new Error('Invalid PRIVATE_KEY format. Must be Base58 encoded.');
+        }
     }
 
-    // 5. Clear performance tracker averages (keep totals)
-    if (this.engine && this.engine.performanceTracker) {
-        // Don't clear everything, just reset some calculated fields
-        this.engine.performanceTracker.recentFees = [];
-    }
+    async handleTestQuote(userId, chatId) {
+        try {
+            await this.sendMessage(chatId, '🧪 <b>Testing Jupiter Quote...</b>', {
+                parse_mode: 'HTML'
+            });
 
-    // 6. Clear priority fee calculator history
-    if (this.engine && this.engine.priorityFeeCalculator) {
-        this.engine.priorityFeeCalculator.recentFees = [];
-    }
+            console.log('\n🧪 MANUAL QUOTE TEST TRIGGERED');
+            console.log('   User:', userId);
+            console.log('   Testing: 1 USDC → SOL\n');
 
-    return cleaned;
-}
+            // Test parameters
+            const testAmount = 1_000_000; // 1 USDC (6 decimals)
+            const inputMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
+            const outputMint = 'So11111111111111111111111111111111111111112'; // SOL
+            const slippage = 300; // 3%
 
-async init() {
-    logger.info('Trading bot initializing...');
-    
-    try {
-        // ===== STEP 1: DATABASE INIT =====
-        console.log('📦 Step 1: Initializing database...');
-        if (!this.database) {
-            throw new Error('Database is undefined! Check DatabaseManager initialization in constructor.');
-        }
-        await this.database.init();
-        logger.info('✅ Database initialized');
-        
-        // ===== STEP 2: BITQUERY INIT =====
-        console.log('📡 Step 2: Initializing BitQuery...');
-        if (!this.bitquery) {
-            throw new Error('BitQuery is undefined! Check BitqueryClient initialization in constructor.');
-        }
-        await this.bitquery.init();
-        logger.info('✅ Bitquery initialized');
-        
-        // ===== STEP 3: TRADING ENGINE INIT =====
-        console.log('⚙️  Step 3: Initializing trading engine...');
-        if (!this.engine) {
-            throw new Error('Trading engine is undefined! Check TradingEngine initialization in constructor.');
-        }
-        await this.engine.init();
-        logger.info('✅ Trading engine initialized');
-        
-        // ===== STEP 4: TELEGRAM COMMANDS =====
-        console.log('📱 Step 4: Setting up Telegram commands...');
-        this.setupCommands();
-        logger.info('✅ Telegram commands setup');
-        
-        // ===== STEP 5: HEALTH MONITORING (OPTIONAL) =====
-        if (ENABLE_HEALTH_MONITORING && this.healthMonitor) {
-            console.log('🏥 Step 5: Starting health monitoring...');
-            this.healthMonitor.start(5);
-            logger.info('✅ Health monitoring started');
-        } else {
-            console.log('⏭️  Step 5: Health monitoring disabled');
-        }
-        
-        // ===== STEP 6: TRADING CYCLES =====
-        console.log('🚀 Step 6: Starting trading cycles...');
-        this.startTrading();
-        logger.info('✅ Trading cycles started');
+            // Call the quote method
+            const quote = await this.engine.getJupiterQuote(
+                inputMint,
+                outputMint,
+                testAmount,
+                slippage
+            );
 
-        console.log('='.repeat(50));
-        console.log('✅ BOT FULLY OPERATIONAL');
-        console.log('='.repeat(50));
-        
-        logger.info('✅ Trading bot fully operational');
+            if (quote && quote.outAmount) {
+                // Calculate human-readable values
+                const inUSDC = parseInt(quote.inAmount) / 1_000_000;
+                const outSOL = parseInt(quote.outAmount) / 1_000_000_000;
+                const pricePerSOL = inUSDC / outSOL;
 
-    } catch (error) {
-        console.error('❌ Initialization failed:', error.message);
-        console.error('Stack:', error.stack);
-        logger.error('Initialization failed', { 
-            error: error.message, 
-            stack: error.stack 
-        });
-        throw error; // Re-throw to stop startup
-    }
-}
+                console.log('✅ Quote test PASSED');
+                console.log(`   In: ${inUSDC} USDC`);
+                console.log(`   Out: ${outSOL} SOL`);
+                console.log(`   Price: $${pricePerSOL.toFixed(2)} per SOL\n`);
 
-
-loadWallet(privateKey) {
-  if (!privateKey) {
-      throw new Error('PRIVATE_KEY not set in environment');
-  }
-  
-  try {
-      const decoded = bs58.decode(privateKey);
-      if (decoded.length === 64) {
-          logger.info('Wallet loaded (64-byte keypair)');
-          return Keypair.fromSecretKey(decoded);
-      } else if (decoded.length === 32) {
-          logger.info('Wallet loaded (32-byte seed)');
-          return Keypair.fromSeed(decoded);
-      } else {
-          throw new Error(`Invalid private key length: ${decoded.length}`);
-      }
-  } catch (err) {
-      logger.error('Failed to load wallet', { error: err.message });
-      throw new Error('Invalid PRIVATE_KEY format. Must be Base58 encoded.');
-  }
-}
-
-async handleTestQuote(userId, chatId) {
-    try {
-        await this.sendMessage(chatId, '🧪 <b>Testing Jupiter Quote...</b>', { 
-            parse_mode: 'HTML' 
-        });
-        
-        console.log('\n🧪 MANUAL QUOTE TEST TRIGGERED');
-        console.log('   User:', userId);
-        console.log('   Testing: 1 USDC → SOL\n');
-        
-        // Test parameters
-        const testAmount = 1_000_000; // 1 USDC (6 decimals)
-        const inputMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
-        const outputMint = 'So11111111111111111111111111111111111111112'; // SOL
-        const slippage = 300; // 3%
-        
-        // Call the quote method
-        const quote = await this.engine.getJupiterQuote(
-            inputMint,
-            outputMint,
-            testAmount,
-            slippage
-        );
-        
-        if (quote && quote.outAmount) {
-            // Calculate human-readable values
-            const inUSDC = parseInt(quote.inAmount) / 1_000_000;
-            const outSOL = parseInt(quote.outAmount) / 1_000_000_000;
-            const pricePerSOL = inUSDC / outSOL;
-            
-            console.log('✅ Quote test PASSED');
-            console.log(`   In: ${inUSDC} USDC`);
-            console.log(`   Out: ${outSOL} SOL`);
-            console.log(`   Price: $${pricePerSOL.toFixed(2)} per SOL\n`);
-            
-            // Send success message
-            await this.sendMessage(chatId, `
+                // Send success message
+                await this.sendMessage(chatId, `
 ✅ <b>QUOTE TEST PASSED</b>
 
 <b>Request:</b>
@@ -3770,19 +3392,19 @@ All endpoints are operational.
 
 <i>You can now use /start to begin trading.</i>
             `.trim(), { parse_mode: 'HTML' });
-            
-            this.logger.info('Quote test successful', {
-                userId,
-                inAmount: quote.inAmount,
-                outAmount: quote.outAmount,
-                pricePerSOL: pricePerSOL.toFixed(2)
-            });
-            
-        } else {
-            console.log('❌ Quote test FAILED - no quote returned\n');
-            
-            // Send failure message
-            await this.sendMessage(chatId, `
+
+                this.logger.info('Quote test successful', {
+                    userId,
+                    inAmount: quote.inAmount,
+                    outAmount: quote.outAmount,
+                    pricePerSOL: pricePerSOL.toFixed(2)
+                });
+
+            } else {
+                console.log('❌ Quote test FAILED - no quote returned\n');
+
+                // Send failure message
+                await this.sendMessage(chatId, `
 ❌ <b>QUOTE TEST FAILED</b>
 
 All Jupiter endpoints failed to respond.
@@ -3800,9 +3422,9 @@ All Jupiter endpoints failed to respond.
 4. Check wallet has funds: /wallet
 
 <b>Jupiter Endpoint Status:</b>
-${JUPITER_ENDPOINTS.map((ep, i) => 
-    `${i + 1}. ${ep.substring(0, 40)}...\n   Failures: ${jupiterEndpointFailures[i]}`
-).join('\n')}
+${JUPITER_ENDPOINTS.map((ep, i) =>
+                    `${i + 1}. ${ep.substring(0, 40)}...\n   Failures: ${jupiterEndpointFailures[i]}`
+                ).join('\n')}
 
 <b>What to do:</b>
 • If all endpoints show 0-3 failures: Try again
@@ -3811,37 +3433,37 @@ ${JUPITER_ENDPOINTS.map((ep, i) =>
 
 <i>Contact support if problem continues.</i>
             `.trim(), { parse_mode: 'HTML' });
-            
-            this.logger.error('Quote test failed - all endpoints unreachable', {
+
+                this.logger.error('Quote test failed - all endpoints unreachable', {
+                    userId,
+                    endpointFailures: jupiterEndpointFailures
+                });
+            }
+
+        } catch (error) {
+            console.error('💥 Quote test error:', error.message);
+            console.error('Stack:', error.stack);
+
+            this.logger.error('Quote test error', {
                 userId,
-                endpointFailures: jupiterEndpointFailures
+                error: error.message,
+                stack: error.stack
             });
-        }
-        
-    } catch (error) {
-        console.error('💥 Quote test error:', error.message);
-        console.error('Stack:', error.stack);
-        
-        this.logger.error('Quote test error', { 
-            userId,
-            error: error.message,
-            stack: error.stack
-        });
-        
-        // Send error message
-        await this.sendMessage(chatId, `
+
+            // Send error message
+            await this.sendMessage(chatId, `
 ❌ <b>Test Error</b>
 
 <b>Error:</b> ${error.message}
 
 <b>Possible Causes:</b>
-${error.message.includes('getJupiterQuote') ? 
-    '• getJupiterQuote method missing or broken' : 
-    '• Network connectivity issue'}
-${error.message.includes('timeout') ? 
-    '• Request timeout (Jupiter API slow)' : ''}
-${error.message.includes('Invalid') ? 
-    '• Invalid parameters or response' : ''}
+${error.message.includes('getJupiterQuote') ?
+                    '• getJupiterQuote method missing or broken' :
+                    '• Network connectivity issue'}
+${error.message.includes('timeout') ?
+                    '• Request timeout (Jupiter API slow)' : ''}
+${error.message.includes('Invalid') ?
+                    '• Invalid parameters or response' : ''}
 
 <b>Next Steps:</b>
 1. Check bot logs for details
@@ -3851,306 +3473,313 @@ ${error.message.includes('Invalid') ?
 
 <i>Check console output for full error details.</i>
         `.trim(), { parse_mode: 'HTML' });
-    }
-}
-async sendMessage(chatId, text, options = {}) {
-    const maxRetries = 3;
-    const maxLength = 4096;
-    
-    // Truncate if too long
-    let messageText = text;
-    if (text.length > maxLength) {
-        logger.warn('Message too long, truncating', { 
-            originalLength: text.length,
-            chatId 
-        });
-        messageText = text.substring(0, maxLength - 100) + '\n\n... (message truncated)';
-    }
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            return await this.bot.sendMessage(chatId, messageText, {
-                parse_mode: 'HTML',
-                disable_web_page_preview: true,
-                ...options
-            });
-        } catch (error) {
-            logger.warn(`Send message attempt ${attempt}/${maxRetries} failed`, {
-                error: error.message,
-                chatId,
-                attempt
-            });
-            
-            // If HTML parsing failed, try without HTML
-            if (error.message.includes('parse') && options.parse_mode === 'HTML') {
-                logger.info('Retrying without HTML parse mode');
-                delete options.parse_mode;
-                messageText = this.stripHtmlTags(messageText);
-            }
-            
-            // If it's the last attempt, throw the error
-            if (attempt === maxRetries) {
-                throw error;
-            }
-            
-            // Exponential backoff
-            await new Promise(resolve => 
-                setTimeout(resolve, 1000 * Math.pow(2, attempt - 1))
-            );
         }
     }
-}
+    async sendMessage(chatId, text, options = {}) {
+        const maxRetries = 3;
+        const maxLength = 4096;
 
-
-stripHtmlTags(text) {
-    return text
-        .replace(/<[^>]*>/g, '')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#039;/g, "'");
-}
-  setupCommands() {
-    logger.info('Setting up Telegram bot commands...');
-    
-    // ============ SINGLE MESSAGE HANDLER FOR ALL COMMANDS ============
-    this.bot.on('message', async (msg) => {
-        const startTime = Date.now();
-        let userId, chatId, command;
-        
-        try {
-            // Only process text messages that start with /
-            if (!msg.text || !msg.text.startsWith('/')) return;
-            
-            userId = msg.from.id;
-            chatId = msg.chat.id;
-            const text = msg.text.trim();
-            const [cmd, ...args] = text.split(' ');
-            command = cmd.toLowerCase();
-            
-            logger.info('Command received', { 
-                userId, 
-                chatId,
-                command, 
-                args,
-                username: msg.from.username 
+        // Truncate if too long
+        let messageText = text;
+        if (text.length > maxLength) {
+            logger.warn('Message too long, truncating', {
+                originalLength: text.length,
+                chatId
             });
-            
-            // Authorization check
-            if (!this.isAuthorized(userId)) {
-                await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
-                logger.warn('Unauthorized command attempt', { userId, command });
-                return;
-            }
-            
-            // Send typing indicator
-            await this.bot.sendChatAction(chatId, 'typing').catch(e => 
-                logger.debug('Failed to send typing indicator:', e.message)
-            );
-            
-            // Route to appropriate handler with individual error handling
-            let handlerPromise;
-            
-            switch (command) {
-                case '/start':
-                    handlerPromise = this.handleStart(userId, chatId);
-                    break;
-                    
-                case '/stop':
-                    handlerPromise = this.handleStop(userId, chatId);
-                    break;
-                    
-                case '/balance':
-                    handlerPromise = this.handleBalance(userId, chatId);
-                    break;
-                    
-                case '/status':
-                    handlerPromise = this.handleStatus(userId, chatId);
-                    break;
-                    
-                case '/performance':
-                    handlerPromise = this.handlePerformance(userId, chatId);
-                    break;
-                    
-                case '/history':
-                    handlerPromise = this.handleHistory(userId, chatId);
-                    break;
-                    
-                case '/stats':
-                    handlerPromise = this.handleStats(userId, chatId);
-                    break;
-                    
-                case '/profits':
-                    handlerPromise = this.handleProfits(userId, chatId);
-                    break;
-                    
-                case '/health':
-                    handlerPromise = this.handleHealth(userId, chatId);
-                    break;
-                    
-                case '/anomalies':
-                    handlerPromise = this.handleAnomalies(userId, chatId);
-                    break;
-                    
-                case '/portfolio':
-                    handlerPromise = this.handlePortfolio(userId, chatId);
-                    break;
-                    
-                case '/backtest':
-                    const days = parseInt(args[0]) || 30;
-                    handlerPromise = this.handleBacktest(userId, chatId, days);
-                    break;
-                    
-                case '/wallet':
-                    handlerPromise = this.handleWallet(userId, chatId);
-                    break;
-                    
-                case '/help':
-                    handlerPromise = this.handleHelp(userId, chatId);
-                    break;
+            messageText = text.substring(0, maxLength - 100) + '\n\n... (message truncated)';
+        }
 
-                case '/recent':
-                    handlerPromise = this.handleRecentTrades(userId, chatId);
-                    break;   
-
-                case '/scan':
-                    handlerPromise = this.handleScan(userId, chatId);
-                    break;    
-                
-                    
-                case '/testquote':
-                    handlerPromise = this.handleTestQuote(userId, chatId);
-                    break;
-                    
-                    
-                default:
-                    await this.sendMessage(chatId, 
-                        `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
-                    );
-                    logger.debug('Unknown command', { command, userId });
-                    return;
-            }
-            
-            // Execute handler with timeout
-            await Promise.race([
-                handlerPromise,
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Command timeout (30s)')), 30000)
-                )
-            ]);
-            
-            const executionTime = Date.now() - startTime;
-            logger.info('Command executed successfully', { 
-                command, 
-                userId, 
-                executionTime: `${executionTime}ms` 
-            });
-            
-        } catch (error) {
-            const executionTime = Date.now() - startTime;
-            
-            // Detailed error logging
-            logger.error('Command handler error', { 
-                command: command || 'unknown',
-                userId: userId || 'unknown',
-                chatId: chatId || 'unknown',
-                error: error.message,
-                errorName: error.name,
-                stack: error.stack,
-                executionTime: `${executionTime}ms`,
-                text: msg.text 
-            });
-            
-            // User-friendly error message based on error type
-            let errorMessage = '❌ <b>Command Failed</b>\n\n';
-            
-            if (error.message.includes('timeout')) {
-                errorMessage += '⏱️ The command took too long to execute.\n';
-                errorMessage += 'Please try again in a moment.';
-            } else if (error.message.includes('Unauthorized')) {
-                errorMessage += '🔒 You are not authorized to use this bot.';
-            } else if (error.message.includes('ETELEGRAM')) {
-                errorMessage += '📱 Telegram API error.\n';
-                errorMessage += 'Please try again.';
-            } else if (error.message.includes('wallet') || error.message.includes('balance')) {
-                errorMessage += '💼 Wallet connection issue.\n';
-                errorMessage += 'Retrying may help.';
-            } else if (error.message.includes('database') || error.message.includes('DB')) {
-                errorMessage += '💾 Database error.\n';
-                errorMessage += 'Your data is safe, please try again.';
-            } else {
-                // Generic error for unknown issues
-                errorMessage += `⚠️ ${this.sanitizeErrorMessage(error.message)}\n\n`;
-                errorMessage += `Error Code: ${Date.now()}\n`;
-                errorMessage += 'Please try again or contact support.';
-            }
-            
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                await this.sendMessage(chatId, errorMessage, { 
-                    parse_mode: 'HTML' 
+                return await this.bot.sendMessage(chatId, messageText, {
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true,
+                    ...options
                 });
-            } catch (sendErr) {
-                logger.error('Failed to send error message to user', { 
-                    error: sendErr.message,
-                    originalError: error.message,
+            } catch (error) {
+                logger.warn(`Send message attempt ${attempt}/${maxRetries} failed`, {
+                    error: error.message,
+                    chatId,
+                    attempt
+                });
+
+                // If HTML parsing failed, try without HTML
+                if (error.message.includes('parse') && options.parse_mode === 'HTML') {
+                    logger.info('Retrying without HTML parse mode');
+                    delete options.parse_mode;
+                    messageText = this.stripHtmlTags(messageText);
+                }
+
+                // If it's the last attempt, throw the error
+                if (attempt === maxRetries) {
+                    throw error;
+                }
+
+                // Exponential backoff
+                await new Promise(resolve =>
+                    setTimeout(resolve, 1000 * Math.pow(2, attempt - 1))
+                );
+            }
+        }
+    }
+
+
+    stripHtmlTags(text) {
+        return text
+            .replace(/<[^>]*>/g, '')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'");
+    }
+    setupCommands() {
+        logger.info('Setting up Telegram bot commands...');
+
+        // ============ SINGLE MESSAGE HANDLER FOR ALL COMMANDS ============
+        this.bot.on('message', async (msg) => {
+            const startTime = Date.now();
+            let userId, chatId, command;
+
+            try {
+                // Only process text messages that start with /
+                if (!msg.text || !msg.text.startsWith('/')) return;
+
+                userId = msg.from.id;
+                chatId = msg.chat.id;
+                const text = msg.text.trim();
+                const [cmd, ...args] = text.split(' ');
+                command = cmd.toLowerCase();
+
+                logger.info('Command received', {
                     userId,
-                    chatId
+                    chatId,
+                    command,
+                    args,
+                    username: msg.from.username
                 });
-                
-                // Last resort: try plain text without HTML
+
+                // Authorization check
+                if (!this.isAuthorized(userId)) {
+                    await this.sendMessage(chatId, '❌ Unauthorized. Contact bot owner.');
+                    logger.warn('Unauthorized command attempt', { userId, command });
+                    return;
+                }
+
+                // Send typing indicator
+                await this.bot.sendChatAction(chatId, 'typing').catch(e =>
+                    logger.debug('Failed to send typing indicator:', e.message)
+                );
+
+                // Route to appropriate handler with individual error handling
+                let handlerPromise;
+
+                switch (command) {
+                    case '/start':
+                        handlerPromise = this.handleStart(userId, chatId);
+                        break;
+
+                    case '/stop':
+                        handlerPromise = this.handleStop(userId, chatId);
+                        break;
+
+                    case '/balance':
+                        handlerPromise = this.handleBalance(userId, chatId);
+                        break;
+
+                    case '/status':
+                        handlerPromise = this.handleStatus(userId, chatId);
+                        break;
+
+                    case '/performance':
+                        handlerPromise = this.handlePerformance(userId, chatId);
+                        break;
+
+                    case '/history':
+                        handlerPromise = this.handleHistory(userId, chatId);
+                        break;
+
+                    case '/stats':
+                        handlerPromise = this.handleStats(userId, chatId);
+                        break;
+
+                    case '/profits':
+                        handlerPromise = this.handleProfits(userId, chatId);
+                        break;
+
+                    case '/health':
+                        handlerPromise = this.handleHealth(userId, chatId);
+                        break;
+
+                    case '/anomalies':
+                        handlerPromise = this.handleAnomalies(userId, chatId);
+                        break;
+
+                    case '/reset_breaker':
+                        if (this.isAuthorized(userId)) {
+                            this.engine.circuitBreaker.forceReset();
+                            handlerPromise = this.sendMessage(chatId, '✅ Circuit breaker manually reset.');
+                        }
+                        break;
+
+                    case '/portfolio':
+                        handlerPromise = this.handlePortfolio(userId, chatId);
+                        break;
+
+                    case '/backtest':
+                        const days = parseInt(args[0]) || 30;
+                        handlerPromise = this.handleBacktest(userId, chatId, days);
+                        break;
+
+                    case '/wallet':
+                        handlerPromise = this.handleWallet(userId, chatId);
+                        break;
+
+                    case '/help':
+                        handlerPromise = this.handleHelp(userId, chatId);
+                        break;
+
+                    case '/recent':
+                        handlerPromise = this.handleRecentTrades(userId, chatId);
+                        break;
+
+                    case '/scan':
+                        handlerPromise = this.handleScan(userId, chatId);
+                        break;
+
+
+                    case '/testquote':
+                        handlerPromise = this.handleTestQuote(userId, chatId);
+                        break;
+
+
+                    default:
+                        await this.sendMessage(chatId,
+                            `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
+                        );
+                        logger.debug('Unknown command', { command, userId });
+                        return;
+                }
+
+                // Execute handler with timeout
+                await Promise.race([
+                    handlerPromise,
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Command timeout (30s)')), 30000)
+                    )
+                ]);
+
+                const executionTime = Date.now() - startTime;
+                logger.info('Command executed successfully', {
+                    command,
+                    userId,
+                    executionTime: `${executionTime}ms`
+                });
+
+            } catch (error) {
+                const executionTime = Date.now() - startTime;
+
+                // Detailed error logging
+                logger.error('Command handler error', {
+                    command: command || 'unknown',
+                    userId: userId || 'unknown',
+                    chatId: chatId || 'unknown',
+                    error: error.message,
+                    errorName: error.name,
+                    stack: error.stack,
+                    executionTime: `${executionTime}ms`,
+                    text: msg.text
+                });
+
+                // User-friendly error message based on error type
+                let errorMessage = '❌ <b>Command Failed</b>\n\n';
+
+                if (error.message.includes('timeout')) {
+                    errorMessage += '⏱️ The command took too long to execute.\n';
+                    errorMessage += 'Please try again in a moment.';
+                } else if (error.message.includes('Unauthorized')) {
+                    errorMessage += '🔒 You are not authorized to use this bot.';
+                } else if (error.message.includes('ETELEGRAM')) {
+                    errorMessage += '📱 Telegram API error.\n';
+                    errorMessage += 'Please try again.';
+                } else if (error.message.includes('wallet') || error.message.includes('balance')) {
+                    errorMessage += '💼 Wallet connection issue.\n';
+                    errorMessage += 'Retrying may help.';
+                } else if (error.message.includes('database') || error.message.includes('DB')) {
+                    errorMessage += '💾 Database error.\n';
+                    errorMessage += 'Your data is safe, please try again.';
+                } else {
+                    // Generic error for unknown issues
+                    errorMessage += `⚠️ ${this.sanitizeErrorMessage(error.message)}\n\n`;
+                    errorMessage += `Error Code: ${Date.now()}\n`;
+                    errorMessage += 'Please try again or contact support.';
+                }
+
                 try {
-                    await this.sendMessage(chatId, 
-                        '❌ An error occurred. Please try again or contact support.'
-                    );
-                } catch (finalErr) {
-                    logger.error('Complete message send failure', { 
-                        error: finalErr.message 
+                    await this.sendMessage(chatId, errorMessage, {
+                        parse_mode: 'HTML'
                     });
+                } catch (sendErr) {
+                    logger.error('Failed to send error message to user', {
+                        error: sendErr.message,
+                        originalError: error.message,
+                        userId,
+                        chatId
+                    });
+
+                    // Last resort: try plain text without HTML
+                    try {
+                        await this.sendMessage(chatId,
+                            '❌ An error occurred. Please try again or contact support.'
+                        );
+                    } catch (finalErr) {
+                        logger.error('Complete message send failure', {
+                            error: finalErr.message
+                        });
+                    }
                 }
             }
-        }
-    });
-    
-    // Handle polling errors
-    this.bot.on('polling_error', (error) => {
-        logger.error('Telegram polling error', {
-            error: error.message,
-            code: error.code,
-            stack: error.stack
         });
-    });
-    
-    // Handle webhook errors (if using webhooks)
-    this.bot.on('webhook_error', (error) => {
-        logger.error('Telegram webhook error', {
-            error: error.message,
-            stack: error.stack
+
+        // Handle polling errors
+        this.bot.on('polling_error', (error) => {
+            logger.error('Telegram polling error', {
+                error: error.message,
+                code: error.code,
+                stack: error.stack
+            });
         });
-    });
-    
-    logger.info('✅ Message handler configured with enhanced error handling');
-}
 
-sanitizeErrorMessage(message) {
-    if (!message) return 'Unknown error';
-    
-    // Remove sensitive information
-    let sanitized = String(message)
-        .replace(/\b[A-Za-z0-9]{32,}\b/g, '[REDACTED]') // Remove tokens/keys
-        .replace(/\/[\w\/.-]+/g, '[PATH]') // Remove file paths
-        .replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g, '[IP]') // Remove IPs
-        .substring(0, 200); // Limit length
-    
-    return sanitized;
-}
+        // Handle webhook errors (if using webhooks)
+        this.bot.on('webhook_error', (error) => {
+            logger.error('Telegram webhook error', {
+                error: error.message,
+                stack: error.stack
+            });
+        });
 
-async handleDebug(userId, chatId) {
-    try {
-        const user = this.engine.getUserState(userId);
-        const dbUser = await this.database.getUser(userId.toString());
-        
-        const message = `
+        logger.info('✅ Message handler configured with enhanced error handling');
+    }
+
+    sanitizeErrorMessage(message) {
+        if (!message) return 'Unknown error';
+
+        // Remove sensitive information
+        let sanitized = String(message)
+            .replace(/\b[A-Za-z0-9]{32,}\b/g, '[REDACTED]') // Remove tokens/keys
+            .replace(/\/[\w\/.-]+/g, '[PATH]') // Remove file paths
+            .replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g, '[IP]') // Remove IPs
+            .substring(0, 200); // Limit length
+
+        return sanitized;
+    }
+
+    async handleDebug(userId, chatId) {
+        try {
+            const user = this.engine.getUserState(userId);
+            const dbUser = await this.database.getUser(userId.toString());
+
+            const message = `
 🔍 <b>DEBUG INFO</b>
 
 <b>Memory State:</b>
@@ -4171,34 +3800,34 @@ Scanning: ${this.engine.isScanning ? 'YES' : 'NO'}
 <b>Circuit Breaker:</b>
 Status: ${this.engine.circuitBreaker.isTripped ? '❌ TRIPPED' : '✅ OK'}
         `.trim();
-        
-        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-        
-    } catch (error) {
-        await this.sendMessage(chatId, `Error: ${error.message}`);
+
+            await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+
+        } catch (error) {
+            await this.sendMessage(chatId, `Error: ${error.message}`);
+        }
     }
-}
 
-async handleStart(userId, chatId) {
-    try {
-        await this.sendMessage(chatId, '⏳ Activating bot...');
+    async handleStart(userId, chatId) {
+        try {
+            await this.sendMessage(chatId, '⏳ Activating bot...');
 
-        const user = this.engine.getUserState(userId);
-        
-        // Get wallet balance FIRST
-        const balances = await this.engine.getWalletBalance();
-        const tradingBalance = balances.trading;
-        
-        console.log('\n' + '='.repeat(60));
-        console.log('🚀 USER ACTIVATION');
-        console.log('='.repeat(60));
-        console.log('User ID:', userId);
-        console.log('Trading Balance from wallet:', tradingBalance.toFixed(4));
-        console.log('Current user.currentBalance:', user.currentBalance.toFixed(4));
-        
-        // Check minimum balance
-        if (tradingBalance < 0.01) {
-            await this.sendMessage(chatId, `
+            const user = this.engine.getUserState(userId);
+
+            // Get wallet balance FIRST
+            const balances = await this.engine.getWalletBalance();
+            const tradingBalance = balances.trading;
+
+            console.log('\n' + '='.repeat(60));
+            console.log('🚀 USER ACTIVATION');
+            console.log('='.repeat(60));
+            console.log('User ID:', userId);
+            console.log('Trading Balance from wallet:', tradingBalance.toFixed(4));
+            console.log('Current user.currentBalance:', user.currentBalance.toFixed(4));
+
+            // Check minimum balance
+            if (tradingBalance < 0.01) {
+                await this.sendMessage(chatId, `
 ⚠️ <b>INSUFFICIENT FUNDS</b>
 
 Current: ${tradingBalance.toFixed(4)}
@@ -4208,106 +3837,106 @@ Wallet: <code>${this.wallet.publicKey.toString()}</code>
 
 Fund your wallet and try /start again.
             `.trim(), { parse_mode: 'HTML' });
-            return;
-        }
-        
-        // Check database
-        let dbUser = await this.database.getUser(userId.toString()).catch(() => null);
-        
-        // 🔥 FIX: Set balance BEFORE database operations
-        if (!dbUser) {
-            // New user - initialize with wallet balance
-            console.log('📝 New user - initializing with wallet balance');
-            user.startingBalance = tradingBalance;
-            user.currentBalance = tradingBalance;  // 🔥 SET THIS
-            user.dailyStartBalance = tradingBalance;
-            user.tradingCapital = tradingBalance;
-            user.currentDay = 1;
-            
-            await this.database.createUser(userId.toString(), tradingBalance);
-            console.log('✅ New user created in DB with balance:', tradingBalance);
-        } else {
-            // Existing user - sync with wallet balance
-            console.log('📝 Existing user - syncing with wallet balance');
-            console.log('   DB balance:', dbUser.current_balance);
-            console.log('   Wallet balance:', tradingBalance);
-            
-            // 🔥 CRITICAL: Always sync to wallet balance
-            user.currentBalance = tradingBalance;
-            user.tradingCapital = tradingBalance;
-            user.dailyStartBalance = tradingBalance;
-            
-            // Update starting balance if first time or reset
-            if (user.startingBalance === 0 || !user.startingBalance) {
-                user.startingBalance = tradingBalance;
+                return;
             }
-            
-            console.log('✅ Synced to wallet balance:', user.currentBalance);
-        }
 
-        // 🔥 CRITICAL: Activate user
-        user.isActive = true;
-        
-        console.log('\n✅ User state after setup:');
-        console.log('   isActive:', user.isActive);
-        console.log('   currentBalance:', user.currentBalance.toFixed(4));
-        console.log('   tradingCapital:', user.tradingCapital.toFixed(4));
-        console.log('   startingBalance:', user.startingBalance.toFixed(4));
-        
-        // Update database with correct values
-        await this.database.updateUser(userId.toString(), {
-            is_active: 1,
-            current_balance: user.currentBalance,  // 🔥 Use the synced balance
-            trading_capital: user.tradingCapital,
-            daily_start_balance: user.dailyStartBalance,
-            starting_balance: user.startingBalance
-        });
-        
-        console.log('✅ Database updated');
-        
-        // Verify it worked
-        const verify = await this.database.getUser(userId.toString());
-        console.log('✅ Verification:', {
-            is_active: verify.is_active,
-            current_balance: verify.current_balance,
-            trading_capital: verify.trading_capital
-        });
-        
-        if (verify.current_balance === 0 || verify.current_balance === null) {
-            throw new Error('Database balance still 0 after update!');
-        }
-        
-        if (verify.is_active !== 1) {
-            throw new Error('User not activated in database');
-        }
-        
-        // Save state
-        await this.engine.saveState();
-        console.log('✅ State saved');
-        
-        // Final check
-        const finalUser = this.engine.getUserState(userId);
-        console.log('✅ Final verification:', {
-            isActive: finalUser.isActive,
-            currentBalance: finalUser.currentBalance.toFixed(4),
-            hasPosition: finalUser.position !== null
-        });
-        console.log('='.repeat(60) + '\n');
-        
-        if (!finalUser.isActive) {
-            throw new Error('Final state check failed - user not active');
-        }
-        
-        if (finalUser.currentBalance === 0) {
-            throw new Error('Final state check failed - balance is 0');
-        }
+            // Check database
+            let dbUser = await this.database.getUser(userId.toString()).catch(() => null);
 
-        // Success message
-        const strategy = this.engine.getActiveStrategy();
-        const walletAddr = this.wallet.publicKey.toString();
-        const shortAddr = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
-        
-        await this.sendMessage(chatId, `
+            // 🔥 FIX: Set balance BEFORE database operations
+            if (!dbUser) {
+                // New user - initialize with wallet balance
+                console.log('📝 New user - initializing with wallet balance');
+                user.startingBalance = tradingBalance;
+                user.currentBalance = tradingBalance;  // 🔥 SET THIS
+                user.dailyStartBalance = tradingBalance;
+                user.tradingCapital = tradingBalance;
+                user.currentDay = 1;
+
+                await this.database.createUser(userId.toString(), tradingBalance);
+                console.log('✅ New user created in DB with balance:', tradingBalance);
+            } else {
+                // Existing user - sync with wallet balance
+                console.log('📝 Existing user - syncing with wallet balance');
+                console.log('   DB balance:', dbUser.current_balance);
+                console.log('   Wallet balance:', tradingBalance);
+
+                // 🔥 CRITICAL: Always sync to wallet balance
+                user.currentBalance = tradingBalance;
+                user.tradingCapital = tradingBalance;
+                user.dailyStartBalance = tradingBalance;
+
+                // Update starting balance if first time or reset
+                if (user.startingBalance === 0 || !user.startingBalance) {
+                    user.startingBalance = tradingBalance;
+                }
+
+                console.log('✅ Synced to wallet balance:', user.currentBalance);
+            }
+
+            // 🔥 CRITICAL: Activate user
+            user.isActive = true;
+
+            console.log('\n✅ User state after setup:');
+            console.log('   isActive:', user.isActive);
+            console.log('   currentBalance:', user.currentBalance.toFixed(4));
+            console.log('   tradingCapital:', user.tradingCapital.toFixed(4));
+            console.log('   startingBalance:', user.startingBalance.toFixed(4));
+
+            // Update database with correct values
+            await this.database.updateUser(userId.toString(), {
+                is_active: 1,
+                current_balance: user.currentBalance,  // 🔥 Use the synced balance
+                trading_capital: user.tradingCapital,
+                daily_start_balance: user.dailyStartBalance,
+                starting_balance: user.startingBalance
+            });
+
+            console.log('✅ Database updated');
+
+            // Verify it worked
+            const verify = await this.database.getUser(userId.toString());
+            console.log('✅ Verification:', {
+                is_active: verify.is_active,
+                current_balance: verify.current_balance,
+                trading_capital: verify.trading_capital
+            });
+
+            if (verify.current_balance === 0 || verify.current_balance === null) {
+                throw new Error('Database balance still 0 after update!');
+            }
+
+            if (verify.is_active !== 1) {
+                throw new Error('User not activated in database');
+            }
+
+            // Save state
+            await this.engine.saveState();
+            console.log('✅ State saved');
+
+            // Final check
+            const finalUser = this.engine.getUserState(userId);
+            console.log('✅ Final verification:', {
+                isActive: finalUser.isActive,
+                currentBalance: finalUser.currentBalance.toFixed(4),
+                hasPosition: finalUser.position !== null
+            });
+            console.log('='.repeat(60) + '\n');
+
+            if (!finalUser.isActive) {
+                throw new Error('Final state check failed - user not active');
+            }
+
+            if (finalUser.currentBalance === 0) {
+                throw new Error('Final state check failed - balance is 0');
+            }
+
+            // Success message
+            const strategy = this.engine.getActiveStrategy();
+            const walletAddr = this.wallet.publicKey.toString();
+            const shortAddr = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
+
+            await this.sendMessage(chatId, `
 🤖 <b>BOT ACTIVATED</b> ✅
 ${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 
@@ -4334,75 +3963,75 @@ Commands:
 /balance - View detailed balance
 /stop - Stop trading
         `.trim(), { parse_mode: 'HTML' });
-        
-        console.log('✅ Start message sent to user');
-        logger.info('User activated successfully', { 
-            userId,
-            balance: finalUser.currentBalance,
-            isActive: finalUser.isActive
-        });
 
-    } catch (error) {
-        console.error('💥 START ERROR:', error.message);
-        console.error('Stack:', error.stack);
-        
-        logger.error('handleStart failed', {
-            error: error.message,
-            stack: error.stack,
-            userId
-        });
-        
-        await this.sendMessage(chatId, 
-            `❌ <b>Activation Failed</b>\n\n${error.message}\n\nPlease try again.`,
-            { parse_mode: 'HTML' }
-        ).catch(err => {
-            console.error('Failed to send error message:', err.message);
-        });
-    }
-}
+            console.log('✅ Start message sent to user');
+            logger.info('User activated successfully', {
+                userId,
+                balance: finalUser.currentBalance,
+                isActive: finalUser.isActive
+            });
 
+        } catch (error) {
+            console.error('💥 START ERROR:', error.message);
+            console.error('Stack:', error.stack);
 
+            logger.error('handleStart failed', {
+                error: error.message,
+                stack: error.stack,
+                userId
+            });
 
-async handleScan(userId, chatId) {
-    try {
-        await this.sendMessage(chatId, '🔍 Manual scan initiated...');
-        
-        const user = this.engine.getUserState(userId);
-        if (!user.isActive) {
-            await this.sendMessage(chatId, 
-                '❌ Bot is not active. Use /start first.'
-            );
-            return;
+            await this.sendMessage(chatId,
+                `❌ <b>Activation Failed</b>\n\n${error.message}\n\nPlease try again.`,
+                { parse_mode: 'HTML' }
+            ).catch(err => {
+                console.error('Failed to send error message:', err.message);
+            });
         }
-        
-        console.log('\n🔍 MANUAL SCAN TRIGGERED by user', userId);
-        await this.engine.tradingCycle();
-        
-        await this.sendMessage(chatId, 
-            '✅ Scan complete. Check logs for results.'
-        );
-        
-    } catch (error) {
-        logger.error('Manual scan failed', { error: error.message });
-        await this.sendMessage(chatId, 
-            `❌ Scan failed: ${error.message}`
-        );
     }
-}
 
-async handleWallet(userId, chatId) {
-    try {
-        await this.sendMessage(chatId, '⏳ Fetching wallet info...');
-        
-        // Get real-time wallet balance
-        const balances = await this.engine.getWalletBalance();
-        
-        const walletAddress = this.wallet.publicKey.toString();
-        const explorerUrl = `https://solscan.io/account/${walletAddress}`;
-        
-        // Check if wallet is empty
-        if (balances.trading === 0 || balances.trading < 0.001) {
-            await this.sendMessage(chatId, `
+
+
+    async handleScan(userId, chatId) {
+        try {
+            await this.sendMessage(chatId, '🔍 Manual scan initiated...');
+
+            const user = this.engine.getUserState(userId);
+            if (!user.isActive) {
+                await this.sendMessage(chatId,
+                    '❌ Bot is not active. Use /start first.'
+                );
+                return;
+            }
+
+            console.log('\n🔍 MANUAL SCAN TRIGGERED by user', userId);
+            await this.engine.tradingCycle();
+
+            await this.sendMessage(chatId,
+                '✅ Scan complete. Check logs for results.'
+            );
+
+        } catch (error) {
+            logger.error('Manual scan failed', { error: error.message });
+            await this.sendMessage(chatId,
+                `❌ Scan failed: ${error.message}`
+            );
+        }
+    }
+
+    async handleWallet(userId, chatId) {
+        try {
+            await this.sendMessage(chatId, '⏳ Fetching wallet info...');
+
+            // Get real-time wallet balance
+            const balances = await this.engine.getWalletBalance();
+
+            const walletAddress = this.wallet.publicKey.toString();
+            const explorerUrl = `https://solscan.io/account/${walletAddress}`;
+
+            // Check if wallet is empty
+            if (balances.trading === 0 || balances.trading < 0.001) {
+                await this.sendMessage(chatId, `
 ⚠️ <b>EMPTY WALLET</b>
 
 📍 <b>Address:</b>
@@ -4425,53 +4054,53 @@ USDC: ${balances.usdc.toFixed(2)}
 🔗 <a href="${explorerUrl}">View on Solscan</a>
 
 Use /wallet again after funding to verify.
-            `.trim(), { 
-                parse_mode: 'HTML',
-                disable_web_page_preview: true 
+            `.trim(), {
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                });
+                return;
+            }
+
+            // Format balances
+            const formatBalance = (amount, decimals = 4) => {
+                if (amount === 0) return '0';
+                if (amount < 0.0001) return amount.toExponential(2);
+                return amount.toFixed(decimals);
+            };
+
+            // Build token list
+            let tokenList = [];
+
+            if (balances.sol > 0) {
+                tokenList.push(`◎ <b>SOL:</b> ${formatBalance(balances.sol, 4)}`);
+            }
+
+            if (balances.wsol > 0) {
+                tokenList.push(`🔄 <b>WSOL:</b> ${formatBalance(balances.wsol, 4)}`);
+            }
+
+            if (balances.usdc > 0) {
+                tokenList.push(`💵 <b>USDC:</b> ${formatBalance(balances.usdc, 2)}`);
+            }
+
+            const otherTokens = balances.allTokens.filter(t =>
+                t.symbol !== 'USDC' &&
+                t.symbol !== 'WSOL' &&
+                t.symbol !== 'SOL'
+            );
+
+            otherTokens.slice(0, 5).forEach(token => {
+                tokenList.push(`🪙 <b>${token.symbol}:</b> ${formatBalance(token.balance, 4)}`);
             });
-            return;
-        }
-        
-        // Format balances
-        const formatBalance = (amount, decimals = 4) => {
-            if (amount === 0) return '0';
-            if (amount < 0.0001) return amount.toExponential(2);
-            return amount.toFixed(decimals);
-        };
-        
-        // Build token list
-        let tokenList = [];
-        
-        if (balances.sol > 0) {
-            tokenList.push(`◎ <b>SOL:</b> ${formatBalance(balances.sol, 4)}`);
-        }
-        
-        if (balances.wsol > 0) {
-            tokenList.push(`🔄 <b>WSOL:</b> ${formatBalance(balances.wsol, 4)}`);
-        }
-        
-        if (balances.usdc > 0) {
-            tokenList.push(`💵 <b>USDC:</b> ${formatBalance(balances.usdc, 2)}`);
-        }
-        
-        const otherTokens = balances.allTokens.filter(t => 
-            t.symbol !== 'USDC' && 
-            t.symbol !== 'WSOL' && 
-            t.symbol !== 'SOL'
-        );
-        
-        otherTokens.slice(0, 5).forEach(token => {
-            tokenList.push(`🪙 <b>${token.symbol}:</b> ${formatBalance(token.balance, 4)}`);
-        });
-        
-        if (otherTokens.length > 5) {
-            tokenList.push(`... and ${otherTokens.length - 5} more tokens`);
-        }
-        
-        const tradingCurrency = balances.usdc > 0.01 ? 'USDC' : 'SOL';
-        const tradingAmount = balances.trading;
-        
-        let message = `
+
+            if (otherTokens.length > 5) {
+                tokenList.push(`... and ${otherTokens.length - 5} more tokens`);
+            }
+
+            const tradingCurrency = balances.usdc > 0.01 ? 'USDC' : 'SOL';
+            const tradingAmount = balances.trading;
+
+            let message = `
 💛 <b>WALLET OVERVIEW</b>
 
 📍 <b>Address:</b>
@@ -4487,70 +4116,71 @@ ${tokenList.join('\n')}
 ℹ️ Use /balance for trading stats
 ℹ️ Use /status for bot status
         `.trim();
-        
-        await this.sendMessage(chatId, message, { 
-            parse_mode: 'HTML',
-            disable_web_page_preview: true 
-        });
-        
-        logger.info('Wallet info displayed', { 
-            userId,
-            address: walletAddress,
-            trading: tradingAmount
-        });
-        
-    } catch (error) {
-        logger.error('Wallet command failed', { 
-            userId,
-            error: error.message 
-        });
-        
-        await this.sendMessage(chatId, 
-            `❌ Failed to fetch wallet info: ${error.message}`
-        );
-    }
-}
 
-async handleRecent(userId, chatId) {
-    try {
-        // Get recent trades from database
-        const recentTrades = await this.database.getRecentTrades(userId, 20);
-        
-        if (!recentTrades || recentTrades.length === 0) {
-            await this.sendMessage(chatId, '📭 No recent trades found');
-            return;
+            await this.sendMessage(chatId, message, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true
+            });
+
+            logger.info('Wallet info displayed', {
+                userId,
+                address: walletAddress,
+                trading: tradingAmount
+            });
+
+        } catch (error) {
+            logger.error('Wallet command failed', {
+                userId,
+                error: error.message
+            });
+
+            await this.sendMessage(chatId,
+                `❌ Failed to fetch wallet info: ${error.message}`
+            );
         }
-        
-        let message = '📊 <b>RECENT TRADES</b>\n\n';
-        
-        recentTrades.forEach((trade, i) => {
-            const emoji = trade.profit > 0 ? '✅' : '❌';
-            const date = new Date(trade.exit_time).toLocaleString();
-            
-            message += `${emoji} <b>${trade.symbol}</b>\n`;
-            message += `   Entry: $${trade.entry_price.toFixed(8)}\n`;
-            message += `   Exit: $${trade.exit_price.toFixed(8)}\n`;
-            message += `   P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profit_percent.toFixed(2)}%)\n`;
-            message += `   Time: ${date}\n\n`;
-        });
-        
-        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-    } catch (error) {
-        logger.error('Recent trades error:', error);
-        await this.sendMessage(chatId, '❌ Failed to fetch recent trades');
     }
-}
+
+    async handleRecent(userId, chatId) {
+        try {
+            // Get recent trades from database
+            const recentTrades = await this.database.getRecentTrades(userId, 20);
+
+            if (!recentTrades || recentTrades.length === 0) {
+                await this.sendMessage(chatId, '📭 No recent trades found');
+                return;
+            }
+
+            let message = '📊 <b>RECENT TRADES</b>\n\n';
+
+            recentTrades.forEach((trade, i) => {
+                const emoji = trade.profit > 0 ? '✅' : '❌';
+                const date = new Date(trade.exit_time).toLocaleString();
+
+                message += `${emoji} <b>${trade.symbol}</b>\n`;
+                message += `   Entry: $${trade.entry_price.toFixed(8)}\n`;
+                message += `   Exit: $${trade.exit_price.toFixed(8)}\n`;
+                message += `   P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profit_percent.toFixed(2)}%)\n`;
+                message += `   Time: ${date}\n\n`;
+            });
+
+            await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        } catch (error) {
+            logger.error('Recent trades error:', error);
+            await this.sendMessage(chatId, '❌ Failed to fetch recent trades');
+        }
+    }
 
 
-  async handleStop(userId, chatId) {
-      const user = this.engine.getUserState(userId);
-      user.isActive = false;
-      await this.engine.saveState();
-  
-      const stats = this.bitquery.getStats();
-      const rpcStatus = this.rpcConnection.getStatus();
-  
-      await this.sendMessage(chatId, `
+    async handleStop(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        user.isActive = false;
+        await this.engine.saveState();
+
+        const stats = { queries: 0, estimatedPoints: 0, pointsPerQuery: 0 }; // BitQuery removed
+
+        const rpcStatus = this.rpcConnection.getStatus();
+
+        await this.sendMessage(chatId, `
   🛑 <b>AUTO-TRADING STOPPED</b>
   
   📊 <b>Session Stats:</b>
@@ -4566,22 +4196,22 @@ async handleRecent(userId, chatId) {
   
   Use /start to resume trading.
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('User stopped bot', { userId });
-  }
-  
-  async handleBalance(userId, chatId) {
-    try {
-        const user = this.engine.getUserState(userId);
-        
-        // Get REAL wallet balance
-        const balances = await this.engine.getWalletBalance();
-        const tradingBalance = balances.trading;
-        
-        // Get DB balance
-        const dbUser = await this.database.getUser(userId.toString());
-        
-        const message = `
+
+        logger.info('User stopped bot', { userId });
+    }
+
+    async handleBalance(userId, chatId) {
+        try {
+            const user = this.engine.getUserState(userId);
+
+            // Get REAL wallet balance
+            const balances = await this.engine.getWalletBalance();
+            const tradingBalance = balances.trading;
+
+            // Get DB balance
+            const dbUser = await this.database.getUser(userId.toString());
+
+            const message = `
 💼 <b>BALANCE DEBUG</b>
 
 🔍 <b>Reality Check:</b>
@@ -4608,41 +4238,41 @@ USDC: ${balances.usdc.toFixed(2)}
 
 <b>Status:</b> ${user.isActive ? '✅ Active' : '❌ Inactive'}
         `.trim();
-        
-        await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
-        
-    } catch (error) {
-        await this.sendMessage(chatId, `Error: ${error.message}`);
+
+            await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
+
+        } catch (error) {
+            await this.sendMessage(chatId, `Error: ${error.message}`);
+        }
     }
-}
-  
-  async handleStatus(userId, chatId) {
-      const user = this.engine.getUserState(userId);
-      const hasPosition = user.position !== null;
-      const dailyTargetHit = this.engine.isDailyTargetHit(user);
-  
-      let statusEmoji = user.isActive ? '🟢' : '🔴';
-      let statusText = user.isActive ? 'Active' : 'Stopped';
-      if (dailyTargetHit) {
-          statusEmoji = '⏸️';
-          statusText += ' (Cooldown)';
-      }
-  
-      const rpcStatus = this.rpcConnection.getStatus();
-      const rpcEmoji = rpcStatus.isPrimary ? '✅' : '⚠️';
-  
-      const circuitStatus = this.engine.circuitBreaker.getStatus();
-      const circuitEmoji = circuitStatus.isTripped ? '🚨' : '✅';
-  
-      let positionInfo = '';
-      if (hasPosition) {
-          const pos = user.position;
-          const currentPrice = await this.engine.getCurrentPrice(pos.tokenAddress);
-          const priceChange = currentPrice ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100).toFixed(2) : '?';
-          const holdTime = ((Date.now() - pos.entryTime) / 60000).toFixed(1);
-          const unrealizedPnL = currentPrice ? ((pos.tokensOwned * currentPrice) - pos.investedUSDC).toFixed(2) : '?';
-          
-          positionInfo = `
+
+    async handleStatus(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+        const hasPosition = user.position !== null;
+        const dailyTargetHit = this.engine.isDailyTargetHit(user);
+
+        let statusEmoji = user.isActive ? '🟢' : '🔴';
+        let statusText = user.isActive ? 'Active' : 'Stopped';
+        if (dailyTargetHit) {
+            statusEmoji = '⏸️';
+            statusText += ' (Cooldown)';
+        }
+
+        const rpcStatus = this.rpcConnection.getStatus();
+        const rpcEmoji = rpcStatus.isPrimary ? '✅' : '⚠️';
+
+        const circuitStatus = this.engine.circuitBreaker.getStatus();
+        const circuitEmoji = circuitStatus.isTripped ? '🚨' : '✅';
+
+        let positionInfo = '';
+        if (hasPosition) {
+            const pos = user.position;
+            const currentPrice = await this.engine.getCurrentPrice(pos.tokenAddress);
+            const priceChange = currentPrice ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100).toFixed(2) : '?';
+            const holdTime = ((Date.now() - pos.entryTime) / 60000).toFixed(1);
+            const unrealizedPnL = currentPrice ? ((pos.tokensOwned * currentPrice) - pos.investedUSDC).toFixed(2) : '?';
+
+            positionInfo = `
   
   📊 <b>CURRENT POSITION:</b>
   Token: ${pos.symbol}
@@ -4659,11 +4289,11 @@ USDC: ${balances.usdc.toFixed(2)}
   
   Invested: ${pos.investedUSDC.toFixed(2)} USDC
   Tokens: ${pos.tokensOwned.toFixed(4)}`;
-      }
-  
-      const portfolioStats = this.engine.portfolioManager.getStats();
-  
-      await this.sendMessage(chatId, `
+        }
+
+        const portfolioStats = this.engine.portfolioManager.getStats();
+
+        await this.sendMessage(chatId, `
   ${statusEmoji} <b>BOT STATUS</b>
   
   <b>Trading:</b> ${statusText}
@@ -4693,15 +4323,15 @@ USDC: ${balances.usdc.toFixed(2)}
   Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
   Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}${positionInfo}
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('Status checked', { userId });
-  }
-  
-  async handlePerformance(userId, chatId) {
-      const report = this.engine.performanceTracker.getDetailedReport();
-      const user = this.engine.getUserState(userId);
-  
-      await this.sendMessage(chatId, `
+
+        logger.info('Status checked', { userId });
+    }
+
+    async handlePerformance(userId, chatId) {
+        const report = this.engine.performanceTracker.getDetailedReport();
+        const user = this.engine.getUserState(userId);
+
+        await this.sendMessage(chatId, `
   📊 <b>PERFORMANCE REPORT</b>
   
   <b>📈 Summary:</b>
@@ -4736,44 +4366,45 @@ USDC: ${balances.usdc.toFixed(2)}
   Current: ${user.currentBalance.toFixed(2)} USDC
   Total Return: ${((user.currentBalance - user.startingBalance) / user.startingBalance * 100).toFixed(2)}%
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('Performance viewed', { userId });
-  }
-  
-  async handleHistory(userId, chatId) {
-      const user = this.engine.getUserState(userId);
-      
-      if (!user.tradeHistory.length) {
-          await this.sendMessage(chatId, '📭 <b>No trades yet</b>\n\nStart trading to see your history.', { parse_mode: 'HTML' });
-          return;
-      }
-  
-      const recent = user.tradeHistory.slice(-10).reverse();
-      let text = `📜 <b>TRADE HISTORY</b>\n<b>Last 10 trades:</b>\n\n`;
-  
-      recent.forEach((trade) => {
-          const emoji = trade.profit > 0 ? '✅' : '❌';
-          const labels = { 'scalp_profit': 'Scalp', 'extended_profit': 'Extended', 'stop_loss': 'Stop' };
-          
-          text += `${emoji} <b>${trade.symbol}</b> (${labels[trade.reason] || trade.reason})\n`;
-          text += `  Entry: $${trade.entryPrice.toFixed(8)}\n`;
-          text += `  Exit: $${trade.exitPrice.toFixed(8)}\n`;
-          text += `  P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profitPercent.toFixed(2)}%)\n`;
-          text += `  Hold: ${trade.holdTimeMinutes}m\n\n`;
-      });
-  
-      const totalProfit = user.tradeHistory.reduce((sum, t) => sum + t.profit, 0);
-      text += `<b>Total P&L:</b> ${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)} USDC`;
-  
-      await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
-      logger.info('History viewed', { userId });
-  }
-  
-  async handleStats(userId, chatId) {
-      const stats = this.bitquery.getStats();
-      const monthlyEstimate = stats.estimatedPoints * (30 * 24 * 60 / SCAN_INTERVAL_MINUTES);
-  
-      await this.sendMessage(chatId, `
+
+        logger.info('Performance viewed', { userId });
+    }
+
+    async handleHistory(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+
+        if (!user.tradeHistory.length) {
+            await this.sendMessage(chatId, '📭 <b>No trades yet</b>\n\nStart trading to see your history.', { parse_mode: 'HTML' });
+            return;
+        }
+
+        const recent = user.tradeHistory.slice(-10).reverse();
+        let text = `📜 <b>TRADE HISTORY</b>\n<b>Last 10 trades:</b>\n\n`;
+
+        recent.forEach((trade) => {
+            const emoji = trade.profit > 0 ? '✅' : '❌';
+            const labels = { 'scalp_profit': 'Scalp', 'extended_profit': 'Extended', 'stop_loss': 'Stop' };
+
+            text += `${emoji} <b>${trade.symbol}</b> (${labels[trade.reason] || trade.reason})\n`;
+            text += `  Entry: $${trade.entryPrice.toFixed(8)}\n`;
+            text += `  Exit: $${trade.exitPrice.toFixed(8)}\n`;
+            text += `  P&L: ${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)} (${trade.profitPercent.toFixed(2)}%)\n`;
+            text += `  Hold: ${trade.holdTimeMinutes}m\n\n`;
+        });
+
+        const totalProfit = user.tradeHistory.reduce((sum, t) => sum + t.profit, 0);
+        text += `<b>Total P&L:</b> ${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)} USDC`;
+
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('History viewed', { userId });
+    }
+
+    async handleStats(userId, chatId) {
+        const stats = { queries: 0, estimatedPoints: 0, pointsPerQuery: 0 }; // BitQuery removed
+
+        const monthlyEstimate = stats.estimatedPoints * (30 * 24 * 60 / SCAN_INTERVAL_MINUTES);
+
+        await this.sendMessage(chatId, `
   📊 <b>API USAGE STATISTICS</b>
   
   <b>Current Session:</b>
@@ -4787,103 +4418,103 @@ USDC: ${balances.usdc.toFixed(2)}
   Status: ${monthlyEstimate <= 3000000 ? '✅ Within Limit' : '⚠️ Over Limit'}
   Usage: ${(monthlyEstimate / 3000000 * 100).toFixed(1)}%
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('Stats viewed', { userId });
-  }
-  
-  async handleProfits(userId, chatId) {
-      const user = this.engine.getUserState(userId);
-      
-      if (!ENABLE_PROFIT_TAKING) {
-          await this.sendMessage(chatId, '💰 <b>PROFIT TAKING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
-          return;
-      }
-  
-      if (user.profitTakingHistory.length === 0) {
-          await this.sendMessage(chatId, `💰 <b>PROFIT TAKING</b>\n\nStatus: ✅ Enabled\nNo profits taken yet. Keep trading!`, { parse_mode: 'HTML' });
-          return;
-      }
-  
-      const recent = user.profitTakingHistory.slice(-10).reverse();
-      let text = `💰 <b>PROFIT TAKING HISTORY</b>\n\n`;
-  
-      recent.forEach((pt) => {
-          const date = new Date(pt.date).toLocaleDateString();
-          text += `📅 <b>Day ${pt.day}</b> (${date})\nTaken: ${pt.profitTaken.toFixed(2)} USDC\n\n`;
-      });
-  
-      text += `<b>Total Secured:</b> ${user.totalProfitTaken.toFixed(2)} USDC`;
-  
-      await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
-      logger.info('Profits viewed', { userId });
-  }
-  
-  async handleHealth(userId, chatId) {
-      if (!ENABLE_HEALTH_MONITORING || !this.healthMonitor) {
-          await this.sendMessage(chatId, '🏥 <b>HEALTH MONITORING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
-          return;
-      }
-  
-      const status = this.healthMonitor.getStatus();
-      const healthEmoji = status.healthy ? '✅' : '⚠️';
-  
-      await this.sendMessage(chatId, `
+
+        logger.info('Stats viewed', { userId });
+    }
+
+    async handleProfits(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+
+        if (!ENABLE_PROFIT_TAKING) {
+            await this.sendMessage(chatId, '💰 <b>PROFIT TAKING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+
+        if (user.profitTakingHistory.length === 0) {
+            await this.sendMessage(chatId, `💰 <b>PROFIT TAKING</b>\n\nStatus: ✅ Enabled\nNo profits taken yet. Keep trading!`, { parse_mode: 'HTML' });
+            return;
+        }
+
+        const recent = user.profitTakingHistory.slice(-10).reverse();
+        let text = `💰 <b>PROFIT TAKING HISTORY</b>\n\n`;
+
+        recent.forEach((pt) => {
+            const date = new Date(pt.date).toLocaleDateString();
+            text += `📅 <b>Day ${pt.day}</b> (${date})\nTaken: ${pt.profitTaken.toFixed(2)} USDC\n\n`;
+        });
+
+        text += `<b>Total Secured:</b> ${user.totalProfitTaken.toFixed(2)} USDC`;
+
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('Profits viewed', { userId });
+    }
+
+    async handleHealth(userId, chatId) {
+        if (!ENABLE_HEALTH_MONITORING || !this.healthMonitor) {
+            await this.sendMessage(chatId, '🏥 <b>HEALTH MONITORING</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+
+        const status = this.healthMonitor.getStatus();
+        const healthEmoji = status.healthy ? '✅' : '⚠️';
+
+        await this.sendMessage(chatId, `
   🏥 <b>SYSTEM HEALTH</b>
   
   Status: ${healthEmoji} ${status.healthy ? 'Healthy' : 'Issues Detected'}
   Uptime: ${status.uptime}
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('Health checked', { userId });
-  }
-  
-  async handleAnomalies(userId, chatId) {
-      if (!ENABLE_ANOMALY_DETECTION || !this.engine.anomalyDetector) {
-          await this.sendMessage(chatId, '🔍 <b>ANOMALY DETECTION</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
-          return;
-      }
-  
-      const summary = this.engine.anomalyDetector.getSummary();
-      await this.sendMessage(chatId, `
+
+        logger.info('Health checked', { userId });
+    }
+
+    async handleAnomalies(userId, chatId) {
+        if (!ENABLE_ANOMALY_DETECTION || !this.engine.anomalyDetector) {
+            await this.sendMessage(chatId, '🔍 <b>ANOMALY DETECTION</b>\n\nStatus: ❌ Disabled', { parse_mode: 'HTML' });
+            return;
+        }
+
+        const summary = this.engine.anomalyDetector.getSummary();
+        await this.sendMessage(chatId, `
   🔍 <b>ANOMALY DETECTION</b>
   
   Baseline Win Rate: ${summary.baseline.avgWinRate.toFixed(1)}%
   All clear!
       `.trim(), { parse_mode: 'HTML' });
-  
-      logger.info('Anomalies viewed', { userId });
-  }
-  
-  async handlePortfolio(userId, chatId) {
-      const portfolioStats = this.engine.portfolioManager.getStats();
-  
-      if (portfolioStats.totalPositions === 0) {
-          await this.sendMessage(chatId, `📊 <b>PORTFOLIO</b>\n\nNo active positions.`, { parse_mode: 'HTML' });
-          return;
-      }
-  
-      let text = `📊 <b>PORTFOLIO</b>\n\nPositions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}\n`;
-  
-      for (const pos of portfolioStats.positions) {
-          text += `\n<b>${pos.symbol}</b>\nInvested: ${pos.invested} USDC\nAllocation: ${pos.allocation}`;
-      }
-  
-      await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
-      logger.info('Portfolio viewed', { userId });
-  }
-  
-  async handleBacktest(userId, chatId, days) {
-      if (!ENABLE_BACKTESTING) {
-          await this.sendMessage(chatId, '📈 Backtesting disabled', { parse_mode: 'HTML' });
-          return;
-      }
-  
-      await this.sendMessage(chatId, 'Backtest feature coming soon...', { parse_mode: 'HTML' });
-      logger.info('Backtest requested', { userId, days });
-  }
-  
-  async handleHelp(userId, chatId) {
-    await this.sendMessage(chatId, `
+
+        logger.info('Anomalies viewed', { userId });
+    }
+
+    async handlePortfolio(userId, chatId) {
+        const portfolioStats = this.engine.portfolioManager.getStats();
+
+        if (portfolioStats.totalPositions === 0) {
+            await this.sendMessage(chatId, `📊 <b>PORTFOLIO</b>\n\nNo active positions.`, { parse_mode: 'HTML' });
+            return;
+        }
+
+        let text = `📊 <b>PORTFOLIO</b>\n\nPositions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}\n`;
+
+        for (const pos of portfolioStats.positions) {
+            text += `\n<b>${pos.symbol}</b>\nInvested: ${pos.invested} USDC\nAllocation: ${pos.allocation}`;
+        }
+
+        await this.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        logger.info('Portfolio viewed', { userId });
+    }
+
+    async handleBacktest(userId, chatId, days) {
+        if (!ENABLE_BACKTESTING) {
+            await this.sendMessage(chatId, '📈 Backtesting disabled', { parse_mode: 'HTML' });
+            return;
+        }
+
+        await this.sendMessage(chatId, 'Backtest feature coming soon...', { parse_mode: 'HTML' });
+        logger.info('Backtest requested', { userId, days });
+    }
+
+    async handleHelp(userId, chatId) {
+        await this.sendMessage(chatId, `
 📚 <b>COMMAND REFERENCE</b>
 
 <b>🎮 Trading Controls:</b>
@@ -4924,439 +4555,372 @@ High-risk trading. Monitor daily.
 Can lose all capital. Trade responsibly.
     `.trim(), { parse_mode: 'HTML' });
 
-    logger.info('Help viewed', { userId });
-}
+        logger.info('Help viewed', { userId });
+    }
 
-  isAuthorized(userId) {
-      return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
-  }
+    isAuthorized(userId) {
+        return AUTHORIZED_USERS.length === 0 || AUTHORIZED_USERS.includes(userId.toString());
+    }
 
-  async setupWebhook() {
-      // Setup webhook endpoint
-      this.app.post('/webhook', (req, res) => {
-          this.bot.processUpdate(req.body);
-          res.sendStatus(200);
-      });
-  
-      // Health check endpoint
-      this.app.get('/health', (req, res) => {
-          const stats = this.bitquery.getStats();
-          const rpcStatus = this.rpcConnection.getStatus();
-          const user = this.engine.getUserState(this.ownerId);
-          
-          res.json({ 
-              status: 'healthy', 
-              mode: 'webhook',
-              timestamp: new Date().toISOString(),
-              uptime: process.uptime(),
-              version: '2.0.0',
-              features: {
-                  paperTrading: ENABLE_PAPER_TRADING,
-                  multiDex: ENABLE_MULTI_DEX,
-                  technicalAnalysis: ENABLE_TECHNICAL_ANALYSIS,
-                  mevProtection: ENABLE_MEV_PROTECTION,
-                  healthMonitoring: ENABLE_HEALTH_MONITORING,
-                  anomalyDetection: ENABLE_ANOMALY_DETECTION
-              },
-              trading: {
-                  isActive: user?.isActive || false,
-                  hasPosition: user?.position !== null,
-                  currentBalance: user?.currentBalance || 0,
-                  dailyProfitPercent: user?.dailyProfitPercent || 0
-              },
-              apiStats: stats,
-              rpcStatus: rpcStatus
-          });
-      });
-  
-      // Set webhook with Telegram
-      try {
-          await this.bot.setWebHook(`${WEBHOOK_URL}/webhook`);
-          logger.info(`Webhook set: ${WEBHOOK_URL}/webhook`);
-      } catch (err) {
-          logger.error('Webhook setup failed', { error: err.message });
-          throw err;
-      }
-  }
+    async setupWebhook() {
+        // Setup webhook endpoint
+        this.app.post('/webhook', (req, res) => {
+            this.bot.processUpdate(req.body);
+            res.sendStatus(200);
+        });
 
-  startTrading() {
-    console.log('\n' + '='.repeat(60));
-    console.log('🚀 STARTING TRADING CYCLES');
-    console.log('='.repeat(60));
-    
-    const scanIntervalMs = SCAN_INTERVAL_MINUTES * 60 * 1000;
-    
-    console.log('⏰ Configuration:');
-    console.log(`   - Monitor positions: 60s`);
-    console.log(`   - Trading scans: ${SCAN_INTERVAL_MINUTES}min`);
-    console.log(`   - State saves: 10min`);
-    console.log('='.repeat(60) + '\n');
+        // Health check endpoint
+        this.app.get('/health', (req, res) => {
+            const stats = { queries: 0, estimatedPoints: 0, pointsPerQuery: 0 }; // BitQuery removed
 
-    // 1. Position monitoring (every 60s)
-    const monitorInterval = setInterval(async () => {
+            const rpcStatus = this.rpcConnection.getStatus();
+            const user = this.engine.getUserState(this.ownerId);
+
+            res.json({
+                status: 'healthy',
+                mode: 'webhook',
+                timestamp: new Date().toISOString(),
+                uptime: process.uptime(),
+                version: '2.0.0',
+                features: {
+                    paperTrading: ENABLE_PAPER_TRADING,
+                    multiDex: ENABLE_MULTI_DEX,
+                    technicalAnalysis: ENABLE_TECHNICAL_ANALYSIS,
+                    mevProtection: ENABLE_MEV_PROTECTION,
+                    healthMonitoring: ENABLE_HEALTH_MONITORING,
+                    anomalyDetection: ENABLE_ANOMALY_DETECTION
+                },
+                trading: {
+                    isActive: user?.isActive || false,
+                    hasPosition: user?.position !== null,
+                    currentBalance: user?.currentBalance || 0,
+                    dailyProfitPercent: user?.dailyProfitPercent || 0
+                },
+                apiStats: stats,
+                rpcStatus: rpcStatus
+            });
+        });
+
+        // Set webhook with Telegram
         try {
-            for (const [userId, user] of this.engine.userStates.entries()) {
-                if (user.isActive && user.position) {
-                    await this.engine.monitorPosition(userId);
+            await this.bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+            logger.info(`Webhook set: ${WEBHOOK_URL}/webhook`);
+        } catch (err) {
+            logger.error('Webhook setup failed', { error: err.message });
+            throw err;
+        }
+    }
+
+    startTrading() {
+        console.log('\n' + '='.repeat(60));
+        console.log('🚀 STARTING TRADING CYCLES (EVENT DRIVEN)');
+        console.log('='.repeat(60));
+
+        // 1. Position monitoring (Dynamic Interval)
+        this.startPositionMonitor();
+
+        // 2. State saves (every 10 min)
+        const stateInterval = setInterval(async () => {
+            try {
+                await this.engine.saveState();
+            } catch (error) {
+                logger.error('State save error', { error: error.message });
+            }
+        }, 10 * 60 * 1000);
+
+        this.intervals = {
+            monitor: monitorInterval,
+            state: stateInterval
+        };
+
+        console.log('✅ Background monitors active (Position Monitor, State Saver)');
+        console.log('✅ Event Loop Active (Strategies A & B)');
+
+        console.log('✅ All intervals started\n');
+    }
+
+
+    // ============ REDUCE MEMORY CLEANUP SPAM ============
+    // Replace setupMemoryManagement() with this QUIETER version
+    setupMemoryManagement() {
+        console.log('🧠 Memory management: Monitoring only');
+
+        // Just log every 5 minutes - NO ACTION TAKEN
+        setInterval(() => {
+            const mem = process.memoryUsage();
+            const rssMB = mem.rss / 1024 / 1024;
+            const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
+
+            // Only log, don't interrupt trading
+            if (rssMB > 300 || heapPercent > 80) {
+                console.log(`⚠️  Memory: ${rssMB.toFixed(0)}MB RSS, ${heapPercent.toFixed(0)}% heap`);
+
+                // Force GC if available
+                if (global.gc) {
+                    global.gc();
+                    console.log('   ♻️ Garbage collected');
                 }
             }
-        } catch (error) {
-            logger.error('Monitor error', { error: error.message });
-        }
-    }, 60000);
 
-    // 2. Trading cycles (configurable interval)
-    const tradingInterval = setInterval(async () => {
-        console.log('\n⏰ TRADING INTERVAL TRIGGERED');
-        console.log(`   Time: ${new Date().toLocaleTimeString()}`);
-        
+            // ONLY exit if critically over limit (Railway = 512MB)
+            if (rssMB > 480) {
+                console.error('💥 CRITICAL MEMORY - Restarting');
+                process.exit(1); // Railway will restart
+            }
+        }, 5 * 60 * 1000); // Every 5 minutes
+    }
+
+
+
+    async shutdown() {
+        logger.info('Initiating graceful shutdown...');
+
         try {
-            await this.engine.tradingCycle();
-        } catch (error) {
-            console.error('💥 Trading error:', error.message);
-            logger.error('Trading error', { error: error.message });
-        }
-    }, scanIntervalMs);
+            // ============ 1. STOP ALL INTERVALS FIRST ============
+            logger.info('Stopping all intervals...');
+            if (this.intervals) {
+                Object.keys(this.intervals).forEach(key => {
+                    try {
+                        clearInterval(this.intervals[key]);
+                        logger.debug(`✓ Cleared interval: ${key}`);
+                    } catch (err) {
+                        logger.warn(`Failed to clear interval: ${key}`, { error: err.message });
+                    }
+                });
+            }
 
-    // 3. State saves (every 10 min)
-    const stateInterval = setInterval(async () => {
-        try {
-            await this.engine.saveState();
-        } catch (error) {
-            logger.error('State save error', { error: error.message });
-        }
-    }, 10 * 60 * 1000);
-
-    this.intervals = {
-        monitor: monitorInterval,
-        trading: tradingInterval,
-        state: stateInterval
-    };
-
-    // 🔥 RUN FIRST SCAN IMMEDIATELY (5 seconds)
-    console.log('🎬 First scan in 5 seconds...\n');
-    
-    setTimeout(async () => {
-        console.log('\n' + '🎬'.repeat(30));
-        console.log('🎬 INITIAL SCAN (5s warmup)');
-        console.log('🎬'.repeat(30));
-        
-        try {
-            // Show all users
-            console.log('👥 All users in memory:');
+            // ============ 2. DEACTIVATE ALL USERS ============
+            logger.info('Deactivating users...');
             for (const [userId, user] of this.engine.userStates.entries()) {
-                console.log(`   ${userId}: active=${user.isActive}, balance=${user.currentBalance.toFixed(4)}`);
+                user.isActive = false;
+                logger.debug(`✓ Deactivated user: ${userId}`);
             }
-            
-            const activeCount = Array.from(this.engine.userStates.values())
-                .filter(u => u.isActive).length;
-            
-            console.log(`\n✅ Active users: ${activeCount}`);
-            
-            if (activeCount === 0) {
-                console.log('\n⚠️  NO ACTIVE USERS YET');
-                console.log('   Run /start in Telegram to begin trading\n');
-            } else {
-                console.log('🚀 Starting scan...\n');
-                await this.engine.tradingCycle();
+
+            // ============ 3. STOP TELEGRAM POLLING ============
+            logger.info('Stopping Telegram polling...');
+            try {
+                await this.bot.stopPolling();
+                logger.info('✓ Polling stopped');
+            } catch (pollErr) {
+                logger.warn('Polling stop failed (may already be stopped)', {
+                    error: pollErr.message
+                });
             }
-            
-        } catch (error) {
-            console.error('💥 Initial scan error:', error.message);
-        }
-    }, 5000);
 
-    console.log('✅ All intervals started\n');
-}
+            // ============ 4. SAVE CURRENT STATE ============
+            logger.info('Saving state...');
+            try {
+                await this.engine.saveState();
+                logger.info('✓ State saved');
+            } catch (stateErr) {
+                logger.error('State save failed', { error: stateErr.message });
+            }
 
+            // ============ 5. STOP HEALTH MONITORING ============
+            if (this.healthMonitor) {
+                try {
+                    this.healthMonitor.stop();
+                    logger.info('✓ Health monitor stopped');
+                } catch (healthErr) {
+                    logger.warn('Health monitor stop failed', { error: healthErr.message });
+                }
+            }
 
-// ============ REDUCE MEMORY CLEANUP SPAM ============
-// Replace setupMemoryManagement() with this QUIETER version
-setupMemoryManagement() {
-    console.log('🧠 Memory management: Monitoring only');
-    
-    // Just log every 5 minutes - NO ACTION TAKEN
-    setInterval(() => {
-        const mem = process.memoryUsage();
-        const rssMB = mem.rss / 1024 / 1024;
-        const heapPercent = (mem.heapUsed / mem.heapTotal * 100);
-        
-        // Only log, don't interrupt trading
-        if (rssMB > 300 || heapPercent > 80) {
-            console.log(`⚠️  Memory: ${rssMB.toFixed(0)}MB RSS, ${heapPercent.toFixed(0)}% heap`);
-            
-            // Force GC if available
+            // ============ 6. SAVE PERFORMANCE METRICS ============
+            if (this.engine && this.engine.performanceTracker) {
+                try {
+                    const userId = this.ownerId || AUTHORIZED_USERS[0];
+                    if (userId) {
+                        await this.engine.performanceTracker.saveMetrics(userId);
+                        logger.info('✓ Performance metrics saved');
+                    }
+                } catch (perfErr) {
+                    logger.warn('Performance save failed', { error: perfErr.message });
+                }
+            }
+
+            // ============ 7. CLOSE DATABASE ============
+            if (this.database) {
+                try {
+                    await this.database.close();
+                    logger.info('✓ Database closed');
+                } catch (dbErr) {
+                    logger.error('Database close failed', { error: dbErr.message });
+                }
+            }
+
+            // ============ 8. CLEAR CACHES ============
+            logger.info('Clearing caches...');
+            if (this.engine && this.engine.anomalyDetector) {
+                // Clear any detector caches
+                logger.debug('✓ Anomaly detector cleared');
+            }
+
+            // ============ 9. FINAL STATS ============
+            const stats = { queries: 0, estimatedPoints: 0, pointsPerQuery: 0 }; // BitQuery removed
+
+            const mem = process.memoryUsage();
+
+            logger.info('Final statistics', {
+                api: {
+                    queries: stats.queries,
+                    estimatedPoints: stats.estimatedPoints,
+                    avgPoints: stats.pointsPerQuery
+                },
+                memory: {
+                    heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+                    heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
+                    rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
+                },
+                uptime: process.uptime().toFixed(0) + 's'
+            });
+
+            // ============ 10. PERFORMANCE SUMMARY ============
+            if (this.engine && this.engine.performanceTracker) {
+                const perfStats = this.engine.performanceTracker.metrics;
+                logger.info('Trading summary', {
+                    totalTrades: perfStats.totalTrades,
+                    wins: perfStats.winningTrades,
+                    losses: perfStats.losingTrades,
+                    winRate: perfStats.totalTrades > 0
+                        ? ((perfStats.winningTrades / perfStats.totalTrades) * 100).toFixed(1) + '%'
+                        : '0%',
+                    profitFactor: (perfStats.totalProfit / (perfStats.totalLoss || 1)).toFixed(2)
+                });
+            }
+
+            // ============ 11. FINAL MEMORY CLEANUP ============
+            logger.info('Final memory cleanup...');
+            await this.performMemoryCleanup();
             if (global.gc) {
                 global.gc();
-                console.log('   ♻️ Garbage collected');
+                logger.debug('✓ Garbage collection executed');
             }
-        }
-        
-        // ONLY exit if critically over limit (Railway = 512MB)
-        if (rssMB > 480) {
-            console.error('💥 CRITICAL MEMORY - Restarting');
-            process.exit(1); // Railway will restart
-        }
-    }, 5 * 60 * 1000); // Every 5 minutes
-}
 
+            // ============ 12. FLUSH LOGS ============
+            // Give Winston time to write final logs
+            await new Promise(resolve => setTimeout(resolve, 1000));
 
+            logger.info('='.repeat(50));
+            logger.info('✅ Graceful shutdown complete');
+            logger.info('='.repeat(50));
 
-async shutdown() {
-    logger.info('Initiating graceful shutdown...');
-    
-    try {
-        // ============ 1. STOP ALL INTERVALS FIRST ============
-        logger.info('Stopping all intervals...');
-        if (this.intervals) {
-            Object.keys(this.intervals).forEach(key => {
-                try {
-                    clearInterval(this.intervals[key]);
-                    logger.debug(`✓ Cleared interval: ${key}`);
-                } catch (err) {
-                    logger.warn(`Failed to clear interval: ${key}`, { error: err.message });
-                }
+            process.exit(0);
+
+        } catch (error) {
+            logger.error('Shutdown error', {
+                error: error.message,
+                stack: error.stack
             });
+
+            // Force exit after critical error
+            setTimeout(() => {
+                process.exit(1);
+            }, 2000);
         }
-
-        // ============ 2. DEACTIVATE ALL USERS ============
-        logger.info('Deactivating users...');
-        for (const [userId, user] of this.engine.userStates.entries()) {
-            user.isActive = false;
-            logger.debug(`✓ Deactivated user: ${userId}`);
-        }
-
-        // ============ 3. STOP TELEGRAM POLLING ============
-        logger.info('Stopping Telegram polling...');
-        try {
-            await this.bot.stopPolling();
-            logger.info('✓ Polling stopped');
-        } catch (pollErr) {
-            logger.warn('Polling stop failed (may already be stopped)', { 
-                error: pollErr.message 
-            });
-        }
-
-        // ============ 4. SAVE CURRENT STATE ============
-        logger.info('Saving state...');
-        try {
-            await this.engine.saveState();
-            logger.info('✓ State saved');
-        } catch (stateErr) {
-            logger.error('State save failed', { error: stateErr.message });
-        }
-
-        // ============ 5. STOP HEALTH MONITORING ============
-        if (this.healthMonitor) {
-            try {
-                this.healthMonitor.stop();
-                logger.info('✓ Health monitor stopped');
-            } catch (healthErr) {
-                logger.warn('Health monitor stop failed', { error: healthErr.message });
-            }
-        }
-
-        // ============ 6. SAVE PERFORMANCE METRICS ============
-        if (this.engine && this.engine.performanceTracker) {
-            try {
-                const userId = this.ownerId || AUTHORIZED_USERS[0];
-                if (userId) {
-                    await this.engine.performanceTracker.saveMetrics(userId);
-                    logger.info('✓ Performance metrics saved');
-                }
-            } catch (perfErr) {
-                logger.warn('Performance save failed', { error: perfErr.message });
-            }
-        }
-
-        // ============ 7. CLOSE DATABASE ============
-        if (this.database) {
-            try {
-                await this.database.close();
-                logger.info('✓ Database closed');
-            } catch (dbErr) {
-                logger.error('Database close failed', { error: dbErr.message });
-            }
-        }
-
-        // ============ 8. CLEAR CACHES ============
-        logger.info('Clearing caches...');
-        if (this.bitquery && this.bitquery.cache) {
-            this.bitquery.cache.clear();
-            logger.debug('✓ BitQuery cache cleared');
-        }
-        if (this.engine && this.engine.anomalyDetector) {
-            // Clear any detector caches
-            logger.debug('✓ Anomaly detector cleared');
-        }
-
-        // ============ 9. FINAL STATS ============
-        const stats = this.bitquery.getStats();
-        const mem = process.memoryUsage();
-        
-        logger.info('Final statistics', {
-            api: {
-                queries: stats.queries,
-                estimatedPoints: stats.estimatedPoints,
-                avgPoints: stats.pointsPerQuery
-            },
-            memory: {
-                heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
-                heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
-                rss: Math.round(mem.rss / 1024 / 1024) + 'MB'
-            },
-            uptime: process.uptime().toFixed(0) + 's'
-        });
-
-        // ============ 10. PERFORMANCE SUMMARY ============
-        if (this.engine && this.engine.performanceTracker) {
-            const perfStats = this.engine.performanceTracker.metrics;
-            logger.info('Trading summary', {
-                totalTrades: perfStats.totalTrades,
-                wins: perfStats.winningTrades,
-                losses: perfStats.losingTrades,
-                winRate: perfStats.totalTrades > 0 
-                    ? ((perfStats.winningTrades / perfStats.totalTrades) * 100).toFixed(1) + '%'
-                    : '0%',
-                profitFactor: (perfStats.totalProfit / (perfStats.totalLoss || 1)).toFixed(2)
-            });
-        }
-
-        // ============ 11. FINAL MEMORY CLEANUP ============
-        logger.info('Final memory cleanup...');
-        await this.performMemoryCleanup();
-        if (global.gc) {
-            global.gc();
-            logger.debug('✓ Garbage collection executed');
-        }
-
-        // ============ 12. FLUSH LOGS ============
-        // Give Winston time to write final logs
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        logger.info('='.repeat(50));
-        logger.info('✅ Graceful shutdown complete');
-        logger.info('='.repeat(50));
-        
-        process.exit(0);
-
-    } catch (error) {
-        logger.error('Shutdown error', { 
-            error: error.message,
-            stack: error.stack 
-        });
-        
-        // Force exit after critical error
-        setTimeout(() => {
-            process.exit(1);
-        }, 2000);
     }
-}
 }
 
 
 // ============ STARTUP & ERROR HANDLING ============
 
 async function main() {
-  try {
-      logger.info('='.repeat(50));
-      logger.info('Enhanced Solana Trading Bot v2.0 - POLLING MODE');
-      logger.info('='.repeat(50));
+    try {
+        logger.info('='.repeat(50));
+        logger.info('Enhanced Solana Trading Bot v2.0 - POLLING MODE');
+        logger.info('='.repeat(50));
 
-      // Validate environment
-      if (!TELEGRAM_TOKEN) throw new Error('TELEGRAM_TOKEN not set');
-      if (!BITQUERY_API_KEY) throw new Error('BITQUERY_API_KEY not set');
-      if (!PRIVATE_KEY) throw new Error('PRIVATE_KEY not set');
+        // Validate environment
+        if (!TELEGRAM_TOKEN) throw new Error('TELEGRAM_TOKEN not set');
 
-      logger.info('Configuration loaded');
-      logger.info(`Mode: POLLING (Production)`);
-      logger.info(`Trading Mode: ${ENABLE_PAPER_TRADING ? 'PAPER' : 'LIVE'}`);
-      logger.info(`RPC Primary: ${SOLANA_RPC_URL.substring(0, 50)}...`);
-      logger.info(`RPC Fallbacks: ${RPC_FALLBACK_URLS.length}`);
-      logger.info(`Authorized Users: ${AUTHORIZED_USERS.length || 'All'}`);
+        if (!PRIVATE_KEY) throw new Error('PRIVATE_KEY not set');
 
-      logger.info('Features:');
-      logger.info(`  Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}`);
-      logger.info(`  Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}`);
-      logger.info(`  MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}`);
-      logger.info(`  Health Monitoring: ${ENABLE_HEALTH_MONITORING ? '✅' : '❌'}`);
-      logger.info(`  Anomaly Detection: ${ENABLE_ANOMALY_DETECTION ? '✅' : '❌'}`);
-      logger.info(`  Backtesting: ${ENABLE_BACKTESTING ? '✅' : '❌'}`);
+        logger.info('Configuration loaded');
+        logger.info(`Mode: POLLING (Production)`);
+        logger.info(`Trading Mode: ${ENABLE_PAPER_TRADING ? 'PAPER' : 'LIVE'}`);
+        logger.info(`RPC Primary: ${SOLANA_RPC_URL.substring(0, 50)}...`);
+        logger.info(`RPC Fallbacks: ${RPC_FALLBACK_URLS.length}`);
+        logger.info(`Authorized Users: ${AUTHORIZED_USERS.length || 'All'}`);
 
-      logger.info('Trading Parameters:');
-      logger.info(`  Daily Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%`);
-      logger.info(`  Daily Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%`);
-      logger.info(`  Per Trade Target: ${(PER_TRADE_PROFIT_TARGET * 100).toFixed(0)}%`);
-      logger.info(`  Stop Loss: -${(PER_TRADE_STOP_LOSS * 100).toFixed(0)}%`);
-      logger.info(`  Position Size Mode: ${POSITION_SIZE_MODE}`);
-      logger.info(`  Max Concurrent Positions: ${MAX_CONCURRENT_POSITIONS}`);
+        logger.info('Features:');
+        logger.info(`  Multi-DEX: ${ENABLE_MULTI_DEX ? '✅' : '❌'}`);
+        logger.info(`  Technical Analysis: ${ENABLE_TECHNICAL_ANALYSIS ? '✅' : '❌'}`);
+        logger.info(`  MEV Protection: ${ENABLE_MEV_PROTECTION ? '✅' : '❌'}`);
+        logger.info(`  Health Monitoring: ${ENABLE_HEALTH_MONITORING ? '✅' : '❌'}`);
+        logger.info(`  Anomaly Detection: ${ENABLE_ANOMALY_DETECTION ? '✅' : '❌'}`);
+        logger.info(`  Backtesting: ${ENABLE_BACKTESTING ? '✅' : '❌'}`);
 
-      logger.info('API Configuration:');
-      logger.info(`  Scan Interval: ${SCAN_INTERVAL_MINUTES}min`);
-      logger.info(`  Max Candidates: ${MAX_CANDIDATES_TO_ANALYZE}`);
-      logger.info(`  Cache Duration: ${CACHE_DURATION_MINUTES}min`);
+        logger.info('Trading Parameters:');
+        logger.info(`  Daily Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%`);
+        logger.info(`  Daily Stop: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%`);
+        logger.info(`  Per Trade Target: ${(PER_TRADE_PROFIT_TARGET * 100).toFixed(0)}%`);
+        logger.info(`  Stop Loss: -${(PER_TRADE_STOP_LOSS * 100).toFixed(0)}%`);
+        logger.info(`  Position Size Mode: ${POSITION_SIZE_MODE}`);
+        logger.info(`  Max Concurrent Positions: ${MAX_CONCURRENT_POSITIONS}`);
 
-      // Initialize bot
-      const bot = new TradingBot();
-      await bot.init();
 
-      logger.info('='.repeat(50));
-      logger.info('✅ Bot fully operational and ready to trade!');
-      logger.info('='.repeat(50));
-      
 
-      let shutdownInProgress = false;
+        // Initialize bot
+        const bot = new TradingBot();
+        await bot.init();
 
-      const handleShutdown = async () =>{
-        if (shutdownInProgress) {
-            logger.warn(`Shutdown already in progress, ignoring ${signal}`);
-        }return;
-         
-        shutdownInProgress = true;
-        logger.info(`{signal} received - inittiating shutdown`);
+        logger.info('='.repeat(50));
+        logger.info('✅ Bot fully operational and ready to trade!');
+        logger.info('='.repeat(50));
 
-      }
-      // Handle shutdown signals
-      process.on('SIGTERM', () => {
-          logger.info('SIGTERM received');
-          bot.shutdown();
-      });
 
-      process.on('SIGINT', () => {
-          logger.info('SIGINT received');
-          bot.shutdown();
-      });
+        let shutdownInProgress = false;
 
-      process.on('uncaughtException', (error) => {
-          logger.error('Uncaught Exception', { 
-              error: error.message, 
-              stack: error.stack 
-          });
-          bot.shutdown();
-      });
+        const handleShutdown = async () => {
+            if (shutdownInProgress) {
+                logger.warn(`Shutdown already in progress, ignoring ${signal}`);
+            } return;
 
-      process.on('unhandledRejection', (reason, promise) => {
-          logger.error('Unhandled Rejection', { 
-              reason: reason instanceof Error ? reason.message : reason,
-              promise: promise.toString()
-          });
-      });
+            shutdownInProgress = true;
+            logger.info(`{signal} received - inittiating shutdown`);
 
-  } catch (error) {
-      logger.error('Startup failed', { 
-          error: error.message, 
-          stack: error.stack 
-      });
-      process.exit(1);
-  }
+        }
+        // Handle shutdown signals
+        process.on('SIGTERM', () => {
+            logger.info('SIGTERM received');
+            bot.shutdown();
+        });
+
+        process.on('SIGINT', () => {
+            logger.info('SIGINT received');
+            bot.shutdown();
+        });
+
+        process.on('uncaughtException', (error) => {
+            logger.error('Uncaught Exception', {
+                error: error.message,
+                stack: error.stack
+            });
+            bot.shutdown();
+        });
+
+        process.on('unhandledRejection', (reason, promise) => {
+            logger.error('Unhandled Rejection', {
+                reason: reason instanceof Error ? reason.message : reason,
+                promise: promise.toString()
+            });
+        });
+
+    } catch (error) {
+        logger.error('Startup failed', {
+            error: error.message,
+            stack: error.stack
+        });
+        process.exit(1);
+    }
 }
 
 // ============ START THE BOT ============
 if (require.main === module) {
-  main().catch(error => {
-      console.error('Fatal error:', error);
-      process.exit(1);
-  });
+    main().catch(error => {
+        console.error('Fatal error:', error);
+        process.exit(1);
+    });
 }
 
 module.exports = { TradingEngine, TradingBot, logger };

@@ -149,7 +149,6 @@ class PumpFunDirect {
 
             return { success: true, signature: sig };
         } catch (error) {
-            this.logger.error('PumpFun direct buy failed', { error: error.message });
             return { success: false, error: error.message };
         }
     }
@@ -189,7 +188,6 @@ class PumpFunDirect {
 
             return { success: true, signature: sig };
         } catch (error) {
-            this.logger.error('PumpFun direct sell failed', { error: error.message });
             return { success: false, error: error.message };
         }
     }

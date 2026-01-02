@@ -15,7 +15,25 @@ class DatabaseManager {
         });
 
         await this.createTables();
-        console.log('[Database] Initialized successfully');
+
+        // WAL Mode for concurrent access safety
+        await this.db.exec('PRAGMA journal_mode = WAL');
+        await this.db.exec('PRAGMA synchronous = NORMAL');
+        console.log('[Database] Initialized successfully (WAL Mode)');
+    }
+
+    async runWithRetry(sql, params, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await this.db.run(sql, params);
+            } catch (err) {
+                if (err.code === 'SQLITE_BUSY' && i < retries - 1) {
+                    await new Promise(r => setTimeout(r, 100)); // 100ms wait
+                    continue;
+                }
+                throw err;
+            }
+        }
     }
 
     async createTables() {
@@ -189,23 +207,23 @@ class DatabaseManager {
     }
 
     async createUser(userId, initialBalance = 20) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO users (user_id, starting_balance, current_balance, daily_start_balance, trading_capital, daily_reset_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        `, userId, initialBalance, initialBalance, initialBalance, initialBalance, Date.now());
+        `, [userId, initialBalance, initialBalance, initialBalance, initialBalance, Date.now()]);
     }
 
     async updateUser(userId, updates) {
         const fields = Object.keys(updates).map(key => `${key} = ?`).join(', ');
         const values = [...Object.values(updates), Date.now(), userId];
-        await this.db.run(`
+        await this.runWithRetry(`
             UPDATE users SET ${fields}, updated_at = ? WHERE user_id = ?
         `, values);
     }
 
     // Position operations
     async createPosition(userId, positionData) {
-        const result = await this.db.run(`
+        const result = await this.runWithRetry(`
             INSERT INTO positions (
                 user_id, token_address, symbol, entry_price, entry_time,
                 tokens_owned, invested_usdc, target_price, stop_loss_price,
@@ -237,13 +255,13 @@ class DatabaseManager {
     async updatePosition(positionId, updates) {
         const fields = Object.keys(updates).map(key => `${key} = ?`).join(', ');
         const values = [...Object.values(updates), positionId];
-        await this.db.run(`
+        await this.runWithRetry(`
             UPDATE positions SET ${fields} WHERE id = ?
         `, values);
     }
 
     async closePosition(positionId, exitData) {
-        await this.db.run(`
+        await this.runWithRetry(`
             UPDATE positions 
             SET is_active = 0, exit_price = ?, exit_time = ?, 
                 profit = ?, profit_percent = ?, exit_reason = ?, sell_tx_signature = ?
@@ -257,7 +275,7 @@ class DatabaseManager {
 
     // Trade operations
     async recordTrade(userId, tradeData) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO trades (
                 user_id, token_address, symbol, entry_price, exit_price,
                 entry_time, exit_time, tokens_owned, invested_usdc, usdc_received,
@@ -292,7 +310,7 @@ class DatabaseManager {
 
     // Performance metrics
     async savePerformanceMetrics(userId, metrics) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO performance_metrics (
                 user_id, date, total_trades, winning_trades, losing_trades,
                 total_profit, total_loss, win_rate, profit_factor, expectancy,
@@ -317,10 +335,10 @@ class DatabaseManager {
 
     // API usage tracking
     async trackAPIUsage(service, endpoint, estimatedPoints, success = true, errorMessage = null) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO api_usage (service, endpoint, estimated_points, success, error_message)
             VALUES (?, ?, ?, ?, ?)
-        `, service, endpoint, estimatedPoints, success ? 1 : 0, errorMessage);
+        `, [service, endpoint, estimatedPoints, success ? 1 : 0, errorMessage]);
     }
 
     async getAPIUsageStats(hours = 24) {
@@ -339,10 +357,10 @@ class DatabaseManager {
 
     // Anomaly alerts
     async createAnomalyAlert(userId, anomalyType, severity, description, metrics) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO anomaly_alerts (user_id, anomaly_type, severity, description, metrics)
             VALUES (?, ?, ?, ?, ?)
-        `, userId, anomalyType, severity, description, JSON.stringify(metrics));
+        `, [userId, anomalyType, severity, description, JSON.stringify(metrics)]);
     }
 
     async getUnresolvedAnomalies(userId) {
@@ -363,7 +381,7 @@ class DatabaseManager {
 
     // Backtest results
     async saveBacktestResult(backtestData) {
-        await this.db.run(`
+        await this.runWithRetry(`
             INSERT INTO backtest_results (
                 strategy_name, start_date, end_date, initial_capital, final_capital,
                 total_trades, winning_trades, win_rate, profit_factor, sharpe_ratio,
@@ -421,10 +439,10 @@ class DatabaseManager {
     // Cleanup old data
     async cleanupOldData(daysToKeep = 90) {
         const cutoffTime = Date.now() / 1000 - (daysToKeep * 24 * 3600);
-        
-        await this.db.run('DELETE FROM api_usage WHERE timestamp < ?', cutoffTime);
-        await this.db.run('DELETE FROM trades WHERE created_at < ? AND user_id NOT IN (SELECT user_id FROM users WHERE is_active = 1)', cutoffTime);
-        
+
+        await this.runWithRetry('DELETE FROM api_usage WHERE timestamp < ?', [cutoffTime]);
+        await this.runWithRetry('DELETE FROM trades WHERE created_at < ? AND user_id NOT IN (SELECT user_id FROM users WHERE is_active = 1)', [cutoffTime]);
+
         console.log(`[Database] Cleaned up data older than ${daysToKeep} days`);
     }
 
