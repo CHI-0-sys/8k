@@ -540,6 +540,25 @@ class RobustConnection {
     }
 }
 
+// ============ RPC THROTTLING (Rate Limit Protection) ============
+const rpcCallTimes = [];
+async function throttledRPC(fn) {
+    const now = Date.now();
+    // Remove calls older than 1 second
+    while (rpcCallTimes.length > 0 && rpcCallTimes[0] < now - 1000) {
+        rpcCallTimes.shift();
+    }
+    // If more than 2 calls in last second, wait
+    if (rpcCallTimes.length >= 2) {
+        const waitTime = 1000 - (now - rpcCallTimes[0]);
+        if (waitTime > 0) {
+            await sleep(waitTime);
+        }
+    }
+    rpcCallTimes.push(Date.now());
+    return fn();
+}
+
 // ============ PORTFOLIO MANAGER ============
 class PortfolioManager {
     constructor() {

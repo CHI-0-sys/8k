@@ -11,6 +11,12 @@ class PumpMonitor extends EventEmitter {
         this.isMonitoring = false;
         this.subscriptionId = null;
         this.lastLogTime = Date.now();
+
+        // Event throttling to prevent rate limits
+        this.eventQueue = [];
+        this.isProcessingQueue = false;
+        this.minEventInterval = 1000; // 1 event per second max
+        this.lastEventEmit = 0;
     }
 
     getLastEventTime() {
@@ -87,17 +93,46 @@ class PumpMonitor extends EventEmitter {
             timestamp: Date.now()
         };
 
+        // Queue events instead of emitting directly (rate limit protection)
         if (isCreate) {
-            this.emit('create', eventData);
+            this.queueEvent('create', eventData);
         }
 
         if (isBuy) {
-            this.emit('buy', eventData);
+            this.queueEvent('buy', eventData);
         }
 
         if (isSell) {
-            this.emit('sell', eventData);
+            this.queueEvent('sell', eventData);
         }
+    }
+
+    // Throttled event queue to prevent rate limits
+    queueEvent(type, data) {
+        this.eventQueue.push({ type, data });
+        if (!this.isProcessingQueue) {
+            this.processQueue();
+        }
+    }
+
+    async processQueue() {
+        this.isProcessingQueue = true;
+
+        while (this.eventQueue.length > 0) {
+            const event = this.eventQueue.shift();
+
+            // Throttle: ensure minimum interval between events
+            const now = Date.now();
+            const timeSinceLastEmit = now - this.lastEventEmit;
+            if (timeSinceLastEmit < this.minEventInterval) {
+                await new Promise(r => setTimeout(r, this.minEventInterval - timeSinceLastEmit));
+            }
+
+            this.emit(event.type, event.data);
+            this.lastEventEmit = Date.now();
+        }
+
+        this.isProcessingQueue = false;
     }
 }
 
