@@ -4616,8 +4616,8 @@ Can lose all capital. Trade responsibly.
         console.log('🚀 STARTING TRADING CYCLES (EVENT DRIVEN)');
         console.log('='.repeat(60));
 
-        // 1. Position monitoring (Dynamic Interval)
-        this.startPositionMonitor();
+        // 1. Position monitoring (Dynamic Interval - uses internal setTimeout)
+        this.engine.startPositionMonitor();
 
         // 2. State saves (every 10 min)
         const stateInterval = setInterval(async () => {
@@ -4629,7 +4629,6 @@ Can lose all capital. Trade responsibly.
         }, 10 * 60 * 1000);
 
         this.intervals = {
-            monitor: monitorInterval,
             state: stateInterval
         };
 
