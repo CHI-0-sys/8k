@@ -459,16 +459,23 @@ class RobustConnection {
         this.fallbackUrls = fallbackUrls;
         this.currentIndex = 0;
         this.allUrls = [primaryUrl, ...fallbackUrls];
-        this.connections = this.allUrls.map(url => new Connection(url, {
+
+        // Configure WebSocket with rate limit protection
+        this.connections = this.allUrls.map((url, index) => new Connection(url, {
             commitment: 'confirmed',
-            confirmTransactionInitialTimeout: TX_CONFIRMATION_TIMEOUT
+            confirmTransactionInitialTimeout: TX_CONFIRMATION_TIMEOUT,
+            // WebSocket config to prevent 429 errors
+            wsEndpoint: index === 0 ? url.replace('https://', 'wss://') : undefined,
+            disableRetryOnRateLimit: index > 0, // Disable WS retry on fallbacks
         }));
+
         this.failureCounts = new Array(this.allUrls.length).fill(0);
         this.lastFailureTime = new Array(this.allUrls.length).fill(0);
 
         logger.info('RPC initialized', {
             primary: primaryUrl,
-            fallbacks: fallbackUrls.length
+            fallbacks: fallbackUrls.length,
+            wsEnabled: 'primary only'
         });
     }
 

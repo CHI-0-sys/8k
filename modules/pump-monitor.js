@@ -22,22 +22,40 @@ class PumpMonitor extends EventEmitter {
 
         this.logger.info('Starting Pump.fun monitor...');
 
-        try {
-            this.subscriptionId = this.connection.onLogs(
-                new PublicKey(PUMP_FUN_PROGRAM),
-                (logs, ctx) => {
-                    if (logs.err) return;
-                    this.processLogs(logs, ctx);
-                },
-                'confirmed'
-            );
+        // Exponential backoff for retries
+        let retryDelay = 2000; // Start with 2 seconds
+        const maxRetryDelay = 60000; // Max 1 minute between retries
+        const maxRetries = 5;
 
-            this.isMonitoring = true;
-            this.logger.info(`✅ Monitoring Pump.fun (${PUMP_FUN_PROGRAM})`);
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                this.subscriptionId = this.connection.onLogs(
+                    new PublicKey(PUMP_FUN_PROGRAM),
+                    (logs, ctx) => {
+                        if (logs.err) return;
+                        this.processLogs(logs, ctx);
+                    },
+                    'confirmed'
+                );
 
-        } catch (error) {
-            this.logger.error('Failed to start PumpMonitor', { error: error.message });
+                this.isMonitoring = true;
+                this.logger.info(`✅ Monitoring Pump.fun (${PUMP_FUN_PROGRAM})`);
+                return; // Success, exit retry loop
+
+            } catch (error) {
+                this.logger.error(`Failed to start PumpMonitor (attempt ${attempt + 1}/${maxRetries})`, {
+                    error: error.message,
+                    nextRetryIn: retryDelay / 1000 + 's'
+                });
+
+                if (attempt < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    retryDelay = Math.min(retryDelay * 2, maxRetryDelay); // Exponential backoff
+                }
+            }
         }
+
+        this.logger.error('PumpMonitor failed after all retries - running without WebSocket');
     }
 
     async stop() {
