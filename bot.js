@@ -1001,7 +1001,15 @@ class TradingEngine {
             return;
         }
 
-        // ===== NEW: Balanced Risk Assessment =====
+        // ========== DETAILED TOKEN EVALUATION LOG ==========
+        console.log('\n' + '═'.repeat(60));
+        console.log('🔍 SALARY SNIPE: TOKEN EVALUATION');
+        console.log('═'.repeat(60));
+        console.log(`📋 Token: ${tokenAnalysis.symbol || 'UNKNOWN'} (${tokenAnalysis.name || 'N/A'})`);
+        console.log(`🔗 Mint: ${tokenAnalysis.mint}`);
+        console.log(`⏱️  Age: ${tokenAnalysis.age || 'N/A'}`);
+
+        // ===== Balanced Risk Assessment =====
         // Enrich token data with liquidity and bonding curve info
         const enrichedToken = await this.riskFilter.enrichTokenData(
             tokenAnalysis.mint,
@@ -1016,17 +1024,40 @@ class TradingEngine {
             name: tokenAnalysis.name || 'Unknown'
         };
 
+        console.log('\n📊 Token Metrics:');
+        console.log(`   └─ Liquidity: $${tokenData.liquidity?.toFixed(0) || 'N/A'}`);
+        console.log(`   └─ Bonding Progress: ${tokenData.bondingProgress?.toFixed(1) || 'N/A'}%`);
+        console.log(`   └─ Real SOL: ${tokenData.realSol?.toFixed(2) || 'N/A'} SOL`);
+
         // Run risk assessment - scoring from 0-100
         const riskDecision = await this.riskFilter.shouldTrade(tokenData);
 
+        console.log('\n🛡️ Risk Assessment:');
+        console.log(`   └─ Risk Score: ${riskDecision.riskScore}/100`);
+        console.log(`   └─ Risk Level: ${riskDecision.riskLevel}`);
+        console.log(`   └─ Decision: ${riskDecision.trade ? '✅ TRADE' : '❌ BLOCKED'}`);
+        console.log(`   └─ Reason: ${riskDecision.reason}`);
+
+        if (riskDecision.warnings.length > 0) {
+            console.log(`   └─ Warnings: ${riskDecision.warnings.join(', ')}`);
+        }
+
         if (!riskDecision.trade) {
+            console.log('\n❌ RESULT: Token BLOCKED by risk filter');
+            console.log('═'.repeat(60) + '\n');
             logger.info(`❌ Salary Snipe BLOCKED: ${tokenAnalysis.mint}`, {
+                symbol: tokenData.symbol,
                 riskScore: riskDecision.riskScore,
                 reason: riskDecision.reason
             });
             this.decisionCache.set(tokenAnalysis.mint, now);
             return;
         }
+
+        // ===== TOKEN PASSED ALL CHECKS =====
+        console.log('\n✅ RESULT: Token PASSED all filters!');
+        console.log('🚀 Proceeding to execute trade...');
+        console.log('═'.repeat(60) + '\n');
 
         // Log warnings if any (soft warnings don't block)
         if (riskDecision.warnings.length > 0) {
@@ -1038,10 +1069,12 @@ class TradingEngine {
         // Mark as processed
         this.decisionCache.set(tokenAnalysis.mint, now);
 
-        logger.info(`✅ Salary Snipe Candidate: ${tokenAnalysis.mint}`, {
+        logger.info(`✅ Salary Snipe EXECUTING: ${tokenData.symbol} (${tokenAnalysis.mint})`, {
             age: tokenAnalysis.age,
             riskScore: riskDecision.riskScore,
-            riskLevel: riskDecision.riskLevel
+            riskLevel: riskDecision.riskLevel,
+            liquidity: tokenData.liquidity,
+            bondingProgress: tokenData.bondingProgress
         });
 
         // Jitter: 50-200ms delay to avoid exact block pulse (Sandwich Mitigation)
@@ -1088,9 +1121,16 @@ class TradingEngine {
         const graduationCheck = await this.bondingCurve.checkGraduation(mint, 93); // 93% threshold
 
         if (graduationCheck && graduationCheck.isGraduating && !graduationCheck.isComplete) {
-            // ===== Balanced Risk Assessment for Graduation =====
-            // Graduation plays are inherently lower risk (token proven itself)
+            // ========== DETAILED GRADUATION EVALUATION LOG ==========
+            console.log('\n' + '═'.repeat(60));
+            console.log('🎓 GRADUATION SNIPER: TOKEN EVALUATION');
+            console.log('═'.repeat(60));
+            console.log(`🔗 Mint: ${mint}`);
+            console.log(`📈 Bonding Progress: ${graduationCheck.data.progress.toFixed(2)}%`);
+            console.log(`💰 Real SOL: ${graduationCheck.data.realSol.toFixed(2)} SOL`);
+            console.log(`💵 Estimated USD: $${(graduationCheck.data.realSol * 200).toFixed(0)}`);
 
+            // ===== Balanced Risk Assessment for Graduation =====
             const tokenData = {
                 mint: mint,
                 symbol: 'GRAD',
@@ -1103,7 +1143,13 @@ class TradingEngine {
             // Fast filter only - graduation tokens have proven liquidity
             const fastCheck = await this.riskFilter.fastFilter(tokenData);
 
+            console.log('\n🛡️ Risk Assessment:');
+            console.log(`   └─ Fast Filter: ${fastCheck.valid ? '✅ PASS' : '❌ BLOCKED'}`);
+
             if (!fastCheck.valid) {
+                console.log(`   └─ Reason: ${fastCheck.reason}`);
+                console.log('\n❌ RESULT: Token BLOCKED by fast filter');
+                console.log('═'.repeat(60) + '\n');
                 logger.info(`❌ Graduation BLOCKED: ${mint}`, { reason: fastCheck.reason });
                 return;
             }
@@ -1113,7 +1159,16 @@ class TradingEngine {
             const riskLevel = graduationCheck.data.progress > 95 ? 'LOW' : 'NORMAL';
             const riskScore = Math.max(0, 50 - Math.floor(graduationCheck.data.progress / 2));
 
-            logger.info(`🎓 Graduation Sniper Trigger: ${mint}`, {
+            console.log(`   └─ Risk Score: ${riskScore}/100`);
+            console.log(`   └─ Risk Level: ${riskLevel}`);
+            console.log(`   └─ Decision: ✅ TRADE`);
+
+            // ===== TOKEN PASSED ALL CHECKS =====
+            console.log('\n✅ RESULT: Graduation candidate PASSED!');
+            console.log('🚀 Proceeding to execute trade...');
+            console.log('═'.repeat(60) + '\n');
+
+            logger.info(`🎓 Graduation Sniper EXECUTING: ${mint}`, {
                 progress: graduationCheck.data.progress.toFixed(2),
                 realSol: graduationCheck.data.realSol.toFixed(2),
                 riskLevel,
@@ -1531,21 +1586,47 @@ ${emoji} <b>POSITION CLOSED</b> ${color}
                     return;
                 }
 
-                // 🔥 FIND OPPORTUNITY - NO BLOCKS
-                console.log('\n🔍 SEARCHING FOR OPPORTUNITIES...\n');
-                const opportunity = await this.findTradingOpportunity(userId);
+                // ===== EVENT-DRIVEN MODE =====
+                // The bot now listens for Pump.fun events via WebSocket
+                // Manual scan shows status and confirms monitors are running
 
-                if (opportunity) {
-                    console.log('✅ OPPORTUNITY FOUND!');
-                    console.log('   Symbol:', opportunity.symbol);
-                    console.log('   Bonding:', opportunity.bondingProgress.toFixed(1) + '%');
-                    console.log('   Liquidity: $' + opportunity.liquidityUSD.toFixed(0));
+                console.log('\n📡 STATUS CHECK (Event-Driven Mode)\n');
 
-                    // 🚀 EXECUTE IMMEDIATELY
-                    await this.executeBuy(userId, opportunity);
-                } else {
-                    console.log('❌ No opportunity found');
+                // Check Pump Monitor status
+                const pumpMonitorActive = this.pumpMonitor && this.pumpMonitor.isActive;
+                const lastEventTime = this.pumpMonitor ? this.pumpMonitor.getLastEventTime() : 0;
+                const eventAge = lastEventTime ? Math.floor((Date.now() - lastEventTime) / 1000) : 'Never';
+
+                console.log('🎯 Pump.fun Monitor:');
+                console.log(`   Status: ${pumpMonitorActive ? '✅ Active' : '❌ Inactive'}`);
+                console.log(`   Last Event: ${eventAge}s ago`);
+
+                // Risk filter status
+                const riskCacheStats = this.riskFilter ? this.riskFilter.getCacheStats() : { rugCheckCacheSize: 0, metadataCacheSize: 0 };
+                console.log('\n🛡️ Risk Filter:');
+                console.log(`   RugCheck Cache: ${riskCacheStats.rugCheckCacheSize} items`);
+                console.log(`   Metadata Cache: ${riskCacheStats.metadataCacheSize} items`);
+                console.log(`   Block Threshold: >75/100`);
+
+                // Decision cache (recently processed tokens)
+                console.log('\n📦 Decision Cache:');
+                console.log(`   Processed Tokens: ${this.decisionCache.size} items`);
+
+                // Portfolio status
+                const allPositions = this.portfolioManager.getAllPositions();
+                console.log('\n💼 Portfolio:');
+                console.log(`   Positions: ${allPositions.length}/${MAX_CONCURRENT_POSITIONS}`);
+
+                if (allPositions.length > 0) {
+                    for (const [mint, pos] of allPositions) {
+                        console.log(`   - ${pos.symbol}: ${pos.strategy} (Entry: ${pos.entryTime ? new Date(pos.entryTime).toLocaleTimeString() : 'N/A'})`);
+                    }
                 }
+
+                // Event-driven reminder
+                console.log('\n📢 Note: Trading is event-driven via Pump.fun WebSocket.');
+                console.log('   Tokens are automatically evaluated when CREATE or BUY events arrive.');
+                console.log('   Manual scan confirms system is ready to trade.\n');
 
             } catch (err) {
                 console.error('💥 CYCLE ERROR:', err.message);
@@ -4137,7 +4218,7 @@ Day: ${finalUser.currentDay || 1}
 
     async handleScan(userId, chatId) {
         try {
-            await this.sendMessage(chatId, '🔍 Manual scan initiated...');
+            await this.sendMessage(chatId, '🔍 Running system check...');
 
             const user = this.engine.getUserState(userId);
             if (!user.isActive) {
@@ -4150,9 +4231,33 @@ Day: ${finalUser.currentDay || 1}
             console.log('\n🔍 MANUAL SCAN TRIGGERED by user', userId);
             await this.engine.tradingCycle();
 
-            await this.sendMessage(chatId,
-                '✅ Scan complete. Check logs for results.'
-            );
+            // Get status info
+            const riskCacheStats = this.engine.riskFilter ? this.engine.riskFilter.getCacheStats() : { rugCheckCacheSize: 0, metadataCacheSize: 0 };
+            const portfolioStats = this.engine.portfolioManager.getStats();
+
+            await this.sendMessage(chatId, `
+✅ <b>System Check Complete</b>
+
+📡 <b>Mode:</b> Event-Driven (Pump.fun WebSocket)
+Trading happens automatically when tokens meet criteria.
+
+<b>🛡️ Risk Filter:</b>
+├ Block Threshold: >75/100
+├ RugCheck Cache: ${riskCacheStats.rugCheckCacheSize} items
+└ Metadata Cache: ${riskCacheStats.metadataCacheSize} items
+
+<b>💼 Portfolio:</b>
+├ Positions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}
+└ Can Trade: ${portfolioStats.totalPositions < MAX_CONCURRENT_POSITIONS ? '✅ Yes' : '❌ Max reached'}
+
+<b>💰 Account:</b>
+├ Balance: ${user.currentBalance.toFixed(4)} SOL
+└ Status: ${user.isActive ? '🟢 Active' : '🔴 Stopped'}
+
+<i>The bot monitors Pump.fun for new tokens and graduation events. When a token passes all filters, it trades automatically.</i>
+
+Check server logs for detailed token evaluations.
+            `.trim(), { parse_mode: 'HTML' });
 
         } catch (error) {
             logger.error('Manual scan failed', { error: error.message });
