@@ -3233,15 +3233,9 @@ class TradingBot {
         console.log('📱 Initializing Telegram bot...');
         logger.info('🔵 Starting in POLLING MODE (Production)');
 
+        // Create bot without auto-starting polling
         this.bot = new TelegramBot(TELEGRAM_TOKEN, {
-            polling: {
-                interval: 5000,
-                autoStart: true,
-                params: {
-                    timeout: 10,
-                    allowed_updates: ['message']
-                }
-            },
+            polling: false,  // Don't auto-start - we'll start manually after cleanup
             filepath: false,
             request: {
                 agentOptions: {
@@ -3250,6 +3244,10 @@ class TradingBot {
                 }
             }
         });
+
+        // Track instance conflict retries
+        this.instanceConflictRetries = 0;
+        this.maxInstanceRetries = 5;
 
         // Polling error handler
         let pollingErrorCount = 0;
@@ -3288,11 +3286,31 @@ class TradingBot {
                 return; // Don't crash, let it auto-retry
             }
 
-            // Multiple bot instances = critical error
+            // Multiple bot instances = retry with delay (common during Railway deployments)
             if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-                logger.error('❌ Multiple bot instances detected - SHUTTING DOWN');
-                console.error('❌ CRITICAL: Another instance is running!');
-                process.exit(1);
+                this.instanceConflictRetries = (this.instanceConflictRetries || 0) + 1;
+
+                if (this.instanceConflictRetries >= this.maxInstanceRetries) {
+                    logger.error('❌ Multiple bot instances detected - Max retries exceeded');
+                    console.error('❌ CRITICAL: Another instance is running after 5 retries!');
+                    console.error('   Possible causes:');
+                    console.error('   - Another deployment is running');
+                    console.error('   - Old instance not properly shut down');
+                    console.error('   - Running locally while deployed');
+                    process.exit(1);
+                }
+
+                const waitTime = this.instanceConflictRetries * 3000; // 3s, 6s, 9s, 12s, 15s
+                console.log(`⚠️  Bot conflict detected (attempt ${this.instanceConflictRetries}/${this.maxInstanceRetries})`);
+                console.log(`   Waiting ${waitTime / 1000}s for old instance to stop...`);
+
+                // Wait and restart polling
+                setTimeout(async () => {
+                    console.log('🔄 Attempting to restart polling...');
+                    await this.restartPolling();
+                }, waitTime);
+
+                return; // Don't crash, wait and retry
             }
 
             // ETIMEDOUT is common on Railway
@@ -3320,15 +3338,41 @@ class TradingBot {
             logger.error('Bot error', { error: error.message });
         });
 
-        // Verify connection
+        // Verify connection and start polling manually
         this.bot.getMe()
-            .then(info => {
+            .then(async (info) => {
                 console.log('✅ Connected to Telegram:', info.username);
                 logger.info('Bot connected to Telegram', {
                     username: info.username,
                     id: info.id,
                     mode: 'POLLING'
                 });
+
+                // Clean up any existing webhook before starting polling
+                try {
+                    await this.bot.deleteWebHook({ drop_pending_updates: false });
+                    console.log('🧹 Webhook cleared (if any)');
+                } catch (e) {
+                    console.log('ℹ️  No webhook to clear');
+                }
+
+                // On Railway, wait a bit for old instance to stop
+                const isRailway = process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production';
+                if (isRailway) {
+                    console.log('⏳ Railway detected - waiting 2s for old instance to stop...');
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+
+                // Now start polling
+                console.log('🔵 Starting Telegram polling...');
+                this.bot.startPolling({
+                    interval: 5000,
+                    params: {
+                        timeout: 10,
+                        allowed_updates: ['message']
+                    }
+                });
+                console.log('✅ Polling started');
             })
             .catch(err => {
                 console.error('❌ Failed to connect to Telegram:', err.message);
