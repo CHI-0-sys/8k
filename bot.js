@@ -86,6 +86,7 @@ const HealthMonitor = require('./modules/health-monitor');
 const AnomalyDetector = require('./modules/anomaly-detector');
 const PumpMonitor = require('./modules/pump-monitor');
 const TokenFilter = require('./modules/token-filter');
+const RiskFilter = require('./modules/risk-filter');
 
 const BondingCurveManager = require('./modules/bonding-curve');
 
@@ -827,6 +828,7 @@ class TradingEngine {
         this.pumpMonitor = new PumpMonitor(rpcConnection.getCurrentConnection(), logger);
         this.tokenFilter = new TokenFilter(rpcConnection.getCurrentConnection(), logger);
         this.bondingCurve = new BondingCurveManager(rpcConnection.getCurrentConnection(), logger);
+        this.riskFilter = new RiskFilter(rpcConnection.getCurrentConnection(), logger);
     }
 
     async startPositionMonitor() {
@@ -977,9 +979,11 @@ class TradingEngine {
 
     async handleSalaryStrategy(event) {
         // STRATEGY A: "The Salary Snipe" (New Token Volatility)
+        // Uses balanced risk assessment - aggressive trading while blocking scams
+
         if (this.portfolioManager.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) return;
 
-        // Use the TokenFilter to analyze the "Create" event
+        // Use the TokenFilter for basic validation first
         const tokenAnalysis = await this.tokenFilter.analyzeToken(event.signature);
         if (!tokenAnalysis) return;
 
@@ -997,26 +1001,69 @@ class TradingEngine {
             return;
         }
 
+        // ===== NEW: Balanced Risk Assessment =====
+        // Enrich token data with liquidity and bonding curve info
+        const enrichedToken = await this.riskFilter.enrichTokenData(
+            tokenAnalysis.mint,
+            this.bondingCurve
+        );
+
+        // Merge with existing analysis
+        const tokenData = {
+            ...tokenAnalysis,
+            ...enrichedToken,
+            symbol: tokenAnalysis.symbol || 'PUMP',
+            name: tokenAnalysis.name || 'Unknown'
+        };
+
+        // Run risk assessment - scoring from 0-100
+        const riskDecision = await this.riskFilter.shouldTrade(tokenData);
+
+        if (!riskDecision.trade) {
+            logger.info(`❌ Salary Snipe BLOCKED: ${tokenAnalysis.mint}`, {
+                riskScore: riskDecision.riskScore,
+                reason: riskDecision.reason
+            });
+            this.decisionCache.set(tokenAnalysis.mint, now);
+            return;
+        }
+
+        // Log warnings if any (soft warnings don't block)
+        if (riskDecision.warnings.length > 0) {
+            logger.warn(`⚠️ Salary Snipe Warnings for ${tokenAnalysis.mint}:`, {
+                warnings: riskDecision.warnings
+            });
+        }
+
         // Mark as processed
         this.decisionCache.set(tokenAnalysis.mint, now);
 
-        logger.info(`Salary Snipe Candidate: ${tokenAnalysis.mint} (${tokenAnalysis.age}s)`);
+        logger.info(`✅ Salary Snipe Candidate: ${tokenAnalysis.mint}`, {
+            age: tokenAnalysis.age,
+            riskScore: riskDecision.riskScore,
+            riskLevel: riskDecision.riskLevel
+        });
 
         // Jitter: 50-200ms delay to avoid exact block pulse (Sandwich Mitigation)
         const jitter = Math.floor(Math.random() * 151) + 50;
         await new Promise(r => setTimeout(r, jitter));
 
-        await this.executeStrategyTrade(tokenAnalysis.mint, 'SALARY_SNIPE', 0.5);
-        // Fixed 0.5 SOL for Salary Snipe checks
+        // Execute trade with risk level context
+        await this.executeStrategyTrade(
+            tokenAnalysis.mint,
+            'SALARY_SNIPE',
+            0.5,
+            { riskLevel: riskDecision.riskLevel, riskScore: riskDecision.riskScore }
+        );
     }
 
     async handleGraduationStrategy(event) {
         // STRATEGY B: "The 93% Graduation Sniper" (Migration Play)
+        // Lower risk trades since token has proven itself to 93%+
+
         if (this.portfolioManager.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) return;
 
         // We need the mint address from the Buy transaction
-        // Since we don't have it in the event, we must fetch the tx
-        // Optimization: In a real HFT scenario, we might parse logs smarter, but here we fetch.
         let mint = null;
         try {
             const tx = await this.rpcConnection.getCurrentConnection().getParsedTransaction(event.signature, {
@@ -1041,14 +1088,49 @@ class TradingEngine {
         const graduationCheck = await this.bondingCurve.checkGraduation(mint, 93); // 93% threshold
 
         if (graduationCheck && graduationCheck.isGraduating && !graduationCheck.isComplete) {
-            logger.info(`🎓 Graduation Sniper Trigger: ${mint} @ ${graduationCheck.data.progress.toFixed(2)}%`);
+            // ===== Balanced Risk Assessment for Graduation =====
+            // Graduation plays are inherently lower risk (token proven itself)
+
+            const tokenData = {
+                mint: mint,
+                symbol: 'GRAD',
+                name: 'Graduating Token',
+                bondingProgress: graduationCheck.data.progress,
+                liquidity: graduationCheck.data.realSol * 200, // Approximate USD
+                realSol: graduationCheck.data.realSol
+            };
+
+            // Fast filter only - graduation tokens have proven liquidity
+            const fastCheck = await this.riskFilter.fastFilter(tokenData);
+
+            if (!fastCheck.valid) {
+                logger.info(`❌ Graduation BLOCKED: ${mint}`, { reason: fastCheck.reason });
+                return;
+            }
+
+            // Graduation at 93%+ means good liquidity (~79+ SOL)
+            // This is inherently lower risk, so we use a simpler check
+            const riskLevel = graduationCheck.data.progress > 95 ? 'LOW' : 'NORMAL';
+            const riskScore = Math.max(0, 50 - Math.floor(graduationCheck.data.progress / 2));
+
+            logger.info(`🎓 Graduation Sniper Trigger: ${mint}`, {
+                progress: graduationCheck.data.progress.toFixed(2),
+                realSol: graduationCheck.data.realSol.toFixed(2),
+                riskLevel,
+                riskScore
+            });
 
             // Dynamic position sizing for graduation (larger confidence)
-            await this.executeStrategyTrade(mint, 'GRADUATION_SNIPER', null); // null = use default calc
+            await this.executeStrategyTrade(
+                mint,
+                'GRADUATION_SNIPER',
+                null,  // null = use default calc
+                { riskLevel, riskScore }
+            );
         }
     }
 
-    async executeStrategyTrade(mint, strategyName, fixedSizeOverride = null) {
+    async executeStrategyTrade(mint, strategyName, fixedSizeOverride = null, riskContext = {}) {
         const activeUser = Array.from(this.userStates.values()).find(u => u.isActive);
         if (!activeUser) return;
 
@@ -1057,6 +1139,9 @@ class TradingEngine {
             logger.warn('Circuit breaker active - skipping trade');
             return;
         }
+
+        // Extract risk context
+        const { riskLevel = 'NORMAL', riskScore = 50 } = riskContext;
 
         try {
             // Global Wallet Lock
@@ -1073,11 +1158,25 @@ class TradingEngine {
                     }
                 }
 
+                // ===== Risk-Adjusted Position Sizing =====
+                // Reduce position size for elevated risk trades
+                if (riskLevel === 'ELEVATED') {
+                    tradeSize = tradeSize * 0.7; // 30% reduction for elevated risk
+                    logger.info(`Risk adjustment: Reduced position by 30% for ELEVATED risk`);
+                } else if (riskLevel === 'HIGH') {
+                    tradeSize = tradeSize * 0.5; // 50% reduction for high risk (if still allowed)
+                    logger.info(`Risk adjustment: Reduced position by 50% for HIGH risk`);
+                }
+
                 // Sanity check bounds
                 tradeSize = Math.max(MIN_POSITION_SIZE, Math.min(tradeSize, MAX_POSITION_SIZE));
                 tradeSize = Math.max(0.01, Math.min(tradeSize, currentBalance * 0.4)); // Hard cap 40%
 
-                logger.info(`Executing ${strategyName} on ${mint} | Size: ${tradeSize.toFixed(4)} SOL`);
+                logger.info(`Executing ${strategyName} on ${mint}`, {
+                    size: tradeSize.toFixed(4),
+                    riskLevel,
+                    riskScore
+                });
 
                 const result = ENABLE_PAPER_TRADING
                     ? { success: true, signature: 'paper_trade_' + Date.now() }
@@ -1091,7 +1190,7 @@ class TradingEngine {
                 if (result.success) {
                     logger.info(`Buy executed: ${result.signature}`);
 
-                    // Record Position
+                    // Record Position with risk context
                     this.portfolioManager.addPosition(mint, {
                         symbol: 'PUMP-' + mint.substring(0, 4),
                         mint: mint,
@@ -1101,21 +1200,27 @@ class TradingEngine {
                         entryTime: Date.now(),
                         strategy: strategyName,
                         stopLoss: PER_TRADE_STOP_LOSS,
-                        takeProfit: PER_TRADE_PROFIT_TARGET
+                        takeProfit: PER_TRADE_PROFIT_TARGET,
+                        riskLevel: riskLevel,
+                        riskScore: riskScore
                     });
 
-                    // Notify User
+                    // Risk emoji for notification
+                    const riskEmoji = riskLevel === 'LOW' ? '🟢' : riskLevel === 'NORMAL' ? '🟡' : '🟠';
+
+                    // Notify User with risk info
                     this.bot.bot.sendMessage(activeUser.userId,
                         `🎯 <b>${strategyName} EXECUTED</b>\n\n` +
                         `CA: <code>${mint}</code>\n` +
                         `Size: ${tradeSize.toFixed(4)} SOL\n` +
+                        `${riskEmoji} Risk: ${riskLevel} (${riskScore}/100)\n` +
                         `TX: https://solscan.io/tx/${result.signature}`,
                         { parse_mode: 'HTML' }
                     );
                 }
             });
         } catch (error) {
-            logger.error('Trade execution failed', { error: error.message });
+            logger.error('Trade execution failed', { error: error.message, mint, strategyName });
         }
     }
 
