@@ -3783,6 +3783,9 @@ ${error.message.includes('Invalid') ?
                         handlerPromise = this.handleTestQuote(userId, chatId);
                         break;
 
+                    case '/risk':
+                        handlerPromise = this.handleRisk(userId, chatId);
+                        break;
 
                     default:
                         await this.sendMessage(chatId,
@@ -4073,25 +4076,34 @@ ${ENABLE_PAPER_TRADING ? '🧪 PAPER TRADING MODE' : '💰 LIVE TRADING MODE'}
 
 💼 <b>Account:</b>
 Wallet: <code>${shortAddr}</code>
-Balance: ${finalUser.currentBalance.toFixed(4)} ${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
+Balance: ${finalUser.currentBalance.toFixed(4)} SOL
 Day: ${finalUser.currentDay || 1}
 
 🎯 <b>Strategy:</b>
-Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-Stop Loss: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
-Per Trade: ${(strategy.perTradeTarget * 100).toFixed(0)}%
+├ Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
+├ Stop Loss: -${(DAILY_STOP_LOSS * 100).toFixed(0)}%
+└ Per Trade: ${(strategy.perTradeTarget * 100).toFixed(0)}%
 
-📊 <b>Filters:</b>
-Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%
-Min Liquidity: $${MIN_LIQUIDITY_USD}
+🛡️ <b>Risk Filter:</b>
+├ Block Score: >75/100
+├ Min Liquidity: $5,000
+├ Hard Blocks: honeypot, rugpull, scam
+└ Soft Warnings: moon, safe, 100x
+
+📊 <b>Sniper Settings:</b>
+├ Bonding: ${MIN_BONDING_PROGRESS}-${MAX_BONDING_PROGRESS}%
+├ Max Positions: ${MAX_CONCURRENT_POSITIONS}
+└ Position Size: ${POSITION_SIZE_MODE === 'PERCENTAGE' ? `${(PERCENTAGE_POSITION_SIZE * 100).toFixed(0)}%` : `${FIXED_POSITION_SIZE} SOL`}
 
 🚀 <b>Status:</b>
 ✅ Bot active and scanning
-⏰ Scan interval: ${SCAN_INTERVAL_MINUTES} minutes
+✅ Pump.fun monitor connected
+✅ Risk filter enabled
 
-Commands:
-/status - Check bot status
+<b>Commands:</b>
+/status - Bot status & positions
 /balance - View detailed balance
+/risk - Risk filter settings
 /stop - Stop trading
         `.trim(), { parse_mode: 'HTML' });
 
@@ -4307,28 +4319,33 @@ ${tokenList.join('\n')}
         user.isActive = false;
         await this.engine.saveState();
 
-        const stats = { queries: 0, estimatedPoints: 0, pointsPerQuery: 0 }; // BitQuery removed
-
         const rpcStatus = this.rpcConnection.getStatus();
+        const portfolioStats = this.engine.portfolioManager.getStats();
 
         await this.sendMessage(chatId, `
-  🛑 <b>AUTO-TRADING STOPPED</b>
-  
-  📊 <b>Session Stats:</b>
-  API Queries: ${stats.queries}
-  Est. Points: ${stats.estimatedPoints}
-  Avg: ${stats.pointsPerQuery} pts/query
-  
-  🔌 <b>RPC Status:</b>
-  Current: ${rpcStatus.isPrimary ? 'Primary' : 'Fallback'}
-  Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
-  
-  ${user.position ? '⚠️ You have an open position. Monitor it manually.' : ''}
-  
-  Use /start to resume trading.
+🛑 <b>BOT STOPPED</b>
+
+<b>📊 Session Summary:</b>
+├ Total Trades: ${user.totalTrades}
+├ Successful: ${user.successfulTrades}
+├ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
+├ Daily P&L: ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+└ Balance: ${user.currentBalance.toFixed(4)} SOL
+
+<b>💼 Portfolio:</b>
+├ Open Positions: ${portfolioStats.totalPositions}
+└ Total Invested: ${portfolioStats.totalInvested.toFixed(2)} USDC
+
+<b>🔌 Connection Status:</b>
+├ RPC: ${rpcStatus.isPrimary ? '✅ Primary' : '⚠️ Fallback'}
+└ Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
+
+${portfolioStats.totalPositions > 0 ? '⚠️ <b>Warning:</b> You have open positions. Monitor them manually or close before leaving.' : '✅ No open positions.'}
+
+Use /start to resume trading.
       `.trim(), { parse_mode: 'HTML' });
 
-        logger.info('User stopped bot', { userId });
+        logger.info('User stopped bot', { userId, trades: user.totalTrades, winRate: user.totalTrades > 0 ? (user.successfulTrades / user.totalTrades * 100).toFixed(1) : 0 });
     }
 
     async handleBalance(userId, chatId) {
@@ -4342,38 +4359,43 @@ ${tokenList.join('\n')}
             // Get DB balance
             const dbUser = await this.database.getUser(userId.toString());
 
+            const mismatch = Math.abs(tradingBalance - user.currentBalance) > 0.001;
+
             const message = `
-💼 <b>BALANCE DEBUG</b>
+💼 <b>BALANCE DETAILS</b>
 
-🔍 <b>Reality Check:</b>
-Wallet Balance: ${tradingBalance.toFixed(4)}
-${balances.usdc > 0.01 ? 'USDC' : 'SOL'}
+<b>🔍 Wallet (Source of Truth):</b>
+├ Native SOL: ${balances.nativeSOL?.toFixed(6) || tradingBalance.toFixed(6)}
+├ Wrapped SOL: ${balances.wsol?.toFixed(6) || '0.000000'}
+├ USDC: ${balances.usdc?.toFixed(2) || '0.00'}
+└ <b>Trading Balance: ${tradingBalance.toFixed(4)} SOL</b>
 
-📊 <b>Tracked Balances:</b>
-Memory (currentBalance): ${user.currentBalance.toFixed(4)}
-Database (current_balance): ${dbUser?.current_balance?.toFixed(4) || '0'}
-Trading Capital: ${user.tradingCapital.toFixed(4)}
+<b>📊 Tracked State:</b>
+├ Memory: ${user.currentBalance.toFixed(4)} SOL
+├ Database: ${dbUser?.current_balance?.toFixed(4) || '0.0000'} SOL
+└ Capital: ${user.tradingCapital.toFixed(4)} SOL
 
-${Math.abs(tradingBalance - user.currentBalance) > 0.01 ? '⚠️ <b>MISMATCH DETECTED!</b>' : '✅ Balances match'}
+${mismatch ? '⚠️ <b>MISMATCH DETECTED!</b> Run /start to sync.' : '✅ Balances synchronized'}
 
-📈 <b>Trading Stats:</b>
-Starting Balance: ${user.startingBalance.toFixed(4)}
-Daily Start: ${user.dailyStartBalance.toFixed(4)}
-Daily P&L: ${user.dailyProfit >= 0 ? '+' : ''}${user.dailyProfit.toFixed(4)}
-Total Trades: ${user.totalTrades}
+<b>📈 Trading Progress:</b>
+├ Starting: ${user.startingBalance.toFixed(4)} SOL
+├ Current: ${user.currentBalance.toFixed(4)} SOL
+├ Change: ${user.startingBalance > 0 ? ((user.currentBalance - user.startingBalance) / user.startingBalance * 100).toFixed(2) : '0.00'}%
+└ Total Trades: ${user.totalTrades}
 
-🏦 <b>Wallet Details:</b>
-SOL: ${balances.sol.toFixed(4)}
-WSOL: ${balances.wsol.toFixed(4)}
-USDC: ${balances.usdc.toFixed(2)}
+<b>📅 Today:</b>
+├ Day Start: ${user.dailyStartBalance.toFixed(4)} SOL
+├ Daily P&L: ${user.dailyProfit >= 0 ? '+' : ''}${user.dailyProfit.toFixed(4)} SOL
+└ Daily %: ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
 
-<b>Status:</b> ${user.isActive ? '✅ Active' : '❌ Inactive'}
+<b>Status:</b> ${user.isActive ? '🟢 Active' : '🔴 Inactive'}
         `.trim();
 
             await this.sendMessage(chatId, message, { parse_mode: 'HTML' });
 
         } catch (error) {
-            await this.sendMessage(chatId, `Error: ${error.message}`);
+            await this.sendMessage(chatId, `❌ <b>Error:</b> ${error.message}`, { parse_mode: 'HTML' });
+            logger.error('handleBalance failed', { error: error.message, userId });
         }
     }
 
@@ -4424,35 +4446,43 @@ USDC: ${balances.usdc.toFixed(2)}
 
         const portfolioStats = this.engine.portfolioManager.getStats();
 
+        // Get risk filter cache stats
+        const riskCacheStats = this.engine.riskFilter ? this.engine.riskFilter.getCacheStats() : { rugCheckCacheSize: 0, metadataCacheSize: 0 };
+
         await this.sendMessage(chatId, `
-  ${statusEmoji} <b>BOT STATUS</b>
-  
-  <b>Trading:</b> ${statusText}
-  <b>Mode:</b> ${ENABLE_PAPER_TRADING ? '📝 Paper' : '💰 Live'}
-  <b>Day:</b> ${user.currentDay}/30
-  <b>Balance:</b> ${user.currentBalance.toFixed(2)} USDC
-  <b>Daily P&L:</b> ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
-  
-  ${rpcEmoji} <b>RPC Connection:</b>
-  Status: ${rpcStatus.isPrimary ? 'Primary' : `Fallback #${rpcStatus.currentIndex}`}
-  Endpoint: ${rpcStatus.currentUrl.substring(0, 40)}...
-  Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
-  
-  ${circuitEmoji} <b>Circuit Breaker:</b>
-  Status: ${circuitStatus.isTripped ? 'TRIPPED' : 'Active'}
-  Consecutive Losses: ${circuitStatus.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}
-  Daily Losses: ${circuitStatus.dailyLosses}/${MAX_DAILY_LOSSES}
-  ${circuitStatus.isTripped ? `Cooldown: ${Math.floor(circuitStatus.cooldownRemaining / 60)}m remaining` : ''}
-  
-  📊 <b>Portfolio:</b>
-  Positions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}
-  Total Invested: ${portfolioStats.totalInvested.toFixed(2)} USDC
-  
-  📈 <b>Performance:</b>
-  Trades: ${user.totalTrades}
-  Wins: ${user.successfulTrades}
-  Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
-  Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}${positionInfo}
+${statusEmoji} <b>BOT STATUS</b>
+
+<b>🎮 Trading:</b> ${statusText}
+<b>📝 Mode:</b> ${ENABLE_PAPER_TRADING ? 'Paper' : '💰 Live'}
+<b>📅 Day:</b> ${user.currentDay}/30
+<b>💰 Balance:</b> ${user.currentBalance.toFixed(4)} SOL
+<b>📈 Daily P&L:</b> ${user.dailyProfitPercent >= 0 ? '+' : ''}${user.dailyProfitPercent.toFixed(2)}%
+
+${rpcEmoji} <b>RPC Connection:</b>
+├ Status: ${rpcStatus.isPrimary ? 'Primary' : `Fallback #${rpcStatus.currentIndex}`}
+├ Endpoint: ${rpcStatus.currentUrl.substring(0, 35)}...
+└ Failures: ${rpcStatus.failureCounts[rpcStatus.currentIndex]}
+
+${circuitEmoji} <b>Circuit Breaker:</b>
+├ Status: ${circuitStatus.isTripped ? '🚨 TRIPPED' : '✅ Active'}
+├ Consecutive Losses: ${circuitStatus.consecutiveLosses}/${MAX_CONSECUTIVE_LOSSES}
+├ Daily Losses: ${circuitStatus.dailyLosses}/${MAX_DAILY_LOSSES}
+${circuitStatus.isTripped ? `└ Cooldown: ${Math.floor(circuitStatus.cooldownRemaining / 60)}m remaining` : ''}
+
+🛡️ <b>Risk Filter:</b>
+├ Block Threshold: >75/100
+├ RugCheck Cache: ${riskCacheStats.rugCheckCacheSize} items
+└ Metadata Cache: ${riskCacheStats.metadataCacheSize} items
+
+📊 <b>Portfolio:</b>
+├ Positions: ${portfolioStats.totalPositions}/${MAX_CONCURRENT_POSITIONS}
+└ Total Invested: ${portfolioStats.totalInvested.toFixed(2)} USDC
+
+📈 <b>Performance:</b>
+├ Trades: ${user.totalTrades}
+├ Wins: ${user.successfulTrades}
+├ Win Rate: ${user.totalTrades > 0 ? ((user.successfulTrades / user.totalTrades) * 100).toFixed(1) : 0}%
+└ Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}${positionInfo}
       `.trim(), { parse_mode: 'HTML' });
 
         logger.info('Status checked', { userId });
@@ -4644,45 +4674,122 @@ USDC: ${balances.usdc.toFixed(2)}
         logger.info('Backtest requested', { userId, days });
     }
 
+    async handleRisk(userId, chatId) {
+        try {
+            const riskFilter = this.engine.riskFilter;
+            const cacheStats = riskFilter ? riskFilter.getCacheStats() : { rugCheckCacheSize: 0, metadataCacheSize: 0 };
+
+            // Run a test analysis on a sample token
+            let testResult = 'N/A';
+            if (riskFilter) {
+                const sampleToken = { symbol: 'TEST', liquidity: 25000, bondingProgress: 94 };
+                const decision = await riskFilter.shouldTrade(sampleToken);
+                testResult = `${decision.trade ? '✅ ALLOW' : '❌ BLOCK'} (Score: ${decision.riskScore}/100)`;
+            }
+
+            await this.sendMessage(chatId, `
+🛡️ <b>RISK FILTER SETTINGS</b>
+
+<b>📊 Scoring System:</b>
+├ Block Threshold: >75/100
+├ Low Risk: 0-25
+├ Normal Risk: 26-50
+└ Elevated Risk: 51-75
+
+<b>🚫 Hard Block Keywords:</b>
+honeypot, rugpull, scam, drainer, exploit, hack, testnet, devnet
+
+<b>⚠️ Soft Warnings (log only):</b>
+moon, safe, 100x, elon, rich, diamond
+(+5 pts each, max 15 pts)
+
+<b>💧 Liquidity Rules:</b>
+├ <$5,000: BLOCKED (+25 pts)
+├ <$10,000: +15 pts
+└ <$20,000: +5 pts
+
+<b>📈 Bonding Curve Rules:</b>
+├ <90%: +20 pts (too early)
+├ <93%: +10 pts
+├ 93-98%: 0 pts (sweet spot)
+└ >98%: +15 pts (too late)
+
+<b>🔌 APIs:</b>
+├ RugCheck: 5min cache
+├ Metadata: 1.5s timeout
+└ On Error: DEFAULT TO ALLOW
+
+<b>📦 Cache Status:</b>
+├ RugCheck: ${cacheStats.rugCheckCacheSize} items
+└ Metadata: ${cacheStats.metadataCacheSize} items
+
+<b>🧪 Test Token Result:</b>
+${testResult}
+
+<b>⚡ Position Sizing:</b>
+├ LOW risk: 100% of calculated size
+├ NORMAL risk: 100% of calculated size
+├ ELEVATED risk: 70% (30% reduction)
+└ HIGH risk: 50% (50% reduction, if allowed)
+
+<i>Philosophy: Aggressive trading while blocking obvious scams. Errors default to ALLOW - never miss trades due to API failures.</i>
+            `.trim(), { parse_mode: 'HTML' });
+
+            logger.info('Risk settings viewed', { userId });
+        } catch (error) {
+            await this.sendMessage(chatId, `❌ Error: ${error.message}`);
+            logger.error('handleRisk failed', { error: error.message, userId });
+        }
+    }
+
     async handleHelp(userId, chatId) {
+        const user = this.engine.getUserState(userId);
+
         await this.sendMessage(chatId, `
 📚 <b>COMMAND REFERENCE</b>
 
 <b>🎮 Trading Controls:</b>
-/start - Activate trading
-/stop - Stop trading
-/recent - Recent trades 
-/scan - force start trading
+├ /start - Activate trading
+├ /stop - Stop trading
+├ /scan - Force scan for opportunities
+└ /reset_breaker - Reset circuit breaker
 
 <b>💰 Wallet & Balance:</b>
-/wallet - View wallet address & balances
-/balance - Detailed trading balance
-/status - Bot status & positions
+├ /wallet - Wallet address & token balances
+├ /balance - Detailed balance debug
+└ /status - Bot status & positions
 
 <b>📊 Analytics:</b>
-/performance - Performance metrics
-/history - Trade history
-/stats - API usage
-/profits - Profit history
-/portfolio - Active positions
-/testquote -  test jupiterquote
+├ /performance - Performance metrics
+├ /history - Trade history (last 10)
+├ /recent - Recent trades summary
+├ /profits - Profit taking history
+└ /portfolio - Active positions
 
+<b>🛡️ Risk & Safety:</b>
+├ /risk - Risk filter settings
+├ /health - System health check
+└ /anomalies - Anomaly detection
 
 <b>🔧 Advanced:</b>
-/health - System health
-/anomalies - Anomaly detection
-/backtest - Run backtest
+├ /stats - API usage stats
+├ /backtest - Run backtest
+└ /testquote - Test Jupiter quote
 
 <b>ℹ️ Information:</b>
-/help - This menu
+└ /help - This menu
 
-<b>⚙️ Current Mode:</b>
-${ENABLE_PAPER_TRADING ? '📝 Paper Trading' : '💰 Live Trading'}
-Daily Target: ${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
-Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>⚙️ Current Settings:</b>
+├ Mode: ${ENABLE_PAPER_TRADING ? '📝 Paper' : '💰 LIVE'}
+├ Status: ${user.isActive ? '🟢 Active' : '🔴 Stopped'}
+├ Daily Target: +${(DAILY_PROFIT_TARGET * 100).toFixed(0)}%
+├ Risk Block: >75/100
+└ Strategy: ${this.engine.performanceTracker.metrics.strategyLevel}
 
 <b>⚠️ Risk Warning:</b>
-High-risk trading. Monitor daily.
+High-risk meme coin trading.
 Can lose all capital. Trade responsibly.
     `.trim(), { parse_mode: 'HTML' });
 
